@@ -279,7 +279,22 @@ class SkillLoader:
             "Load a skill's full content using the appropriate skill tool when needed.\n"
         )
 
+        # Tell the model the canonical skill directories so it does not invent
+        # paths or scan unrelated parts of the disk when the user asks where
+        # skills live.
+        if self._sources:
+            prompt_parts.append("**Skill source directories (the ONLY places skills are loaded from):**")
+            for entry in self._sources:
+                prompt_parts.append(f"- `{entry.source}`: `{entry.directory}`")
+            prompt_parts.append(
+                "Do NOT search any other directory for skills. "
+                "If the user asks where skills are stored, answer with the paths above. "
+                "Custom skills should be added under the `user` source directory."
+            )
+            prompt_parts.append("")
+
+        prompt_parts.append("**Skill catalog:**")
         for skill in self.loaded_skills.values():
-            prompt_parts.append(f"- `{skill.name}`: {skill.description}")
+            prompt_parts.append(f"- `{skill.name}` ({skill.source}): {skill.description}")
 
         return "\n".join(prompt_parts)

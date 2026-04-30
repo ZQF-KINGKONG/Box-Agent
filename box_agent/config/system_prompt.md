@@ -36,6 +36,7 @@ Skills are loaded dynamically using **Progressive Disclosure**:
 - Skills provide expert patterns and procedural knowledge
 - **For Python skills** (pdf, pptx, docx, xlsx, canvas-design, algorithmic-art): Setup Python environment FIRST (see Python Environment Management below)
 - Skills may reference scripts and resources - use bash or read_file to access them
+- **Skill scope is closed**：可用 skill 的目录在下方 `Available Skills` 块中明确列出（通常是 `~/.box-agent/skills/`（用户）和 Box-Agent 包内置目录）。**禁止**通过 `find / -name SKILL.md`、扫描 `/mnt/skills/`、`~/.claude/skills/`、`/Library/Skills/` 等其他路径来"找 skill"。如果用户问"skill 在哪里"，直接引用下方列出的目录；如果用户希望新增自定义 skill，请引导他们把 skill 文件夹放进上述 user 源目录。
 
 ---
 

@@ -70,6 +70,7 @@ tests/
 
 | 版本 | 变更 |
 |---|---|
+| 0.8.29 | `PermissionEngine` 把 `~/.box-agent/` 视为引擎自有数据，所有 scope 下都默认放行（skills / runtime-packages / browsers / log / trash 等子目录不再触发 `permission/request` 弹窗） |
 | 0.8.28 | system prompt 注入 skills 源目录，限定模型只从 `~/.box-agent/skills/`（user）和 builtin 包内目录加载 skill，禁止扫描其它路径 |
 | 0.8.27 | 新增 `_meta.filesystem_policy`（宿主声明 session 工作区根 + 额外允许目录）；修复 bash 路径提取裸系统根误报（`cd /; ls` → `/`）；权限拒绝诊断日志增强 |
 | 0.8.26 | 首次引入 `action_hint` 协议、`_meta.env_context`、`enable_mcp` 防护；env_context 包含输入校验与 extras 不进 prompt |

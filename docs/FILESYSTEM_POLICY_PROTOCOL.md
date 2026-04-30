@@ -1,6 +1,6 @@
 # Filesystem Policy 协议对接文档
 
-> 适用版本：Box-Agent ≥ 0.8.27
+> 适用版本：Box-Agent ≥ 0.8.27（0.8.29 起 `~/.box-agent/` 默认全 scope 放行）
 > 仅 ACP 通道生效；`session/new` 一次性注入，整会话有效。
 
 ## 1. 背景
@@ -133,6 +133,8 @@ def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
 ```
 
 `workspace_dir`（ACP `cwd`）始终允许。`session_workspace_root` 与 `allowed_directories` 是叠加白名单。落在外面会触发 `permission_request` 协商（escalation 到 `user_home` 或 `custom`），而不是直接拒绝。
+
+**0.8.29 起：`~/.box-agent/` 在所有 scope 下都被引擎硬编码放行，不需要进入 `allowed_directories`。**这是 Box-Agent 自有的运行数据目录（skills 内嵌资源、runtime-packages、browsers cache、log、trash 等），属于框架内部，不是用户业务数据。宿主无需为这个目录单独申请权限或在 `_meta.filesystem_policy` 里追加它。
 
 ---
 

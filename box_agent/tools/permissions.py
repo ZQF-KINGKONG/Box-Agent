@@ -165,6 +165,14 @@ class PermissionEngine:
                 log.warning("permission/bad_allowed_dir", extra={"path": d, "error": str(exc)})
         self._allowed_dirs: tuple[Path, ...] = tuple(resolved_dirs)
 
+        # Box-Agent owns ~/.box-agent (skills, runtime-packages, browsers,
+        # trash, log, ...). It is engine-internal data, not user business
+        # data — never prompt for it, regardless of scope or config.
+        try:
+            self._box_agent_dir: Path | None = (self._home_dir / ".box-agent").resolve()
+        except (OSError, RuntimeError):
+            self._box_agent_dir = None
+
     @property
     def policy(self) -> CapabilityPolicy:
         return self._policy
@@ -306,6 +314,10 @@ class PermissionEngine:
     def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
         # workspace_dir is always allowed regardless of scope
         if self._is_inside(resolved, self._workspace_dir):
+            return True
+
+        # ~/.box-agent is engine-owned data — always allowed.
+        if self._box_agent_dir is not None and self._is_inside(resolved, self._box_agent_dir):
             return True
 
         if scope == "user_home":

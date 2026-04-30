@@ -957,3 +957,64 @@ class TestDirectoryGrants:
         store = GrantStore()
         store.add_filesystem_dir_grant(a, "prompt")
         assert not store.has_filesystem_dir_grant(f.resolve())
+
+
+# ── ~/.box-agent always-allowed ──────────────────────────────
+
+
+class TestBoxAgentDirAlwaysAllowed:
+    """~/.box-agent is engine-owned data — always allowed regardless of scope."""
+
+    def _engine_with_box_dir(self, workspace: Path, box_dir: Path, scope: str = "session_workspace") -> PermissionEngine:
+        policy = CapabilityPolicy(
+            filesystem_scope=scope,
+            session_workspace_root=str(workspace),
+        )
+        eng = PermissionEngine(policy, workspace)
+        eng._box_agent_dir = box_dir.resolve()
+        return eng
+
+    def test_box_agent_skill_dir_allowed_session_workspace(
+        self, workspace: Path, tmp_path: Path
+    ):
+        box_dir = tmp_path / "box-agent"
+        skill_file = box_dir / "skills" / "html-ppt" / "references" / "presenter-mode.md"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.touch()
+        eng = self._engine_with_box_dir(workspace, box_dir)
+        decision = eng.check(FILESYSTEM_READ, {"path": str(skill_file)})
+        assert decision.allowed is True
+
+    def test_box_agent_dir_allowed_user_home_scope(
+        self, workspace: Path, tmp_path: Path
+    ):
+        box_dir = tmp_path / "box-agent"
+        f = box_dir / "log" / "session.log"
+        f.parent.mkdir(parents=True)
+        f.touch()
+        eng = self._engine_with_box_dir(workspace, box_dir, scope="user_home")
+        # Force home outside tmp_path so .box-agent is the only thing allowing it
+        eng._home_dir = (tmp_path / "fake-home").resolve()
+        decision = eng.check(FILESYSTEM_READ, {"path": str(f)})
+        assert decision.allowed is True
+
+    def test_box_agent_write_allowed(self, workspace: Path, tmp_path: Path):
+        box_dir = tmp_path / "box-agent"
+        box_dir.mkdir()
+        eng = self._engine_with_box_dir(workspace, box_dir)
+        target = box_dir / "runtime-packages" / "new.whl"
+        decision = eng.check(FILESYSTEM_WRITE, {"path": str(target)})
+        assert decision.allowed is True
+
+    def test_sibling_to_box_agent_still_denied(self, workspace: Path, tmp_path: Path):
+        """`<home>/.box-agent2` must NOT be matched by `<home>/.box-agent` prefix."""
+        box_dir = tmp_path / "box-agent"
+        box_dir.mkdir()
+        sibling = tmp_path / "box-agent2" / "leaked.txt"
+        sibling.parent.mkdir()
+        sibling.touch()
+        eng = self._engine_with_box_dir(workspace, box_dir)
+        # Move home outside tmp_path so the sibling doesn't get user_home grant
+        eng._home_dir = (tmp_path / "fake-home").resolve()
+        decision = eng.check(FILESYSTEM_READ, {"path": str(sibling)})
+        assert decision.allowed is False

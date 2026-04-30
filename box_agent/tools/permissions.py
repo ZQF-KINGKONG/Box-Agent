@@ -85,6 +85,38 @@ class CapabilityPolicy(BaseModel):
             return self
         return self.model_copy(update=updates)
 
+    def with_filesystem_overrides(
+        self,
+        session_workspace_root: str | None = None,
+        allowed_directories: tuple[str, ...] | list[str] | None = None,
+        filesystem_scope: str | None = None,
+    ) -> CapabilityPolicy:
+        """Apply per-session filesystem context from a trusted host.
+
+        Unlike ``with_overrides`` this is intended for the host (e.g. an ACP
+        client like office-raccoon) to declare *where* the session lives —
+        the workspace root and additional whitelisted directories — rather
+        than for runtime escalation. Escalation should still go through
+        in-band ``permission/request`` negotiation.
+
+        Any field left as ``None`` is left unchanged.
+        """
+        updates: dict = {}
+        if session_workspace_root is not None:
+            updates["session_workspace_root"] = session_workspace_root
+        if allowed_directories is not None:
+            # Merge with existing rather than replace, so host injection adds
+            # to whatever is configured globally.
+            merged = list(self.allowed_directories) + [
+                d for d in allowed_directories if d not in self.allowed_directories
+            ]
+            updates["allowed_directories"] = tuple(merged)
+        if filesystem_scope is not None:
+            updates["filesystem_scope"] = filesystem_scope
+        if not updates:
+            return self
+        return self.model_copy(update=updates)
+
 
 class PermissionDecision(BaseModel):
     """Result of a permission check."""
@@ -188,18 +220,21 @@ class PermissionEngine:
         escalation = self._compute_escalation(resolved, scope)
 
         if escalation is None:
-            log.debug(
-                "permission/denied",
-                extra={"path": str(path), "scope": scope, "escalation": "none"},
+            log.warning(
+                "permission/denied path=%s resolved=%s scope=%s op=%s reason=no-escalation",
+                path, resolved, scope, operation,
             )
             return PermissionDecision(
                 allowed=False,
-                reason=f"Access denied: {operation} to {path} is outside all allowed scopes.",
+                reason=(
+                    f"Access denied: {operation} to {path} (resolved: {resolved}) "
+                    f"is outside all allowed scopes (active scope: {scope})."
+                ),
             )
 
-        log.debug(
-            "permission/denied_with_escalation",
-            extra={"path": str(path), "scope": scope, "escalation": escalation},
+        log.warning(
+            "permission/denied path=%s resolved=%s scope=%s op=%s escalation=%s",
+            path, resolved, scope, operation, escalation,
         )
         return PermissionDecision(
             allowed=False,
@@ -398,6 +433,19 @@ _ABS_PATH_RE = re.compile(r'(?:^|\s|["\'])(\/(?:[^\s"\'\\]|\\.)+)')
 _TILDE_PATH_RE = re.compile(r'(?:^|\s|["\';=])(~(?:/[^\s"\'\\;|&]*)?)')
 _HOME_VAR_RE = re.compile(r'(\$HOME(?:/[^\s"\'\\;|&]*)?)')
 
+# Bare system roots that almost never represent a real user write/read target.
+# When the regex catches one of these (typically because of shell punctuation
+# like `cd /; ls` collapsing to `/` after rstrip), we drop it rather than
+# triggering a permission denial that confuses both the LLM and the user.
+_SYSTEM_ROOT_NOISE: frozenset[str] = frozenset({
+    "/",
+    "/.",
+    "/bin", "/sbin", "/usr", "/etc", "/var", "/opt", "/lib", "/lib64",
+    "/proc", "/sys", "/run", "/boot", "/dev",
+    "/private", "/Library", "/System", "/Applications",
+    "/cores", "/Volumes", "/Network", "/tmp",
+})
+
 
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute paths from a shell command (best-effort).
@@ -412,6 +460,11 @@ def extract_absolute_paths(command: str) -> list[str]:
     for m in _ABS_PATH_RE.finditer(command):
         p = m.group(1).rstrip(";")
         if p in ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"):
+            continue
+        # Drop bare system roots that almost certainly came from shell
+        # punctuation collapsing the regex match (e.g. `cd /; ls` →  "/").
+        # These are not real targets the AI is trying to access.
+        if p in _SYSTEM_ROOT_NOISE:
             continue
         if p not in seen:
             seen.add(p)

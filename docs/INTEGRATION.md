@@ -13,6 +13,7 @@
 |---|---|---|---|---|
 | **Action Hint** | 后端 → 前端 | 模型 markdown 围栏块 | [ACTION_HINT_PROTOCOL.md](./ACTION_HINT_PROTOCOL.md) | 模型在合适场景输出 ```action_hint``` 块，前端解析为可点击设置入口 |
 | **Env Context** | 前端 → 后端 | `session/new._meta.env_context` | [ENV_CONTEXT_PROTOCOL.md](./ENV_CONTEXT_PROTOCOL.md) | 宿主把 CLI 路径 / 平台 / 浏览器工具状态等已知事实喂给模型，避免它否认已可用的工具 |
+| **Filesystem Policy** | 前端 → 后端 | `session/new._meta.filesystem_policy` | [FILESYSTEM_POLICY_PROTOCOL.md](./FILESYSTEM_POLICY_PROTOCOL.md) | 宿主声明 session 工作区根 + 额外允许目录，避免反复触发 `permission/request` 协商 |
 
 > 已经存在但本次未变更的扩展点：`_meta.session_mode`（会话模式）、`_meta.deep_think`（深度思考开关）、`_meta.officev3_permissions_override`（已废弃）。
 
@@ -69,6 +70,7 @@ tests/
 
 | 版本 | 变更 |
 |---|---|
+| 0.8.27 | 新增 `_meta.filesystem_policy`（宿主声明 session 工作区根 + 额外允许目录）；修复 bash 路径提取裸系统根误报（`cd /; ls` → `/`）；权限拒绝诊断日志增强 |
 | 0.8.26 | 首次引入 `action_hint` 协议、`_meta.env_context`、`enable_mcp` 防护；env_context 包含输入校验与 extras 不进 prompt |
 | 0.8.25 | `context_window` / `max_output_tokens` 配置化（与 ACP 无关） |
 | 0.8.24 | `max_tokens` 截断防护（与 ACP 无关） |

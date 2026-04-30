@@ -245,14 +245,47 @@ class BoxACPAgent:
                             "use in-band permission/request negotiation instead"
                         ),
                     )
-                # Always use the base policy — overrides no longer applied
+
+                # Host-supplied filesystem context: workspace root and any
+                # extra allowed directories the host wants this session to
+                # see. This is *context*, not escalation — escalation still
+                # goes through in-band permission/request.
+                fs_meta = meta.get("filesystem_policy") if isinstance(meta, dict) else None
+                if isinstance(fs_meta, dict):
+                    swr = fs_meta.get("session_workspace_root")
+                    extra_dirs = fs_meta.get("allowed_directories")
+                    fs_scope = fs_meta.get("filesystem_scope")
+                    if isinstance(swr, str) and not swr.strip():
+                        swr = None
+                    if isinstance(extra_dirs, list):
+                        extra_dirs = tuple(d for d in extra_dirs if isinstance(d, str) and d.strip())
+                    else:
+                        extra_dirs = None
+                    if not isinstance(fs_scope, str):
+                        fs_scope = None
+                    base_policy = base_policy.with_filesystem_overrides(
+                        session_workspace_root=swr,
+                        allowed_directories=extra_dirs,
+                        filesystem_scope=fs_scope,
+                    )
+                    log.info(
+                        "session/permissions",
+                        session_id=session_id,
+                        message=(
+                            f"filesystem_policy applied: session_workspace_root={swr!r}, "
+                            f"extra_dirs={extra_dirs!r}, scope={fs_scope!r}"
+                        ),
+                    )
+
                 effective_policy = base_policy
 
                 grant_store = GrantStore()
                 perm_engine = PermissionEngine(effective_policy, workspace, grant_store=grant_store)
                 log.info("session/permissions", session_id=session_id,
                          message=f"PermissionEngine created: scope={effective_policy.filesystem_scope}, "
-                                 f"openclaw={effective_policy.openclaw_import_enabled}")
+                                 f"openclaw={effective_policy.openclaw_import_enabled}, "
+                                 f"swr={effective_policy.session_workspace_root!r}, "
+                                 f"allowed_dirs={list(effective_policy.allowed_directories)!r}")
             except Exception as exc:
                 log.error("permission/init", message=f"Failed to build PermissionEngine: {exc}")
                 # Use a restrictive fallback engine (session_workspace scope, no openclaw)

@@ -335,6 +335,51 @@ class TestExtractAbsolutePaths:
         result = extract_absolute_paths("cat /etc/hosts /etc/hosts")
         assert result.count("/etc/hosts") == 1
 
+    def test_bare_root_dropped(self):
+        """`cd /; ls` should not extract bare `/` — that was a false positive
+        producing 'write to / outside all allowed scopes'."""
+        result = extract_absolute_paths("cd /; ls")
+        assert "/" not in result
+
+    def test_bare_system_root_dropped(self):
+        """Bare system roots like /etc, /usr, /opt are not real targets."""
+        for cmd in ("cd /etc; ls", "ls /usr ", "echo /opt;"):
+            result = extract_absolute_paths(cmd)
+            assert "/etc" not in result
+            assert "/usr" not in result
+            assert "/opt" not in result
+
+    def test_subpath_under_system_root_kept(self):
+        """A real subpath under a system root is still extracted."""
+        assert "/etc/hosts" in extract_absolute_paths("cat /etc/hosts")
+        assert "/usr/local/bin/foo" in extract_absolute_paths(
+            "cp x /usr/local/bin/foo"
+        )
+
+
+# ── CapabilityPolicy.with_filesystem_overrides ───────────────
+
+
+class TestFilesystemOverrides:
+    def test_session_workspace_root_override(self):
+        base = CapabilityPolicy(session_workspace_root="/old/root")
+        new = base.with_filesystem_overrides(session_workspace_root="/new/root")
+        assert new.session_workspace_root == "/new/root"
+        assert base.session_workspace_root == "/old/root"  # immutable
+
+    def test_allowed_directories_merged(self):
+        base = CapabilityPolicy(allowed_directories=("/a",))
+        new = base.with_filesystem_overrides(allowed_directories=["/b", "/a"])
+        assert "/a" in new.allowed_directories
+        assert "/b" in new.allowed_directories
+        # No duplicate
+        assert list(new.allowed_directories).count("/a") == 1
+
+    def test_no_args_returns_self(self):
+        base = CapabilityPolicy(session_workspace_root="/r")
+        new = base.with_filesystem_overrides()
+        assert new is base
+
 
 # ── Config YAML parsing ─────────────────────────────────────
 

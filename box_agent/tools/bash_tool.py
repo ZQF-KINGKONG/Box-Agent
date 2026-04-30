@@ -6,6 +6,7 @@ Supports both bash (Unix/Linux/macOS) and PowerShell (Windows).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import platform
 import re
@@ -26,6 +27,8 @@ from .safety import (
 
 if TYPE_CHECKING:
     from .permissions import PermissionEngine
+
+log = logging.getLogger(__name__)
 
 # Shells whose syntax is POSIX-compatible (supports &&, ||, for/do/done, etc.)
 _POSIX_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "ash"})
@@ -453,6 +456,10 @@ Examples:
                     from .permissions import FILESYSTEM_READ, FILESYSTEM_WRITE, extract_absolute_paths
 
                     abs_paths = extract_absolute_paths(command)
+                    log.debug(
+                        "bash/perm/extracted paths=%s reason=%s cmd=%r",
+                        abs_paths, escape_reason, command[:200],
+                    )
 
                     # CONSERVATIVE: if no absolute paths extracted, we cannot verify safety.
                     # deny the command rather than silently allowing it.
@@ -487,9 +494,18 @@ Examples:
                             tool_name="bash",
                         )
                         if not decision.allowed:
+                            log.warning(
+                                "bash/perm/denied path=%s cap=%s extracted=%s cmd=%r",
+                                p, cap, abs_paths, command[:200],
+                            )
+                            extracted_summary = (
+                                f" Extracted paths from command: {abs_paths}."
+                                if len(abs_paths) > 1
+                                else ""
+                            )
                             return BashOutputResult(
                                 success=False,
-                                error=decision.reason,
+                                error=(decision.reason or "Permission denied") + extracted_summary,
                                 stdout="",
                                 stderr=decision.reason or "Permission denied",
                                 exit_code=1,

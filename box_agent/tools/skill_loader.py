@@ -79,7 +79,7 @@ class SkillLoader:
 
     def __init__(
         self,
-        sources: Optional[List[Tuple[str | Path, SkillSource]]] = None,
+        sources: Optional[List[Tuple[str | Path, SkillSource]] | str | Path] = None,
         skills_dir: Optional[str] = None,
     ):
         """
@@ -87,12 +87,15 @@ class SkillLoader:
 
         Args:
             sources: Ordered list of (directory, source_label) tuples. Earlier
-                entries take priority on name conflicts. Use this for the
-                multi-source workflow (user + builtin).
-            skills_dir: Legacy single-directory argument. Treated as a single
+                entries take priority on name conflicts. Also accepts a single
+                str/Path for legacy single-directory usage (treated as
+                "builtin" source).
+            skills_dir: Legacy single-directory keyword. Treated as a single
                 "builtin" source when sources is not provided.
         """
-        if sources is None:
+        if isinstance(sources, (str, Path)):
+            sources = [(sources, "builtin")]
+        elif sources is None:
             legacy = skills_dir or "./skills"
             sources = [(legacy, "builtin")]
 

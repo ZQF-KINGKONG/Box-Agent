@@ -1,6 +1,6 @@
 ---
 name: html-ppt
-description: HTML PPT Studio — author professional static HTML presentations using CDN-hosted themes, layouts, animations, and runtime assets. Use when the user explicitly asks to create, generate, design, package, or deliver a slide-based output, such as PPT, slides, deck, keynote-style presentation, HTML presentation, reveal-style deck, slideshow, 幻灯片, 做一份 PPT, 做一份 slides, 技术分享 PPT, pitch deck, report deck, or multi-page 小红书图文. Do not use this skill when the user only asks to polish text, rewrite a speech script, summarize content, or brainstorm an outline without requesting a slide deliverable.
+description: HTML PPT Studio —— 制作专业的静态 HTML 演示文稿，利用 CDN 托管的主题、布局、动画和运行时资源。当用户明确要求创建设计感强的html类型ppt，Reveal风格，小红书图文，有主题的时候才可以使用。禁用场景，润色，改写，总结，无大纲。
 ---
 
 ---

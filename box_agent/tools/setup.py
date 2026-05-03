@@ -28,6 +28,38 @@ if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
 
 
+# Single source of truth for the sandbox / Python-execution block injected
+# into the system prompt. Both CLI and ACP paths substitute {SANDBOX_INFO}
+# with this text so the model gets one consistent description of:
+#   - where Python actually runs (isolated Jupyter kernel, not host python),
+#   - how to install extra packages (inside execute_code via !pip, never bash),
+#   - which packages are pre-bundled,
+#   - document processing priorities that depend on sandbox packages.
+SANDBOX_INFO_PROMPT = """
+## Python Sandbox (execute_code)
+
+Python 代码通过 `execute_code` 工具在**隔离的 Jupyter kernel**（沙箱）中运行，和 host Python 相互独立：
+
+- **运行位置**：沙箱 kernel 持有自己的 `sys.executable`。沙箱 cwd 已是 workspace，保存文件用相对路径（如 `plt.savefig("chart.png")`），禁止写 `/mnt/data/`、`sandbox:` 前缀。
+- **状态持久**：同一会话中变量、import、已加载数据保留到下一次 `execute_code` 调用；不要把长流程拆成互相割裂的片段。
+- **预装包**：`pandas`、`numpy`、`matplotlib`、`seaborn`、`scikit-learn`、`openpyxl`、`xlrd`、`python-docx`、`pypdf`、`pdfplumber`、`reportlab`、`python-pptx`，以及标准库。
+- **安装额外包**：在 `execute_code` 里用 Jupyter magic，例如 `!pip install <pkg>`。**禁止**用 `bash` 跑 `pip install` / `uv pip install` 装包给沙箱——bash 命令走的是 host 解释器，装了沙箱也用不到。
+- **何时用 execute_code**：数据分析与可视化、读写 CSV/Excel/JSON/图片、处理 Word/PDF/PPT、多步计算、需要保留状态的脚本。
+- **何时用 bash**：仓库代码编辑、跑测试/构建、系统命令、git 操作——这些和沙箱无关。
+
+### 文档处理优先级（沙箱包优先）
+
+对 Excel / Word / PDF / PowerPoint 文件，优先在沙箱里用 Python 包，避免外部命令行工具：
+
+- **Excel (.xlsx/.xls)**：`pandas` + `openpyxl` 读写，`xlrd` 读 `.xls`。只有需要公式重算时再考虑 LibreOffice。
+- **Word (.docx)**：`python-docx` 读写；只有需要跨格式转换时才用 `pandoc`。
+- **PDF**：`pypdf`（合并/拆分）、`pdfplumber`（文本/表格抽取）、`reportlab`（生成）。
+- **PowerPoint (.pptx)**：`python-pptx` 读写；复杂版式或模板生成再走对应 skill。
+
+**Skill vs Sandbox**：数据抽取、简单编辑、格式转换、表格处理 → 沙箱；复杂版式、OOXML 精细操作、模板化生成、公式重算 → 先加载对应 skill。
+"""
+
+
 # Minimal color constants used in status messages.
 # The full ``Colors`` class lives in ``cli.py``; we only need a small subset.
 class Colors:

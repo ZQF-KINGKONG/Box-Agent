@@ -14,6 +14,12 @@ from box_agent.llm import AnthropicClient, OpenAIClient
 from box_agent.retry import RetryConfig
 from box_agent.schema import Message
 
+_CONFIG_PATH = Path("box_agent/config/config.yaml")
+pytestmark = pytest.mark.skipif(
+    not _CONFIG_PATH.exists(),
+    reason="box_agent/config/config.yaml missing — integration tests skipped",
+)
+
 
 def load_config():
     """Load config from config.yaml."""

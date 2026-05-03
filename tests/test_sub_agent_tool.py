@@ -38,7 +38,7 @@ def _make_llm(text: str = "summary", tool_calls=None):
     """Return a mock LLM whose generate_stream yields the given text then finishes."""
     llm = AsyncMock()
 
-    async def fake_stream(*, messages, tools):
+    async def fake_stream(*, messages, tools, **kwargs):
         yield StreamEvent(type="text", delta=text)
         yield StreamEvent(
             type="finish",
@@ -120,7 +120,7 @@ async def test_llm_exception_returns_error():
     """If the LLM raises, ToolResult should contain the error info."""
     llm = AsyncMock()
 
-    async def boom(*, messages, tools):
+    async def boom(*, messages, tools, **kwargs):
         raise RuntimeError("API timeout")
         yield  # make it an async generator  # noqa: E501
 
@@ -138,7 +138,7 @@ async def test_max_steps_respected():
 
     call_count = 0
 
-    async def looping_stream(*, messages, tools):
+    async def looping_stream(*, messages, tools, **kwargs):
         nonlocal call_count
         call_count += 1
         # Always request a tool call to keep the loop going
@@ -199,7 +199,7 @@ async def test_parallel_execution_in_core():
     # LLM: first call returns 2 sub_agent tool calls, second call ends
     call_num = 0
 
-    async def fake_stream(*, messages, tools):
+    async def fake_stream(*, messages, tools, **kwargs):
         nonlocal call_num
         call_num += 1
         if call_num == 1:

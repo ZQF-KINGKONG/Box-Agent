@@ -1,0 +1,53 @@
+"""Shared pytest fixtures and helpers.
+
+Integration tests that hit real LLM/MCP endpoints are skipped automatically
+when their dependencies (config.yaml, mcp.json, valid API key) are missing,
+so the suite can run in CI / clean checkouts.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_yaml_or_skip(rel_path: str) -> dict[str, Any]:
+    config_path = _REPO_ROOT / rel_path
+    if not config_path.exists():
+        pytest.skip(f"{rel_path} not present — integration test skipped")
+    with open(config_path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _load_json_or_skip(rel_path: str) -> dict[str, Any]:
+    config_path = _REPO_ROOT / rel_path
+    if not config_path.exists():
+        pytest.skip(f"{rel_path} not present — integration test skipped")
+    with open(config_path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def llm_config() -> dict[str, Any]:
+    """Load box_agent/config/config.yaml or skip.
+
+    Also skips when api_key is missing or is the example placeholder, since
+    such tests would only fail on the network call.
+    """
+    cfg = _load_yaml_or_skip("box_agent/config/config.yaml")
+    api_key = cfg.get("api_key") or ""
+    if not api_key or api_key.startswith("your-") or api_key == "sk-...":
+        pytest.skip("api_key not configured — integration test skipped")
+    return cfg
+
+
+@pytest.fixture
+def mcp_config_optional() -> dict[str, Any]:
+    """Load box_agent/config/mcp.json or skip."""
+    return _load_json_or_skip("box_agent/config/mcp.json")

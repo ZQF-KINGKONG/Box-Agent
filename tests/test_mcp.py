@@ -22,6 +22,8 @@ from box_agent.tools.mcp_loader import (
 def mcp_config():
     """Read MCP configuration."""
     mcp_config_path = Path("box_agent/config/mcp.json")
+    if not mcp_config_path.exists():
+        pytest.skip("box_agent/config/mcp.json missing — integration test skipped")
     with open(mcp_config_path, encoding="utf-8") as f:
         return json.load(f)
 

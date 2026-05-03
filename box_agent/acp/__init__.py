@@ -63,7 +63,7 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.agent import Agent
-from box_agent.tools.setup import add_workspace_tools, await_mcp_tools, initialize_base_tools
+from box_agent.tools.setup import SANDBOX_INFO_PROMPT, add_workspace_tools, await_mcp_tools, initialize_base_tools
 from box_agent.config import Config
 from box_agent.core import run_agent_loop
 from box_agent.events import (
@@ -1057,34 +1057,13 @@ async def run_acp_server(config: Config | None = None) -> None:
             system_prompt = "You are a helpful AI assistant."
 
         # Inject SANDBOX_INFO (ACP always enables sandbox)
-        sandbox_info = """
-## Sandbox Execution Mode (Enabled)
-
-You have access to the `execute_code` tool which runs Python code in an isolated Jupyter kernel.
-
-**When to use execute_code:**
-- Data analysis and visualization (pandas, matplotlib, seaborn)
-- Processing files (CSV, Excel, JSON, images)
-- Document operations (Excel, Word, PDF, PowerPoint)
-- Running Python scripts with persistent state
-- Complex calculations requiring multiple steps
-
-**Sandbox workspace:** Code runs in an isolated directory. Files saved are stored in the sandbox workspace.
-
-**Best practices:**
-- Break complex analysis into smaller code blocks
-- Use print() to output intermediate results
-- Clean up large data structures when done
-- Check for errors after each step
-
-**Available packages:** pandas, numpy, matplotlib, seaborn, scikit-learn, openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx, and more via standard library.
-"""
-        system_prompt = system_prompt.replace("{SANDBOX_INFO}", sandbox_info)
+        system_prompt = system_prompt.replace("{SANDBOX_INFO}", SANDBOX_INFO_PROMPT)
 
         if skill_loader:
             meta = skill_loader.get_skills_metadata_prompt()
-            if meta:
-                system_prompt = f"{system_prompt.rstrip()}\n\n{meta}"
+            system_prompt = system_prompt.replace("{SKILLS_METADATA}", meta or "")
+        else:
+            system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
         log.info("server/start", message=f"LLM: {config.llm.model}, provider: {config.llm.provider}")
         log.info("server/start", message=f"Tools loaded: {len(base_tools)} base tools")

@@ -11,6 +11,12 @@ from box_agent.agent import Agent
 from box_agent.config import Config
 from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 
+_CONFIG_PATH = Path("box_agent/config/config.yaml")
+pytestmark = pytest.mark.skipif(
+    not _CONFIG_PATH.exists(),
+    reason="box_agent/config/config.yaml missing — integration tests skipped",
+)
+
 
 @pytest.mark.asyncio
 async def test_agent_simple_task():

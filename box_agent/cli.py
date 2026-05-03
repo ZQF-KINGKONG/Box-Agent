@@ -34,7 +34,7 @@ from box_agent.schema import LLMProvider
 from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import cleanup_mcp_connections
-from box_agent.tools.setup import add_workspace_tools, await_mcp_tools, initialize_base_tools
+from box_agent.tools.setup import SANDBOX_INFO_PROMPT, add_workspace_tools, await_mcp_tools, initialize_base_tools
 from box_agent.utils import calculate_display_width
 
 
@@ -965,29 +965,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
 
     # 6.5 Inject Sandbox info if enabled
     if sandbox_mode:
-        sandbox_info = """
-## Sandbox Execution Mode (Enabled)
-
-You have access to the `execute_code` tool which runs Python code in an isolated Jupyter kernel.
-
-**When to use execute_code:**
-- Data analysis and visualization (pandas, matplotlib, seaborn)
-- Processing files (CSV, Excel, JSON, images)
-- Document operations (Excel, Word, PDF, PowerPoint)
-- Running Python scripts with persistent state
-- Complex calculations requiring multiple steps
-
-**Sandbox workspace:** Code runs in an isolated directory. Files saved are stored in the sandbox workspace.
-
-**Best practices:**
-- Break complex analysis into smaller code blocks
-- Use print() to output intermediate results
-- Clean up large data structures when done
-- Check for errors after each step
-
-**Available packages:** pandas, numpy, matplotlib, seaborn, scikit-learn, openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx, and more via standard library.
-"""
-        system_prompt = system_prompt.replace("{SANDBOX_INFO}", sandbox_info)
+        system_prompt = system_prompt.replace("{SANDBOX_INFO}", SANDBOX_INFO_PROMPT)
         print(f"{Colors.GREEN}✅ Sandbox mode enabled with execute_code tool{Colors.RESET}")
     else:
         # Remove placeholder if sandbox not enabled

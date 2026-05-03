@@ -9,6 +9,12 @@ import yaml
 from box_agent.llm import LLMClient
 from box_agent.schema import LLMProvider, Message
 
+_CONFIG_PATH = Path("box_agent/config/config.yaml")
+pytestmark = pytest.mark.skipif(
+    not _CONFIG_PATH.exists(),
+    reason="box_agent/config/config.yaml missing — integration tests skipped",
+)
+
 
 @pytest.mark.asyncio
 async def test_wrapper_anthropic_provider():

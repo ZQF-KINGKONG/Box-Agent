@@ -257,8 +257,15 @@ class BashTool(Tool):
     - Unix/Linux/macOS: bash
     """
 
-    def __init__(self, workspace_dir: str | None = None, allow_full_access: bool = True, non_interactive: bool = False,
-                 sandbox_venv_path: str | None = None, permission_engine: PermissionEngine | None = None):
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        allow_full_access: bool = True,
+        non_interactive: bool = False,
+        sandbox_venv_path: str | None = None,
+        permission_engine: PermissionEngine | None = None,
+        runtime_env: dict[str, str] | None = None,
+    ):
         """Initialize BashTool with OS-specific shell detection.
 
         Args:
@@ -270,6 +277,7 @@ class BashTool(Tool):
             sandbox_venv_path: If set, prepend venv bin to PATH and set VIRTUAL_ENV
                                so subprocess commands use the sandbox Python.
             permission_engine: If provided, use capability-based permission checks.
+            runtime_env: Extra runtime environment variables exposed to commands.
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
@@ -285,14 +293,17 @@ class BashTool(Tool):
         self._perm = permission_engine
         self._subprocess_env = None
         self._use_login_shell = True
-        if sandbox_venv_path:
+        if sandbox_venv_path or runtime_env:
             self._subprocess_env = os.environ.copy()
+        if sandbox_venv_path:
             self._subprocess_env["VIRTUAL_ENV"] = sandbox_venv_path
             venv_bin = os.path.join(sandbox_venv_path, "bin")
             self._subprocess_env["PATH"] = venv_bin + os.pathsep + self._subprocess_env.get("PATH", "")
             # Don't use login shell when sandbox venv is active — profile
             # scripts (pyenv, asdf, conda) would override the venv PATH.
             self._use_login_shell = False
+        if runtime_env:
+            self._subprocess_env.update(runtime_env)
 
     async def _create_subprocess(
         self, command: str, *, merge_stderr: bool = False,

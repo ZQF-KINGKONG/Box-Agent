@@ -23,6 +23,13 @@ import sys
 import tarfile
 from pathlib import Path
 
+# Make `python scripts/build_runtime.py` work from a source checkout even when
+# the package has not been installed into the active environment.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from box_agent.tools.runtime import DEFAULT_NODE_VERSION, NodeRuntimeManager
+
 # ── Platform detection ───────────────────────────────────────
 
 def detect_platform() -> tuple[str, str]:
@@ -55,7 +62,7 @@ def detect_platform() -> tuple[str, str]:
 def build_runtime(version: str, output_dir: Path) -> Path:
     """Build the runtime artifact and return the archive path."""
     plat, arch = detect_platform()
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = PROJECT_ROOT
 
     print(f"Building box-agent-runtime v{version} for {plat}-{arch}")
     print(f"Project root: {project_root}")
@@ -253,6 +260,11 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
 
+    if plat == "darwin" and arch in {"arm64", "x64"}:
+        _install_bundled_node_runtime(runtime_dir, plat=plat, arch=arch)
+    else:
+        print(f"\nSkipping bundled Node runtime for unsupported platform: {plat}-{arch}")
+
     print(f"\nRuntime directory assembled: {runtime_dir}")
     print(f"  manifest.json: {json.dumps(manifest)}")
 
@@ -275,6 +287,38 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         f.unlink(missing_ok=True)
 
     return archive_path
+
+
+def _install_bundled_node_runtime(runtime_dir: Path, *, plat: str, arch: str) -> None:
+    """Install a relocatable macOS Node runtime into the runtime artifact."""
+    node_root = runtime_dir / "runtimes" / "node"
+    platform_id = f"{plat}-{arch}"
+    print(f"\nInstalling bundled Node.js runtime {DEFAULT_NODE_VERSION} for {platform_id}...")
+    manager = NodeRuntimeManager(root=node_root)
+    manager.install_macos(version=DEFAULT_NODE_VERSION, platform_id=platform_id)
+    shutil.rmtree(node_root / "downloads", ignore_errors=True)
+    _relativize_node_manifest(node_root)
+    print(f"Bundled Node runtime: {node_root}")
+
+
+def _relativize_node_manifest(node_root: Path) -> None:
+    """Rewrite Node manifest paths relative to node_root for relocatable archives."""
+    manifest_path = node_root / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    active = data.get("active")
+    if not isinstance(active, dict):
+        raise RuntimeError(f"Invalid Node manifest: {manifest_path}")
+    for key in ("node", "npm", "npx", "node_modules"):
+        value = active.get(key)
+        if not isinstance(value, str):
+            continue
+        path = Path(value)
+        if not path.is_absolute():
+            continue
+        active[key] = str(path.resolve().relative_to(node_root.resolve()))
+    tmp_path = manifest_path.with_suffix(".json.tmp")
+    tmp_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(tmp_path, manifest_path)
 
 
 # ── CLI ──────────────────────────────────────────────────────

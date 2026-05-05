@@ -92,6 +92,11 @@ from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.schema import LLMProvider, Message
 from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+from box_agent.tools.runtime import (
+    SkillRuntimeContext,
+    build_skill_runtime_context,
+    build_skill_runtime_prompt,
+)
 
 from .debug_logger import acp_logger as log
 
@@ -134,6 +139,7 @@ class SessionState:
     memory_block: str | None = None  # cached memory recall, re-applied when mode switches
     thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
     env_context: "EnvContext | None" = None  # cached env_context, re-applied when mode switches
+    skill_runtime_context: "SkillRuntimeContext | None" = None
 
 
 class BoxACPAgent:
@@ -296,12 +302,18 @@ class BoxACPAgent:
                 grant_store = GrantStore()
                 perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
 
+        skill_runtime_context = build_skill_runtime_context(
+            sandbox_mode=True,
+            env_context=env_context,
+        )
+
         # Build per-session system prompt with conditional mode injection
         system_prompt = self._build_session_prompt(
             session_mode,
             workspace=workspace,
             policy=effective_policy,
             env_context=env_context,
+            skill_runtime_context=skill_runtime_context,
         )
 
         # Inject memory context
@@ -328,6 +340,7 @@ class BoxACPAgent:
             output=lambda msg: sys.stderr.write(msg + "\n"),
             llm=self._llm,
             permission_engine=perm_engine,
+            skill_runtime_context=skill_runtime_context,
         )
         agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace), token_limit=self._config.llm.context_token_limit, thinking_enabled=deep_think)
 
@@ -363,6 +376,7 @@ class BoxACPAgent:
             memory_block=memory_block,
             thinking_enabled=deep_think,
             env_context=env_context,
+            skill_runtime_context=skill_runtime_context,
         )
 
         tool_names = [t.name for t in tools]
@@ -447,6 +461,7 @@ class BoxACPAgent:
         workspace: Path | None = None,
         policy: CapabilityPolicy | None = None,
         env_context: EnvContext | None = None,
+        skill_runtime_context: SkillRuntimeContext | None = None,
     ) -> str:
         """Build system prompt with conditional mode-specific injection."""
         _MODE_PROMPT_MAP = {
@@ -463,6 +478,12 @@ class BoxACPAgent:
         env_prompt = build_env_context_prompt(env_context)
         if env_prompt:
             base_prompt = f"{base_prompt.rstrip()}\n\n{env_prompt}"
+
+        runtime_context = skill_runtime_context or build_skill_runtime_context(
+            sandbox_mode=True,
+            env_context=env_context,
+        )
+        base_prompt = f"{base_prompt.rstrip()}\n\n{build_skill_runtime_prompt(runtime_context)}"
 
         hints_prompt = self._build_action_hints_prompt()
         if hints_prompt:
@@ -509,6 +530,7 @@ class BoxACPAgent:
             workspace=state.agent.workspace_dir,
             policy=state.permission_engine.policy if state.permission_engine else None,
             env_context=state.env_context,
+            skill_runtime_context=state.skill_runtime_context,
         )
         if state.memory_block:
             new_prompt = f"{new_prompt.rstrip()}\n\n{state.memory_block}"

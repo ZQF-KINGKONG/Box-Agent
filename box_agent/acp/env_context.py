@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 logger = logging.getLogger(__name__)
 
 _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"cli", "platform", "browser_tools", "memory_configured"}
+    {"cli", "platform", "browser_tools", "memory_configured", "runtimes"}
 )
 
 _MAX_PATH_LEN = 512
@@ -51,6 +51,29 @@ def _has_unsafe_chars(value: str) -> bool:
     if "`" in value:
         return True
     return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
+
+
+def _is_absolute_path(value: str) -> bool:
+    # Accept POSIX absolute paths; tolerate Windows ``C:\...`` style.
+    return value.startswith("/") or (len(value) >= 3 and value[1:3] == ":\\")
+
+
+def _sanitize_path(owner: str, raw: Any) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        logger.warning("env_context.%s: drop — value is %s, not str/null", owner, type(raw).__name__)
+        return None
+    if len(raw) > _MAX_PATH_LEN:
+        logger.warning("env_context.%s: drop — path exceeds %d chars", owner, _MAX_PATH_LEN)
+        return None
+    if _has_unsafe_chars(raw):
+        logger.warning("env_context.%s: drop — unsafe chars in path", owner)
+        return None
+    if not _is_absolute_path(raw):
+        logger.warning("env_context.%s: drop — path %r is not absolute", owner, raw)
+        return None
+    return raw
 
 
 def _sanitize_cli(raw: Any) -> dict[str, str | None]:
@@ -75,20 +98,9 @@ def _sanitize_cli(raw: Any) -> dict[str, str | None]:
         if value is None:
             cleaned[name] = None
             continue
-        if not isinstance(value, str):
-            logger.warning("env_context.cli[%s]: drop — value is %s, not str/null", name, type(value).__name__)
-            continue
-        if len(value) > _MAX_PATH_LEN:
-            logger.warning("env_context.cli[%s]: drop — path exceeds %d chars", name, _MAX_PATH_LEN)
-            continue
-        if _has_unsafe_chars(value):
-            logger.warning("env_context.cli[%s]: drop — unsafe chars in path", name)
-            continue
-        if not (value.startswith("/") or (len(value) >= 3 and value[1:3] == ":\\")):
-            # Accept POSIX absolute paths; tolerate Windows ``C:\...`` style.
-            logger.warning("env_context.cli[%s]: drop — path %r is not absolute", name, value)
-            continue
-        cleaned[name] = value
+        path = _sanitize_path(f"cli[{name}]", value)
+        if path is not None:
+            cleaned[name] = path
     return cleaned
 
 
@@ -104,6 +116,56 @@ def _sanitize_platform(raw: Any) -> str | None:
     return raw
 
 
+def _sanitize_provider(raw: Any) -> str | None:
+    if raw is None or not isinstance(raw, str):
+        return None
+    if not raw or len(raw) > _MAX_NAME_LEN:
+        return None
+    if _has_unsafe_chars(raw):
+        return None
+    if not all(ch in _PLATFORM_ALLOWED_CHARS for ch in raw):
+        return None
+    return raw
+
+
+def _sanitize_runtimes(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return {}
+
+    allowed_runtime_fields = {
+        "python": ("path", "ready", "provider"),
+        "node": ("path", "npm", "npx", "node_modules", "ready", "provider"),
+    }
+    path_fields = {"path", "npm", "npx", "node_modules"}
+    cleaned: dict[str, dict[str, Any]] = {}
+
+    for kind, value in raw.items():
+        if kind not in allowed_runtime_fields or not isinstance(value, dict):
+            logger.warning("env_context.runtimes: drop unsupported runtime %r", kind)
+            continue
+
+        runtime: dict[str, Any] = {}
+        for field_name in allowed_runtime_fields[kind]:
+            if field_name not in value:
+                continue
+            field_value = value[field_name]
+            if field_name in path_fields:
+                path = _sanitize_path(f"runtimes.{kind}.{field_name}", field_value)
+                if path is not None:
+                    runtime[field_name] = path
+            elif field_name == "ready":
+                if isinstance(field_value, bool):
+                    runtime[field_name] = field_value
+            elif field_name == "provider":
+                provider = _sanitize_provider(field_value)
+                if provider is not None:
+                    runtime[field_name] = provider
+
+        if runtime:
+            cleaned[kind] = runtime
+    return cleaned
+
+
 class BrowserToolsState(BaseModel):
     """Whether host-side browser tooling is installed/enabled.
 
@@ -115,6 +177,19 @@ class BrowserToolsState(BaseModel):
 
     installed: bool | None = None
     enabled: bool | None = None
+
+
+class HostRuntime(BaseModel):
+    """Sanitized host-provided runtime metadata."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str | None = None
+    npm: str | None = None
+    npx: str | None = None
+    node_modules: str | None = None
+    ready: bool | None = None
+    provider: str | None = None
 
 
 class EnvContext(BaseModel):
@@ -132,6 +207,7 @@ class EnvContext(BaseModel):
     platform: str | None = None
     browser_tools: BrowserToolsState | None = None
     memory_configured: bool | None = None
+    runtimes: dict[str, HostRuntime] = Field(default_factory=dict)
     extras: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
@@ -157,6 +233,8 @@ class EnvContext(BaseModel):
             known["cli"] = _sanitize_cli(known["cli"])
         if "platform" in known:
             known["platform"] = _sanitize_platform(known["platform"])
+        if "runtimes" in known:
+            known["runtimes"] = _sanitize_runtimes(known["runtimes"])
 
         try:
             ctx = cls.model_validate(known)

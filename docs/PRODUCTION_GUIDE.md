@@ -75,9 +75,11 @@ After extraction:
 box-agent-runtime/
 ├── manifest.json     # Machine-readable metadata
 ├── VERSION           # Plain text version string
-└── bin/
-    ├── box-agent-acp # Main executable
-    └── _internal/    # Bundled Python runtime + packages
+├── bin/
+│   ├── box-agent-acp # Main executable
+│   └── _internal/    # Bundled Python runtime + packages
+└── runtimes/
+    └── node/         # Bundled macOS Node.js runtime for skill scripts
 ```
 
 #### Spawning from Host Process
@@ -127,6 +129,12 @@ uv run python scripts/build_runtime.py [--version X.Y.Z] [--output dist/runtime]
 Produces `dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz`.
 
 Supported platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`.
+
+macOS runtime artifacts additionally bundle a pinned Node.js runtime under
+`box-agent-runtime/runtimes/node/`. The Node manifest uses relative paths so the
+runtime directory remains relocatable after extraction. Runtime npm state
+(`npm_config_cache`, `npm_config_prefix`, and `NODE_PATH`) is still kept under
+the user's `~/.box-agent/runtimes/node/sandbox/` directory.
 
 ### 3.3 Container Deployment Recommendations
 
@@ -239,4 +247,3 @@ chmod 750 /app/workspace  # Owner: read/write/execute, Group: read/execute
 chmod 700 /etc/agent      # Config directory only accessible by owner
 chmod 600 /etc/agent/*.yaml  # Config files only readable/writable by owner
 ```
-

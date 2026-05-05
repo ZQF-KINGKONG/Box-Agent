@@ -35,6 +35,13 @@ from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import cleanup_mcp_connections
 from box_agent.tools.setup import SANDBOX_INFO_PROMPT, add_workspace_tools, await_mcp_tools, initialize_base_tools
+from box_agent.tools.runtime import (
+    DEFAULT_NODE_VERSION,
+    NodeRuntimeInstallError,
+    NodeRuntimeManager,
+    build_skill_runtime_context,
+    build_skill_runtime_prompt,
+)
 from box_agent.utils import calculate_display_width
 
 
@@ -463,6 +470,17 @@ Examples:
         help="Install Chromium for Playwright MCP browser tools (~200MB)",
     )
 
+    # install-node subcommand
+    node_parser = subparsers.add_parser(
+        "install-node",
+        help="Install Box-Agent managed Node.js runtime for skills (macOS only)",
+    )
+    node_parser.add_argument(
+        "--version",
+        default=DEFAULT_NODE_VERSION,
+        help=f"Node.js version to install (default: {DEFAULT_NODE_VERSION})",
+    )
+
     return parser.parse_args()
 
 
@@ -666,6 +684,29 @@ async def cmd_install_browser() -> None:
         print(f"{Colors.DIM}   Manually set `mcpServers.playwright.disabled = false` in {mcp_path}.{Colors.RESET}")
 
     print(f"\n{Colors.DIM}Restart box-agent to load the browser tools.{Colors.RESET}\n")
+
+
+def cmd_install_node(version: str = DEFAULT_NODE_VERSION) -> None:
+    """Install Box-Agent's self-managed macOS Node runtime."""
+    print(f"{Colors.BOLD}Box Agent · Install Node Runtime{Colors.RESET}\n")
+    manager = NodeRuntimeManager()
+    print(f"{Colors.DIM}Target: {manager.root}{Colors.RESET}")
+    print(f"{Colors.DIM}Version: {version}{Colors.RESET}")
+    print(f"{Colors.DIM}Source: official Node.js release archive + SHASUMS256.txt{Colors.RESET}\n")
+    try:
+        runtime = manager.install_macos(version=version)
+    except KeyboardInterrupt:
+        print(f"\n{Colors.YELLOW}⚠️  Interrupted.{Colors.RESET}")
+        sys.exit(130)
+    except NodeRuntimeInstallError as exc:
+        print(f"{Colors.RED}❌ Node runtime install failed: {exc}{Colors.RESET}")
+        sys.exit(1)
+
+    print(f"{Colors.GREEN}✅ Node runtime installed.{Colors.RESET}")
+    print(f"{Colors.DIM}node: {runtime.env_vars.get('BOX_AGENT_NODE')}{Colors.RESET}")
+    print(f"{Colors.DIM}npm:  {runtime.env_vars.get('BOX_AGENT_NPM')}{Colors.RESET}")
+    print(f"{Colors.DIM}npx:  {runtime.env_vars.get('BOX_AGENT_NPX')}{Colors.RESET}")
+    print(f"\n{Colors.DIM}Restart box-agent or box-agent-acp sessions to pick up the runtime.{Colors.RESET}\n")
 
 
 def _ensure_user_mcp_config() -> Path:
@@ -926,6 +967,8 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             policy = CapabilityPolicy(session_workspace_root=str(workspace_dir))
         perm_engine = PermissionEngine(policy, workspace_dir, grant_store=grant_store)
 
+    skill_runtime_context = build_skill_runtime_context(sandbox_mode=sandbox_mode)
+
     add_workspace_tools(
         tools, config, workspace_dir,
         sandbox_mode=sandbox_mode,
@@ -933,6 +976,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         non_interactive=non_interactive,
         llm=llm_client,
         permission_engine=perm_engine,
+        skill_runtime_context=skill_runtime_context,
     )
 
     if not allow_full_access:
@@ -970,6 +1014,8 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     else:
         # Remove placeholder if sandbox not enabled
         system_prompt = system_prompt.replace("{SANDBOX_INFO}", "")
+
+    system_prompt = f"{system_prompt.rstrip()}\n\n{build_skill_runtime_prompt(skill_runtime_context)}"
 
     # 6.6 Inject Memory context
     if memory_mgr:
@@ -1317,6 +1363,11 @@ def main():
     # Handle install-browser subcommand
     if args.command == "install-browser":
         asyncio.run(cmd_install_browser())
+        return
+
+    # Handle install-node subcommand
+    if args.command == "install-node":
+        cmd_install_node(version=args.version)
         return
 
     # Ensure user config exists; run setup wizard on first launch

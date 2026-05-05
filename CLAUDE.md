@@ -109,7 +109,7 @@ uv run python scripts/build_runtime.py
 gh release upload v<version> dist/runtime/box-agent-runtime-*.tar.gz --repo Raccoon-Office/Box-Agent
 ```
 
-Runtime structure: `box-agent-runtime/{manifest.json, VERSION, bin/box-agent-acp}`. The binary communicates via ACP JSON-RPC over stdio. Hard constraint: stdout = pure ACP protocol, all diagnostics go to stderr.
+Runtime structure: `box-agent-runtime/{manifest.json, VERSION, bin/box-agent-acp, runtimes/node}` on macOS. The binary communicates via ACP JSON-RPC over stdio. Hard constraint: stdout = pure ACP protocol, all diagnostics go to stderr.
 
 Key files:
 - `scripts/build_runtime.py` — PyInstaller build script, auto-detects platform

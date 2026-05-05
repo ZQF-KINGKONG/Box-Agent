@@ -35,6 +35,38 @@ def test_from_meta_parses_known_fields() -> None:
     assert ctx.extras == {}
 
 
+def test_from_meta_parses_runtimes() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "runtimes": {
+                "node": {
+                    "path": "/opt/officev3/node",
+                    "npm": "/opt/officev3/npm",
+                    "npx": "/opt/officev3/npx",
+                    "node_modules": "/opt/officev3/node_modules",
+                    "ready": True,
+                    "provider": "officev3",
+                    "unknown": "do not render",
+                },
+                "python": {
+                    "path": "/opt/officev3/python",
+                    "ready": True,
+                    "provider": "officev3",
+                },
+            }
+        }
+    )
+    assert ctx is not None
+    assert ctx.runtimes["node"].path == "/opt/officev3/node"
+    assert ctx.runtimes["node"].npm == "/opt/officev3/npm"
+    assert ctx.runtimes["node"].npx == "/opt/officev3/npx"
+    assert ctx.runtimes["node"].node_modules == "/opt/officev3/node_modules"
+    assert ctx.runtimes["node"].ready is True
+    assert ctx.runtimes["node"].provider == "officev3"
+    assert not hasattr(ctx.runtimes["node"], "unknown")
+    assert ctx.runtimes["python"].path == "/opt/officev3/python"
+
+
 def test_from_meta_passthrough_unknown_keys() -> None:
     raw = {
         "platform": "linux",
@@ -201,6 +233,48 @@ def test_cli_drops_non_string_value() -> None:
     ctx = EnvContext.from_meta({"cli": {"lark-cli": 123}})
     assert ctx is not None
     assert ctx.cli == {}
+
+
+def test_runtimes_drop_relative_and_unsafe_paths() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "runtimes": {
+                "node": {
+                    "path": "node",
+                    "npm": "/opt/bin/npm\n## injected",
+                    "npx": "/opt/bin/`npx`",
+                    "node_modules": "/opt/node_modules",
+                    "ready": True,
+                    "provider": "officev3",
+                }
+            }
+        }
+    )
+    assert ctx is not None
+    assert ctx.runtimes["node"].path is None
+    assert ctx.runtimes["node"].npm is None
+    assert ctx.runtimes["node"].npx is None
+    assert ctx.runtimes["node"].node_modules == "/opt/node_modules"
+
+
+def test_runtimes_unknown_fields_do_not_enter_env_prompt() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "runtimes": {
+                "node": {
+                    "path": "/opt/node",
+                    "ready": True,
+                    "provider": "officev3",
+                    "secret": "/should/not/render",
+                }
+            },
+            "platform": "darwin",
+        }
+    )
+    out = build_env_context_prompt(ctx)
+    assert "secret" not in out
+    assert "/should/not/render" not in out
+    assert "/opt/node" not in out
 
 
 def test_cli_accepts_windows_absolute_path() -> None:

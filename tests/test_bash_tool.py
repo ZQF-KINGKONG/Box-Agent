@@ -361,6 +361,44 @@ def test_sandbox_venv_skips_login_shell():
         assert tool._use_login_shell is False
         assert tool._subprocess_env is not None
         assert tool._subprocess_env["VIRTUAL_ENV"] == venv_dir
+        assert tool._subprocess_env["PATH"].split(os.pathsep)[0] == os.path.join(venv_dir, "bin")
+
+
+def test_sandbox_runtime_env_injected_when_python_exists():
+    """Runtime env exposes the sandbox Python vars without changing venv behavior."""
+    import os
+    import platform
+    import tempfile
+    if platform.system() == "Windows":
+        pytest.skip("Unix-only test")
+
+    with tempfile.TemporaryDirectory() as venv_dir:
+        bin_dir = os.path.join(venv_dir, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        python_path = os.path.join(bin_dir, "python")
+        with open(python_path, "w", encoding="utf-8") as f:
+            f.write("#!/bin/sh\nexit 0\n")
+        os.chmod(python_path, 0o755)
+
+        tool = BashTool(
+            sandbox_venv_path=venv_dir,
+            runtime_env={
+                "BOX_AGENT_PYTHON": python_path,
+                "BOX_AGENT_PYTHON3": python_path,
+            },
+        )
+
+        assert tool._subprocess_env is not None
+        assert tool._subprocess_env["BOX_AGENT_PYTHON"] == python_path
+        assert tool._subprocess_env["BOX_AGENT_PYTHON3"] == python_path
+        assert tool._subprocess_env["PATH"].split(os.pathsep)[0] == bin_dir
+
+
+def test_empty_runtime_env_does_not_inject_python_vars():
+    tool = BashTool(runtime_env={})
+    if tool._subprocess_env is not None:
+        assert "BOX_AGENT_PYTHON" not in tool._subprocess_env
+        assert "BOX_AGENT_PYTHON3" not in tool._subprocess_env
 
 
 def test_no_sandbox_uses_login_shell():

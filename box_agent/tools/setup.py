@@ -19,6 +19,7 @@ from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
+from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
@@ -219,7 +220,8 @@ async def await_mcp_tools(mcp_task: Optional[asyncio.Task]) -> List[Tool]:
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
                         allow_full_access: bool = True, non_interactive: bool = False, output=None,
-                        llm=None, permission_engine: PermissionEngine | None = None):
+                        llm=None, permission_engine: PermissionEngine | None = None,
+                        skill_runtime_context: SkillRuntimeContext | None = None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -234,6 +236,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         output: Callable for status messages (default: print)
         llm: LLM client instance (needed for sub_agent tool)
         permission_engine: If provided, tools use capability-based permission checks
+        skill_runtime_context: Runtime env to expose to subprocess-backed tools
     """
     _out = output or print
     # Ensure workspace directory exists
@@ -241,6 +244,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Bash tool - needs workspace as cwd for command execution
     if config.tools.enable_bash:
+        runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
         sandbox_venv_path = None
         if sandbox_mode and not getattr(sys, "frozen", False):
             sandbox_venv_path = str(SandboxEnvironment().venv_dir)
@@ -250,6 +254,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             non_interactive=non_interactive,
             sandbox_venv_path=sandbox_venv_path,
             permission_engine=permission_engine,
+            runtime_env=runtime_context.env(),
         )
         tools.append(bash_tool)
         _out(f"{Colors.GREEN}✅ Loaded Bash tool (cwd: {workspace_dir}){Colors.RESET}")

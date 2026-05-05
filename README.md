@@ -238,6 +238,9 @@ uv run python scripts/build_runtime.py
 ```
 
 The runtime communicates via JSON-RPC over stdio. stdout = protocol only, stderr = diagnostics.
+macOS runtime archives include Box-Agent's pinned Node.js runtime for skills
+under `box-agent-runtime/runtimes/node/`; npm cache/prefix state remains in
+`~/.box-agent/runtimes/node/sandbox/`.
 
 ## Testing
 

@@ -73,14 +73,18 @@ class SubAgentTool(EventEmittingTool):
     @property
     def description(self) -> str:
         return (
-            "Delegate a self-contained task to a sub-agent that runs in an isolated "
-            "context. The sub-agent has access to the same tools (file, bash, sandbox, "
-            "etc.) but maintains its own conversation history. Only its final summary "
-            "is returned, keeping the main context clean.\n\n"
-            "Use this when a task will produce a lot of intermediate output (e.g. "
-            "reading multiple files, exploratory data analysis) and you only need the "
-            "conclusion. You can call sub_agent multiple times in parallel for "
-            "independent tasks."
+            "Delegate a self-contained INVESTIGATION to a sub-agent that runs in an "
+            "isolated context. The sub-agent has access to the same tools (file, bash, "
+            "sandbox, etc.) but maintains its own conversation history. Only its final "
+            "TEXT SUMMARY is returned to the parent — no artifacts, no partial state.\n\n"
+            "Use this ONLY when a task will produce a lot of intermediate output you "
+            "don't want polluting the main context — e.g. reading many files to answer "
+            "one question, exploratory data analysis, deep codebase search.\n\n"
+            "DO NOT use sub_agent to schedule deliverable work, to parallelize a list "
+            "of todos, or to 'kick off' subtasks that produce files/code/output. That "
+            "is what `todo_write` is for. If the work needs to produce artifacts or be "
+            "visible step-by-step to the user, run it in the main loop and track it "
+            "with todo_write — not as sub_agent calls."
         )
 
     @property

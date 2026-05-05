@@ -1,5 +1,6 @@
 """Integration tests for the Box ACP adapter."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -161,3 +162,144 @@ async def test_acp_prompt_lists_officev3_allowed_directories(tmp_path):
     assert "configured allowed directories are allowed" in prompt
     assert str(allowed) in prompt
     assert "Do not claim you can only access the workspace" in prompt
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    sandbox_base = tmp_path / "sandbox-runtime"
+    python_path = sandbox_base / "venv" / "bin" / "python"
+    python_path.parent.mkdir(parents=True)
+    python_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python_path.chmod(0o755)
+
+    from box_agent.tools.jupyter_tool import SandboxEnvironment
+
+    monkeypatch.setattr(
+        "box_agent.tools.runtime.SandboxEnvironment",
+        lambda: SandboxEnvironment(base_dir=sandbox_base),
+    )
+    monkeypatch.setattr("box_agent.tools.runtime.DEFAULT_NODE_RUNTIME_ROOT", tmp_path / "missing-node")
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    )
+    prompt = agent._sessions[session.sessionId].agent.system_prompt
+
+    assert "## Skill Runtime Context" in prompt
+    assert "$BOX_AGENT_PYTHON" in prompt
+    assert "Node runtime:" in prompt
+    assert "available: false" in prompt
+    assert "provider: missing" in prompt
+    assert "npm install -g" in prompt
+    assert "npx --yes" in prompt
+
+    bash_tool = agent._sessions[session.sessionId].agent.tools["bash"]
+    assert bash_tool._subprocess_env["BOX_AGENT_PYTHON"] == str(python_path)
+    assert bash_tool._subprocess_env["BOX_AGENT_PYTHON3"] == str(python_path)
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_and_bash_env_include_self_managed_node_runtime(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    node_root = tmp_path / ".box-agent" / "runtimes" / "node"
+    node_bin = node_root / "versions" / "node-v22-test-darwin-arm64" / "bin"
+    node = node_bin / "node"
+    npm = node_bin / "npm"
+    npx = node_bin / "npx"
+    for path in (node, npm, npx):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    (node_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "active": {
+                    "version": "v22-test",
+                    "node": str(node),
+                    "npm": str(npm),
+                    "npx": str(npx),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("box_agent.tools.runtime.DEFAULT_NODE_RUNTIME_ROOT", node_root)
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+    prompt = state.agent.system_prompt
+    bash_tool = state.agent.tools["bash"]
+
+    assert "Node runtime:" in prompt
+    assert "available: true" in prompt
+    assert "provider: box_agent" in prompt
+    assert "$BOX_AGENT_NODE" in prompt
+    assert bash_tool._subprocess_env["BOX_AGENT_NODE"] == str(node)
+    assert bash_tool._subprocess_env["BOX_AGENT_NPM"] == str(npm)
+    assert bash_tool._subprocess_env["BOX_AGENT_NPX"] == str(npx)
+    assert bash_tool._subprocess_env["NODE_PATH"] == str(node_root / "sandbox" / "node_modules")
+    assert bash_tool._subprocess_env["npm_config_cache"] == str(node_root / "sandbox" / "npm-cache")
+    assert bash_tool._subprocess_env["npm_config_prefix"] == str(node_root / "sandbox" / "npm-prefix")
+
+
+@pytest.mark.asyncio
+async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    node_root = tmp_path / "node-runtime"
+    node_bin = node_root / "versions" / "node-v22-test-darwin-arm64" / "bin"
+    node = node_bin / "node"
+    npm = node_bin / "npm"
+    npx = node_bin / "npx"
+    for path in (node, npm, npx):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        path.chmod(0o755)
+    (node_root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "active": {
+                    "version": "v22-test",
+                    "node": str(node),
+                    "npm": str(npm),
+                    "npx": str(npx),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("box_agent.tools.runtime.DEFAULT_NODE_RUNTIME_ROOT", node_root)
+    monkeypatch.setattr("box_agent.tools.runtime.sys.frozen", True, raising=False)
+    monkeypatch.setattr("box_agent.tools.setup.sys.frozen", True, raising=False)
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(workspace), field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+
+    assert "provider: box_agent" in state.agent.system_prompt
+    assert "shell command: unavailable" in state.agent.system_prompt
+    assert state.agent.tools["bash"]._subprocess_env["BOX_AGENT_NODE"] == str(node)

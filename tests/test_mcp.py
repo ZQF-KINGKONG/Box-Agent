@@ -16,6 +16,30 @@ from box_agent.tools.mcp_loader import (
     load_mcp_tools_async,
     set_mcp_timeout_config,
 )
+from box_agent.tools.setup import merge_mcp_tools, register_mcp_tools
+from box_agent.tools.base import Tool, ToolResult
+
+
+class NamedDummyTool(Tool):
+    """Small test double for a named tool."""
+
+    def __init__(self, name: str):
+        self._name = name
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def description(self):
+        return f"{self._name} test tool"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        return ToolResult(success=True, content="mcp", error="")
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +104,30 @@ class TestDetermineConnectionType:
         """Unknown type with URL should default to streamable_http."""
         config = {"url": "https://mcp.example.com/mcp", "type": "unknown"}
         assert _determine_connection_type(config) == "streamable_http"
+
+
+class TestMCPToolRegistration:
+    """Tests for merging MCP tools into the agent tool belt."""
+
+    def test_register_mcp_tools_overrides_same_named_tool(self):
+        """MCP tools should replace existing same-named tools."""
+        fallback = NamedDummyTool("web_search")
+        mcp_tool = NamedDummyTool("web_search")
+        tool_map = {fallback.name: fallback}
+
+        register_mcp_tools(tool_map, [mcp_tool])
+
+        assert tool_map["web_search"] is mcp_tool
+
+    def test_merge_mcp_tools_replaces_same_named_base_tool(self):
+        """Future ACP sessions should receive MCP tools after base-list merge."""
+        fallback = NamedDummyTool("web_search")
+        mcp_tool = NamedDummyTool("web_search")
+        base_tools = [fallback]
+
+        merge_mcp_tools(base_tools, [mcp_tool])
+
+        assert base_tools == [mcp_tool]
 
 
 # =============================================================================

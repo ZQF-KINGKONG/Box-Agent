@@ -34,7 +34,13 @@ from box_agent.schema import LLMProvider
 from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
 from box_agent.tools.mcp_loader import cleanup_mcp_connections
-from box_agent.tools.setup import SANDBOX_INFO_PROMPT, add_workspace_tools, await_mcp_tools, initialize_base_tools
+from box_agent.tools.setup import (
+    SANDBOX_INFO_PROMPT,
+    add_workspace_tools,
+    await_mcp_tools,
+    initialize_base_tools,
+    register_mcp_tools,
+)
 from box_agent.tools.runtime import (
     DEFAULT_NODE_VERSION,
     NodeRuntimeInstallError,
@@ -1055,8 +1061,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     if task:
         print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n")
         # Block on MCP only when user is actually about to run
-        for t in await await_mcp_tools(mcp_task):
-            agent.tools.setdefault(t.name, t)
+        register_mcp_tools(agent.tools, await await_mcp_tools(mcp_task))
         agent.add_user_message(task)
         try:
             await agent.run()
@@ -1235,8 +1240,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
 
             # Run Agent with Esc cancellation support
             # Ensure background-loaded MCP tools are registered (no-op after first call)
-            for t in await await_mcp_tools(mcp_task):
-                agent.tools.setdefault(t.name, t)
+            register_mcp_tools(agent.tools, await await_mcp_tools(mcp_task))
             mcp_task = None  # clear so we don't re-await the cached result each turn
 
             print(

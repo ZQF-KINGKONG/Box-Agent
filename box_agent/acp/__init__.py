@@ -63,7 +63,14 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.agent import Agent
-from box_agent.tools.setup import SANDBOX_INFO_PROMPT, add_workspace_tools, await_mcp_tools, initialize_base_tools
+from box_agent.tools.setup import (
+    SANDBOX_INFO_PROMPT,
+    add_workspace_tools,
+    await_mcp_tools,
+    initialize_base_tools,
+    merge_mcp_tools,
+    register_mcp_tools,
+)
 from box_agent.config import Config
 from box_agent.core import run_agent_loop
 from box_agent.events import (
@@ -175,14 +182,10 @@ class BoxACPAgent:
             return
         mcp_tools = await await_mcp_tools(self._mcp_task)
         # Inject into base tool list so future sessions pick them up
-        existing_names = {t.name for t in self._base_tools}
-        for t in mcp_tools:
-            if t.name not in existing_names:
-                self._base_tools.append(t)
+        merge_mcp_tools(self._base_tools, mcp_tools)
         # Also inject into any already-created sessions
         for state in self._sessions.values():
-            for t in mcp_tools:
-                state.agent.tools.setdefault(t.name, t)
+            register_mcp_tools(state.agent.tools, mcp_tools)
         self._mcp_loaded = True
         log.info("mcp/ready", count=len(mcp_tools))
 

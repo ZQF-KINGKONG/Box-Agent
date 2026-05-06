@@ -77,7 +77,6 @@ class ToolsConfig(BaseModel):
     enable_bash: bool = True
     enable_todo: bool = True  # Task tracking for multi-step workflows
     enable_sub_agent: bool = True  # Sub-agent for isolated context execution
-    enable_web_search: bool = True  # Fallback web search when no MCP search service
 
     # Safety
     allow_full_access: bool = False  # When False, tools are restricted to workspace

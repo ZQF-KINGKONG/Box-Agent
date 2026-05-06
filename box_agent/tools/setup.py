@@ -23,7 +23,6 @@ from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_con
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
-from box_agent.tools.web_search_tool import WebSearchTool
 
 if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
@@ -115,12 +114,7 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
         tools.append(bash_kill_tool)
         _out(f"{Colors.GREEN}✅ Loaded Bash Kill tool{Colors.RESET}")
 
-    # 2. Web search tool (fallback when no MCP search service)
-    if config.tools.enable_web_search:
-        tools.append(WebSearchTool())
-        _out(f"{Colors.GREEN}✅ Loaded Web Search tool (web_search){Colors.RESET}")
-
-    # 3. Claude Skills (loaded from package directory)
+    # 2. Claude Skills (loaded from package directory)
     if config.tools.enable_skills:
         _out(f"{Colors.BRIGHT_CYAN}Loading Claude Skills...{Colors.RESET}")
         try:
@@ -167,7 +161,7 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
         except Exception as e:
             _out(f"{Colors.YELLOW}⚠️  Failed to load Skills: {e}{Colors.RESET}")
 
-    # 4. MCP tools (loaded with priority search, in background to avoid blocking startup)
+    # 3. MCP tools (loaded with priority search, in background to avoid blocking startup)
     mcp_task: Optional[asyncio.Task] = None
     if config.tools.enable_mcp:
         mcp_config = config.tools.mcp
@@ -216,6 +210,30 @@ async def await_mcp_tools(mcp_task: Optional[asyncio.Task]) -> List[Tool]:
         return await mcp_task
     except Exception:
         return []
+
+
+def register_mcp_tools(tool_map: dict[str, Tool], mcp_tools: list[Tool]) -> None:
+    """Register MCP tools, allowing them to override same-named fallback tools."""
+    for tool in mcp_tools:
+        tool_map[tool.name] = tool
+
+
+def merge_mcp_tools(base_tools: list[Tool], mcp_tools: list[Tool]) -> None:
+    """Merge MCP tools into a tool list, replacing same-named fallback tools."""
+    mcp_by_name = {tool.name: tool for tool in mcp_tools}
+    if not mcp_by_name:
+        return
+
+    replaced_names: set[str] = set()
+    for index, tool in enumerate(base_tools):
+        replacement = mcp_by_name.get(tool.name)
+        if replacement is not None:
+            base_tools[index] = replacement
+            replaced_names.add(tool.name)
+
+    for tool in mcp_tools:
+        if tool.name not in replaced_names:
+            base_tools.append(tool)
 
 
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,

@@ -9,6 +9,12 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr
 
+from .auth import should_attach_auth_header
+
+DEFAULT_API_KEY_PLACEHOLDER = "YOUR_API_KEY_HERE"
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+HOSTED_GATEWAY_API_KEY_PLACEHOLDER = "box-agent-auth-json"
+
 
 class RetryConfig(BaseModel):
     """Retry configuration"""
@@ -23,10 +29,11 @@ class RetryConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM configuration"""
 
-    api_key: str
+    api_key: str = ""
     api_base: str = "https://api.anthropic.com"
-    model: str = "claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     provider: str = "anthropic"  # "anthropic" or "openai"
+    auth_file: str = ""
     context_window: int = 190000
     max_output_tokens: int = 64000
     retry: RetryConfig = Field(default_factory=RetryConfig)
@@ -186,12 +193,27 @@ class Config(BaseModel):
         if not data:
             raise ValueError("Configuration file is empty")
 
-        # Parse LLM configuration
-        if "api_key" not in data:
-            raise ValueError("Configuration file missing required field: api_key")
+        api_base = data.get("api_base", "https://api.anthropic.com")
+        uses_hosted_gateway = should_attach_auth_header(api_base)
 
-        if not data["api_key"] or data["api_key"] == "YOUR_API_KEY_HERE":
-            raise ValueError("Please configure a valid API Key")
+        # Parse LLM configuration. Hosted officev3 gateways authenticate with
+        # auth.json, so api_key/model may be intentionally omitted.
+        raw_api_key = str(data.get("api_key", "")).strip()
+        if not uses_hosted_gateway:
+            if "api_key" not in data:
+                raise ValueError("Configuration file missing required field: api_key")
+            if not raw_api_key or raw_api_key == DEFAULT_API_KEY_PLACEHOLDER:
+                raise ValueError("Please configure a valid API Key")
+        if uses_hosted_gateway and raw_api_key == DEFAULT_API_KEY_PLACEHOLDER:
+            api_key = HOSTED_GATEWAY_API_KEY_PLACEHOLDER
+        else:
+            api_key = raw_api_key or HOSTED_GATEWAY_API_KEY_PLACEHOLDER
+
+        raw_model = data.get("model")
+        if uses_hosted_gateway and (raw_model is None or str(raw_model).strip() == DEFAULT_MODEL):
+            model = ""
+        else:
+            model = str(raw_model).strip() if raw_model is not None else DEFAULT_MODEL
 
         # Parse retry configuration
         retry_data = data.get("retry", {})
@@ -204,10 +226,11 @@ class Config(BaseModel):
         )
 
         llm_config = LLMConfig(
-            api_key=data["api_key"],
-            api_base=data.get("api_base", "https://api.anthropic.com"),
-            model=data.get("model", "claude-sonnet-4-20250514"),
+            api_key=api_key,
+            api_base=api_base,
+            model=model,
             provider=data.get("provider", "anthropic"),
+            auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
             context_window=data.get("context_window", 190000),
             max_output_tokens=data.get("max_output_tokens", 64000),
             retry=retry_config,

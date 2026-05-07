@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
+from ..auth import request_auth_headers
 from ..retry import RetryConfig
 from ..schema import LLMResponse, Message, StreamEvent
 
@@ -21,6 +22,8 @@ class LLMClientBase(ABC):
         api_base: str,
         model: str,
         retry_config: RetryConfig | None = None,
+        auth_token: str = "",
+        auth_file: str = "",
     ):
         """Initialize the LLM client.
 
@@ -29,14 +32,27 @@ class LLMClientBase(ABC):
             api_base: Base URL for the API
             model: Model name to use
             retry_config: Optional retry configuration
+            auth_token: Optional in-memory product login token.
+            auth_file: Optional auth.json path read before every request.
         """
         self.api_key = api_key
         self.api_base = api_base
         self.model = model
         self.retry_config = retry_config or RetryConfig()
+        self.auth_token = auth_token
+        self.auth_file = auth_file
 
         # Callback for tracking retry count
         self.retry_callback = None
+
+    def _auth_headers(self, existing: dict[str, str] | None = None) -> dict[str, str]:
+        """Read current login auth and return request headers."""
+        return request_auth_headers(
+            auth_file=self.auth_file,
+            explicit_token=self.auth_token,
+            existing=existing,
+            url=self.api_base,
+        )
 
     @abstractmethod
     async def generate(

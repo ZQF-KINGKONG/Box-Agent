@@ -32,6 +32,8 @@ class LLMClient:
         model: str = "claude-sonnet-4-20250514",
         retry_config: RetryConfig | None = None,
         max_output_tokens: int = 64000,
+        auth_token: str = "",
+        auth_file: str = "",
     ):
         """Initialize LLM client with specified provider.
 
@@ -43,12 +45,16 @@ class LLMClient:
             retry_config: Optional retry configuration
             max_output_tokens: Per-request output token cap forwarded to the
                 underlying provider as ``max_tokens``.
+            auth_token: Optional in-memory product login token.
+            auth_file: Optional auth.json path read before every request.
         """
         self.provider = provider
         self.api_key = api_key
         self.model = model
         self.retry_config = retry_config or RetryConfig()
         self.max_output_tokens = max_output_tokens
+        self.auth_token = auth_token
+        self.auth_file = auth_file
 
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
@@ -63,6 +69,8 @@ class LLMClient:
                 model=model,
                 retry_config=retry_config,
                 max_output_tokens=max_output_tokens,
+                auth_token=auth_token,
+                auth_file=auth_file,
             )
         elif provider == LLMProvider.OPENAI:
             self._client = OpenAIClient(
@@ -71,6 +79,8 @@ class LLMClient:
                 model=model,
                 retry_config=retry_config,
                 max_output_tokens=max_output_tokens,
+                auth_token=auth_token,
+                auth_file=auth_file,
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")

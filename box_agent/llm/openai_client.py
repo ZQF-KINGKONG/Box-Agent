@@ -40,6 +40,8 @@ class OpenAIClient(LLMClientBase):
         model: str = "gpt-4o",
         retry_config: RetryConfig | None = None,
         max_output_tokens: int = _DEFAULT_MAX_TOKENS,
+        auth_token: str = "",
+        auth_file: str = "",
     ):
         """Initialize OpenAI client.
 
@@ -49,8 +51,10 @@ class OpenAIClient(LLMClientBase):
             model: Model name to use
             retry_config: Optional retry configuration
             max_output_tokens: Per-request ``max_tokens`` value sent to the API.
+            auth_token: Optional in-memory product login token.
+            auth_file: Optional auth.json path read before every request.
         """
-        super().__init__(api_key, api_base, model, retry_config)
+        super().__init__(api_key, api_base, model, retry_config, auth_token=auth_token, auth_file=auth_file)
         self.max_output_tokens = max_output_tokens
 
         # Initialize OpenAI client
@@ -82,10 +86,11 @@ class OpenAIClient(LLMClientBase):
             Exception: API call failed
         """
         params: dict[str, Any] = {
-            "model": self.model,
             "messages": api_messages,
             "max_tokens": self.max_output_tokens,
         }
+        if self.model:
+            params["model"] = self.model
 
         if thinking_enabled:
             # Belt-and-suspenders: OpenAI/Azure honor top-level ``reasoning_effort``
@@ -100,6 +105,10 @@ class OpenAIClient(LLMClientBase):
 
         if tools:
             params["tools"] = self._convert_tools(tools)
+
+        auth_headers = self._auth_headers()
+        if auth_headers:
+            params["extra_headers"] = auth_headers
 
         # Use OpenAI SDK's chat.completions.create
         response = await self.client.chat.completions.create(**params)
@@ -343,12 +352,13 @@ class OpenAIClient(LLMClientBase):
         request_params = self._prepare_request(messages, tools)
 
         params: dict[str, Any] = {
-            "model": self.model,
             "messages": request_params["api_messages"],
             "max_tokens": self.max_output_tokens,
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.model:
+            params["model"] = self.model
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
         if thinking_enabled:
@@ -357,6 +367,10 @@ class OpenAIClient(LLMClientBase):
                 "enable_thinking": True,
                 "thinking_budget": _THINKING_BUDGET,
             }
+
+        auth_headers = self._auth_headers()
+        if auth_headers:
+            params["extra_headers"] = auth_headers
 
         # Accumulators
         text_content = ""

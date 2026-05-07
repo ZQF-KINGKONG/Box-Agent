@@ -32,6 +32,8 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
+from box_agent.auth import request_auth_headers
+
 from .base import Tool, ToolResult
 
 
@@ -197,6 +199,16 @@ class MCPServerConnection:
         """Connect to the MCP server with timeout protection."""
         connect_timeout = self._get_connect_timeout()
 
+        async def _close_exit_stack() -> None:
+            if not self.exit_stack:
+                return
+            try:
+                await self.exit_stack.aclose()
+            except BaseException as cleanup_error:  # noqa: BLE001
+                _warn(f"⚠ Failed to clean up MCP connection '{self.name}': {cleanup_error}")
+            finally:
+                self.exit_stack = None
+
         try:
             self.exit_stack = AsyncExitStack()
 
@@ -241,16 +253,12 @@ class MCPServerConnection:
 
         except TimeoutError:
             _warn(f"✗ Connection to MCP server '{self.name}' timed out after {connect_timeout}s")
-            if self.exit_stack:
-                await self.exit_stack.aclose()
-                self.exit_stack = None
+            await _close_exit_stack()
             return False
 
         except Exception as e:
             _warn(f"✗ Failed to connect to MCP server '{self.name}': {e}")
-            if self.exit_stack:
-                await self.exit_stack.aclose()
-                self.exit_stack = None
+            await _close_exit_stack()
             import traceback
 
             traceback.print_exc()
@@ -312,7 +320,7 @@ _mcp_connections: list[MCPServerConnection] = []
 
 def _determine_connection_type(server_config: dict) -> ConnectionType:
     """Determine connection type from server config."""
-    explicit_type = server_config.get("type", "").lower()
+    explicit_type = str(server_config.get("type") or server_config.get("transport") or "").lower()
     if explicit_type in ("stdio", "sse", "http", "streamable_http"):
         return explicit_type
     # Auto-detect: if url exists, default to streamable_http; otherwise stdio
@@ -352,7 +360,11 @@ def _resolve_mcp_config_path(config_path: str) -> Path | None:
     return None
 
 
-async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
+async def load_mcp_tools_async(
+    config_path: str = "mcp.json",
+    auth_token: str = "",
+    auth_file: str = "",
+) -> list[Tool]:
     """
     Load MCP tools from config file.
 
@@ -377,6 +389,9 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
 
     Args:
         config_path: Path to MCP configuration file (default: "mcp.json")
+        auth_token: Optional in-memory product login token.
+        auth_file: Optional auth.json path read before connecting URL-based
+            MCP servers that do not define their own Authorization.
 
     Returns:
         List of Tool objects representing MCP tools
@@ -427,7 +442,12 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
                 args=server_config.get("args", []),
                 env=server_config.get("env", {}),
                 url=url,
-                headers=server_config.get("headers", {}),
+                headers=request_auth_headers(
+                    auth_file=auth_file,
+                    explicit_token=auth_token,
+                    existing=server_config.get("headers", {}),
+                    url=url,
+                ),
                 # Per-server timeout overrides from mcp.json
                 connect_timeout=server_config.get("connect_timeout"),
                 execute_timeout=server_config.get("execute_timeout"),

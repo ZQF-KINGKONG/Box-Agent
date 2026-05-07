@@ -180,7 +180,7 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
 
             async def _load() -> List[Tool]:
                 try:
-                    loaded = await load_mcp_tools_async(str(mcp_config_path))
+                    loaded = await load_mcp_tools_async(str(mcp_config_path), auth_file=config.llm.auth_file)
                     if loaded:
                         _out(f"{Colors.GREEN}✅ Loaded {len(loaded)} MCP tools (from: {mcp_config_path}){Colors.RESET}")
                     else:

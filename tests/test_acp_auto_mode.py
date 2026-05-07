@@ -84,8 +84,8 @@ async def test_explicit_mode_skips_classifier(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_missing_mode_triggers_classification(tmp_path):
-    """No session_mode → classifier runs once, result applied to state."""
+async def test_missing_mode_ignores_legacy_ppt_classification(tmp_path):
+    """No session_mode → legacy PPT labels fall back to the general agent."""
     llm = _TrackingLLM(mode_label="ppt_outline")
     agent, _ = _make_agent(tmp_path, llm)
 
@@ -102,11 +102,11 @@ async def test_missing_mode_triggers_classification(tmp_path):
     )
 
     assert llm.classifier_calls == 1
-    assert state.session_mode == "ppt_outline"
+    assert state.session_mode is None
     assert state.auto_classify_pending is False
-    # PPT tool should be registered retroactively
-    assert "ppt_emit_outline" in state.agent.tools
-    # System message replaced with mode-specific prompt (base prompt was "base system")
+    # Legacy PPT events are not emitted unless the caller explicitly opts in.
+    assert "ppt_emit_outline" not in state.agent.tools
+    # System message remains general (base prompt was "base system").
     assert state.agent.messages[0].role == "system"
 
 

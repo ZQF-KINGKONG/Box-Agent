@@ -21,6 +21,10 @@ api_key: "YOUR_API_KEY_HERE"
 api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic"
+# Hosted officev3 login auth lives outside config.yaml so token refreshes do not
+# mark model/provider config dirty. By default Box-Agent reads auth.json next to
+# this file before every LLM request and URL-based MCP connection.
+# auth_file: "/path/to/auth.json"
 
 # Model token budget. `context_window` is the total context the model accepts;
 # `max_output_tokens` is the per-request output cap (`max_tokens` on the wire).

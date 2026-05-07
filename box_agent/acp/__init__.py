@@ -1060,7 +1060,21 @@ async def run_acp_server(config: Config | None = None) -> None:
     try:
         rcfg = config.llm.retry
         provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
-        llm = LLMClient(api_key=config.llm.api_key, provider=provider, api_base=config.llm.api_base, model=config.llm.model, retry_config=RetryConfigBase(enabled=rcfg.enabled, max_retries=rcfg.max_retries, initial_delay=rcfg.initial_delay, max_delay=rcfg.max_delay, exponential_base=rcfg.exponential_base), max_output_tokens=config.llm.max_output_tokens)
+        llm = LLMClient(
+            api_key=config.llm.api_key,
+            provider=provider,
+            api_base=config.llm.api_base,
+            model=config.llm.model,
+            retry_config=RetryConfigBase(
+                enabled=rcfg.enabled,
+                max_retries=rcfg.max_retries,
+                initial_delay=rcfg.initial_delay,
+                max_delay=rcfg.max_delay,
+                exponential_base=rcfg.exponential_base,
+            ),
+            max_output_tokens=config.llm.max_output_tokens,
+            auth_file=config.llm.auth_file,
+        )
 
         # Create memory manager if enabled
         memory_mgr = None

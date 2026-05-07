@@ -1,0 +1,317 @@
+"""Tests for hosted request authentication helpers."""
+
+from __future__ import annotations
+
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from box_agent.auth import (
+    bearer_auth_headers,
+    read_auth_token_file,
+    resolve_auth_token,
+    should_attach_auth_header,
+)
+from box_agent.config import Config
+from box_agent.llm import AnthropicClient, OpenAIClient
+from box_agent.tools import mcp_loader
+
+
+def test_resolve_auth_token_prefers_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOX_AGENT_AUTH_TOKEN", "env-token")
+    assert resolve_auth_token(" explicit-token ") == "explicit-token"
+
+
+def test_resolve_auth_token_reads_supported_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("BOX_AGENT_AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("OFFICEV3_AUTH_TOKEN", "office-token")
+    assert resolve_auth_token() == "office-token"
+
+
+def test_resolve_auth_token_reads_auth_json_before_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOX_AGENT_AUTH_TOKEN", "env-token")
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text('{"access_token": "file-token"}\n', encoding="utf-8")
+
+    assert read_auth_token_file(auth_file) == "file-token"
+    assert resolve_auth_token(auth_file=auth_file) == "file-token"
+
+
+def test_bearer_auth_headers_preserves_existing_authorization() -> None:
+    headers = bearer_auth_headers(
+        "login-token",
+        {"authorization": "Bearer custom-provider-token", "X-Test": "1"},
+    )
+    assert headers == {"authorization": "Bearer custom-provider-token", "X-Test": "1"}
+
+
+def test_auth_header_only_attaches_to_xiaohuanxiong_domains() -> None:
+    assert should_attach_auth_header("https://api.xiaohuanxiong.com/v1")
+    assert should_attach_auth_header("https://llm.internal.xiaohuanxiong.com/v1")
+    assert not should_attach_auth_header("https://llm.example.com/v1")
+
+    assert bearer_auth_headers(
+        "login-token",
+        url="https://api.xiaohuanxiong.com/v1",
+    ) == {"Authorization": "Bearer login-token"}
+    assert bearer_auth_headers("login-token", url="https://llm.example.com/v1") == {}
+
+
+def test_config_defaults_auth_file_next_to_config(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'api_key: "provider-key"\n'
+        'api_base: "https://llm.example.com/v1"\n'
+        'model: "test-model"\n'
+        'provider: "openai"\n',
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.llm.auth_file == str(tmp_path / "auth.json")
+
+
+def test_config_accepts_custom_auth_file(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    auth_file = tmp_path / "runtime-auth.json"
+    config_path.write_text(
+        'api_key: "provider-key"\n'
+        'api_base: "https://llm.example.com/v1"\n'
+        'model: "test-model"\n'
+        'provider: "openai"\n'
+        f'auth_file: "{auth_file}"\n',
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.llm.auth_file == str(auth_file)
+
+
+def test_hosted_gateway_allows_missing_api_key_and_model(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'api_base: "https://code-test.xiaohuanxiong.com/api/web/llm/v2"\n'
+        'provider: "openai"\n',
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.llm.api_key == "box-agent-auth-json"
+    assert config.llm.model == ""
+
+
+def test_hosted_gateway_drops_unconfigured_default_model(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'api_key: "YOUR_API_KEY_HERE"\n'
+        'api_base: "https://code-test.xiaohuanxiong.com/api/web/llm/v2"\n'
+        'model: "claude-sonnet-4-20250514"\n'
+        'provider: "openai"\n',
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.llm.api_key == "box-agent-auth-json"
+    assert config.llm.model == ""
+
+
+@pytest.mark.asyncio
+async def test_openai_client_reads_auth_json_for_each_request(tmp_path: Path) -> None:
+    captured: list[dict[str, str]] = []
+
+    class FakeCompletions:
+        async def create(self, **params):
+            captured.append(params["extra_headers"])
+            return object()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    client = OpenAIClient(
+        api_key="provider-key",
+        api_base="https://llm.xiaohuanxiong.com/v1",
+        model="test-model",
+        auth_file=str(tmp_path / "auth.json"),
+    )
+    client.client.chat = FakeChat()
+
+    (tmp_path / "auth.json").write_text('{"access_token": "token-one"}\n', encoding="utf-8")
+    await client._make_api_request([{"role": "user", "content": "hi"}])
+
+    (tmp_path / "auth.json").write_text('{"access_token": "token-two"}\n', encoding="utf-8")
+    await client._make_api_request([{"role": "user", "content": "hi"}])
+
+    assert captured == [
+        {"Authorization": "Bearer token-one"},
+        {"Authorization": "Bearer token-two"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openai_client_omits_empty_model(tmp_path: Path) -> None:
+    captured: list[dict[str, object]] = []
+
+    class FakeCompletions:
+        async def create(self, **params):
+            captured.append(params)
+            return object()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    client = OpenAIClient(
+        api_key="box-agent-auth-json",
+        api_base="https://llm.xiaohuanxiong.com/v1",
+        model="",
+        auth_file=str(tmp_path / "auth.json"),
+    )
+    client.client.chat = FakeChat()
+
+    (tmp_path / "auth.json").write_text('{"access_token": "token-one"}\n', encoding="utf-8")
+    await client._make_api_request([{"role": "user", "content": "hi"}])
+
+    assert "model" not in captured[0]
+    assert captured[0]["extra_headers"] == {"Authorization": "Bearer token-one"}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_reads_auth_json_for_each_request(tmp_path: Path) -> None:
+    captured: list[dict[str, str]] = []
+
+    class FakeMessages:
+        async def create(self, **params):
+            captured.append(params["extra_headers"])
+            return object()
+
+    client = AnthropicClient(
+        api_key="provider-key",
+        api_base="https://llm.xiaohuanxiong.com",
+        model="test-model",
+        auth_file=str(tmp_path / "auth.json"),
+    )
+    client.client.messages = FakeMessages()
+
+    (tmp_path / "auth.json").write_text('{"access_token": "token-one"}\n', encoding="utf-8")
+    await client._make_api_request(None, [{"role": "user", "content": "hi"}])
+
+    (tmp_path / "auth.json").write_text('{"access_token": "token-two"}\n', encoding="utf-8")
+    await client._make_api_request(None, [{"role": "user", "content": "hi"}])
+
+    assert captured == [
+        {"Authorization": "Bearer token-one"},
+        {"Authorization": "Bearer token-two"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mcp_loader_adds_auth_header_for_url_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, str]] = []
+
+    async def fake_connect(self) -> bool:
+        captured.append(self.headers)
+        return False
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", fake_connect)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "transport": "sse",
+                        "url": "https://mcp.xiaohuanxiong.com/sse",
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        try:
+            auth_file = Path(f.name).with_name("auth.json")
+            auth_file.write_text('{"access_token": "login-token"}\n', encoding="utf-8")
+            await mcp_loader.load_mcp_tools_async(f.name, auth_file=str(auth_file))
+        finally:
+            auth_file.unlink(missing_ok=True)
+            Path(f.name).unlink()
+
+    assert captured == [{"Authorization": "Bearer login-token"}]
+
+
+@pytest.mark.asyncio
+async def test_mcp_loader_skips_auth_header_for_non_xiaohuanxiong_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, str]] = []
+
+    async def fake_connect(self) -> bool:
+        captured.append(self.headers)
+        return False
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", fake_connect)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "transport": "sse",
+                        "url": "https://mcp.example.com/sse",
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        try:
+            auth_file = Path(f.name).with_name("auth.json")
+            auth_file.write_text('{"access_token": "login-token"}\n', encoding="utf-8")
+            await mcp_loader.load_mcp_tools_async(f.name, auth_file=str(auth_file))
+        finally:
+            auth_file.unlink(missing_ok=True)
+            Path(f.name).unlink()
+
+    assert captured == [{}]
+
+
+@pytest.mark.asyncio
+async def test_mcp_loader_does_not_override_configured_auth_header(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, str]] = []
+
+    async def fake_connect(self) -> bool:
+        captured.append(self.headers)
+        return False
+
+    monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", fake_connect)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        json.dump(
+            {
+                "mcpServers": {
+                    "remote": {
+                        "type": "streamable_http",
+                        "url": "https://mcp.example.com/mcp",
+                        "headers": {"Authorization": "Bearer mcp-token"},
+                    }
+                }
+            },
+            f,
+        )
+        f.flush()
+
+        try:
+            await mcp_loader.load_mcp_tools_async(f.name, auth_token="login-token")
+        finally:
+            Path(f.name).unlink()
+
+    assert captured == [{"Authorization": "Bearer mcp-token"}]

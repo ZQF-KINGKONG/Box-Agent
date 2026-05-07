@@ -34,6 +34,8 @@ class AnthropicClient(LLMClientBase):
         model: str = "claude-sonnet-4-20250514",
         retry_config: RetryConfig | None = None,
         max_output_tokens: int = 64000,
+        auth_token: str = "",
+        auth_file: str = "",
     ):
         """Initialize Anthropic client.
 
@@ -43,15 +45,16 @@ class AnthropicClient(LLMClientBase):
             model: Model name to use
             retry_config: Optional retry configuration
             max_output_tokens: Per-request ``max_tokens`` value sent to the API.
+            auth_token: Optional in-memory product login token.
+            auth_file: Optional auth.json path read before every request.
         """
-        super().__init__(api_key, api_base, model, retry_config)
+        super().__init__(api_key, api_base, model, retry_config, auth_token=auth_token, auth_file=auth_file)
         self.max_output_tokens = max_output_tokens
 
         # Initialize Anthropic async client
         self.client = anthropic.AsyncAnthropic(
             base_url=api_base,
             api_key=api_key,
-            default_headers={"Authorization": f"Bearer {api_key}"},
         )
 
     async def _make_api_request(
@@ -78,10 +81,11 @@ class AnthropicClient(LLMClientBase):
             Exception: API call failed
         """
         params: dict[str, Any] = {
-            "model": self.model,
             "max_tokens": self.max_output_tokens,
             "messages": api_messages,
         }
+        if self.model:
+            params["model"] = self.model
 
         if system_message:
             params["system"] = system_message
@@ -91,6 +95,10 @@ class AnthropicClient(LLMClientBase):
 
         if thinking_enabled:
             params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+
+        auth_headers = self._auth_headers()
+        if auth_headers:
+            params["extra_headers"] = auth_headers
 
         # Use Anthropic SDK's async messages.create
         response = await self.client.messages.create(**params)
@@ -328,16 +336,21 @@ class AnthropicClient(LLMClientBase):
         request_params = self._prepare_request(messages, tools)
 
         params: dict[str, Any] = {
-            "model": self.model,
             "max_tokens": self.max_output_tokens,
             "messages": request_params["api_messages"],
         }
+        if self.model:
+            params["model"] = self.model
         if request_params["system_message"]:
             params["system"] = request_params["system_message"]
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
         if thinking_enabled:
             params["thinking"] = {"type": "enabled", "budget_tokens": _THINKING_BUDGET}
+
+        auth_headers = self._auth_headers()
+        if auth_headers:
+            params["extra_headers"] = auth_headers
 
         # Accumulators for the finish event
         text_content = ""

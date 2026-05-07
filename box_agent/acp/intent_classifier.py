@@ -20,9 +20,6 @@ from .debug_logger import acp_logger as log
 _VALID_MODES: Final[frozenset[str]] = frozenset(
     {
         "data_analysis",
-        "ppt_plan_chat",
-        "ppt_outline",
-        "ppt_editor_standard_html",
     }
 )
 
@@ -35,12 +32,6 @@ ONLY (no punctuation, no explanation, no surrounding text):
 
 - data_analysis    : the user wants to analyze a dataset, spreadsheet, CSV, \
 Excel, or run statistics/plots over data.
-- ppt_plan_chat    : the user wants to discuss, brainstorm, or plan the \
-high-level structure of a PPT/slide deck (not yet asking for an outline).
-- ppt_outline      : the user wants a concrete slide-by-slide outline for a \
-PPT/deck.
-- ppt_editor_standard_html : the user wants to edit, modify, or generate the \
-HTML content of an individual PPT slide.
 - general          : none of the above; general chat, coding help, file \
 operations, or anything ambiguous.
 

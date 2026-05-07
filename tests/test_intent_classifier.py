@@ -38,10 +38,10 @@ class _SlowLLM:
 
 
 @pytest.mark.asyncio
-async def test_classify_ppt_outline():
+async def test_classify_ppt_outline_is_no_longer_auto_mode():
     llm = _FixedLLM("ppt_outline")
     mode = await classify_session_mode(llm, "帮我做一个讲解 AI 发展的 PPT 大纲")
-    assert mode == "ppt_outline"
+    assert mode is None
     assert llm.call_count == 1
 
 
@@ -53,10 +53,10 @@ async def test_classify_data_analysis():
 
 
 @pytest.mark.asyncio
-async def test_classify_ppt_plan_chat():
+async def test_classify_ppt_plan_chat_is_no_longer_auto_mode():
     llm = _FixedLLM("ppt_plan_chat")
     mode = await classify_session_mode(llm, "我想聊聊这个 PPT 应该怎么组织")
-    assert mode == "ppt_plan_chat"
+    assert mode is None
 
 
 @pytest.mark.asyncio
@@ -91,14 +91,14 @@ async def test_classify_handles_invalid_output():
 async def test_classify_tolerates_punctuated_output():
     llm = _FixedLLM("  `ppt_outline`.  ")
     mode = await classify_session_mode(llm, "outline this deck")
-    assert mode == "ppt_outline"
+    assert mode is None
 
 
 @pytest.mark.asyncio
 async def test_classify_echoed_sentence_with_label_first():
     llm = _FixedLLM("ppt_editor_standard_html — edit an HTML slide")
     mode = await classify_session_mode(llm, "change slide 3")
-    assert mode == "ppt_editor_standard_html"
+    assert mode is None
 
 
 @pytest.mark.asyncio

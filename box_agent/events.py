@@ -93,6 +93,14 @@ class ToolCallResult:
     error: str | None = None
 
 
+@dataclass(frozen=True)
+class WebSearchEvent:
+    """Structured references returned by the web_search tool."""
+
+    tool_call_id: str
+    payload: dict[str, Any]
+
+
 # ── Safety ──────────────────────────────────────────────────────
 
 
@@ -280,6 +288,7 @@ AgentEvent = Union[
     TokenUsageEvent,
     ToolCallStart,
     ToolCallResult,
+    WebSearchEvent,
     ArtifactEvent,
     ConfirmationRequired,
     SummarizationEvent,

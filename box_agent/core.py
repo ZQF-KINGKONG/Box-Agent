@@ -11,6 +11,7 @@ to the consumer through the event stream.
 from __future__ import annotations
 
 import asyncio
+import json
 import mimetypes
 import re
 import traceback
@@ -40,6 +41,7 @@ from .events import (
     TokenUsageEvent,
     ToolCallResult,
     ToolCallStart,
+    WebSearchEvent,
 )
 from .hooks import HookManager
 from .logger import AgentLogger
@@ -73,6 +75,22 @@ def _strip_plot_data(text: str) -> str:
     """
     cleaned = _PLOT_DATA_RE.sub("", text).strip()
     return cleaned if cleaned else "图表已生成"
+
+
+def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] | None:
+    """Return a frontend-friendly web_search payload when tool output has refs."""
+    if tool_name != "web_search" or not content:
+        return None
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("refs"), list):
+        return None
+
+    return payload
 
 
 def _detect_artifacts(
@@ -815,6 +833,10 @@ async def run_agent_loop(
                 content=tc_content,
                 error=tc_error,
             )
+            if result.success:
+                web_search_payload = _extract_web_search_payload(fn_name, tc_content)
+                if web_search_payload is not None:
+                    yield WebSearchEvent(tool_call_id=tc_id, payload=web_search_payload)
 
             # Emit permission request event if tool was denied with escalation info
             # (only for legacy consumers without a negotiator)
@@ -981,6 +1003,10 @@ async def run_agent_loop(
                     content=par_content,
                     error=par_error,
                 )
+                if result.success:
+                    web_search_payload = _extract_web_search_payload(fn_name, par_content)
+                    if web_search_payload is not None:
+                        yield WebSearchEvent(tool_call_id=tc_id, payload=web_search_payload)
 
                 # Emit permission request event if tool was denied with escalation info
                 # (only for legacy consumers without a negotiator)

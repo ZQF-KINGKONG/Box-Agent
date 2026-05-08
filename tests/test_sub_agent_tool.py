@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from box_agent.events import DoneEvent, StopReason
+from box_agent.events import DoneEvent, StopReason, SubAgentEvent, WebSearchEvent
 from box_agent.schema import LLMResponse, Message, StreamEvent
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.sub_agent_tool import SubAgentTool
@@ -32,6 +33,28 @@ class DummyTool(Tool):
 
     async def execute(self, **kwargs) -> ToolResult:
         return ToolResult(success=True, content="dummy result")
+
+
+class WebSearchTool(Tool):
+    """A web_search-shaped tool that returns reference metadata."""
+
+    @property
+    def name(self) -> str:
+        return "web_search"
+
+    @property
+    def description(self) -> str:
+        return "Search the web"
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    async def execute(self, **kwargs) -> ToolResult:
+        return ToolResult(
+            success=True,
+            content='{"refs":[{"reference_tag":"ref_1","title":"Example","url":"https://example.com"}]}',
+        )
 
 
 def _make_llm(text: str = "summary", tool_calls=None):
@@ -105,6 +128,101 @@ async def test_basic_execution():
     result = await tool.execute(task="Analyze revenue data")
     assert result.success is True
     assert "revenue up 20%" in result.content
+
+
+async def test_web_search_tool_emits_reference_event():
+    """web_search tool results should surface refs as a structured event."""
+    from box_agent.core import run_agent_loop
+    from box_agent.schema import FunctionCall, ToolCall
+
+    call_num = 0
+
+    async def fake_stream(*, messages, tools, **kwargs):
+        nonlocal call_num
+        call_num += 1
+        if call_num == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="search-1",
+                        type="function",
+                        function=FunctionCall(name="web_search", arguments={"query": "example"}),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="summary [ref_1]")
+            yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
+
+    llm = AsyncMock()
+    llm.generate_stream = fake_stream
+
+    events = []
+    async for event in run_agent_loop(
+        llm=llm,
+        messages=[Message(role="user", content="search")],
+        tools={"web_search": WebSearchTool()},
+        max_steps=3,
+    ):
+        events.append(event)
+
+    web_events = [event for event in events if isinstance(event, WebSearchEvent)]
+    assert len(web_events) == 1
+    assert web_events[0].tool_call_id == "search-1"
+    assert web_events[0].payload["refs"][0]["reference_tag"] == "ref_1"
+
+
+async def test_sub_agent_forwards_web_search_reference_event():
+    """Sub-agent child web_search refs should be forwarded to the parent stream."""
+    from box_agent.schema import FunctionCall, ToolCall
+
+    call_num = 0
+
+    async def fake_stream(*, messages, tools, **kwargs):
+        nonlocal call_num
+        call_num += 1
+        if call_num == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="child-search-1",
+                        type="function",
+                        function=FunctionCall(name="web_search", arguments={"query": "example"}),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="child summary [ref_1]")
+            yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
+
+    llm = AsyncMock()
+    llm.generate_stream = fake_stream
+
+    tool = SubAgentTool(llm=llm, parent_tools={"web_search": WebSearchTool()})
+
+    queue = asyncio.Queue()
+    tool._event_queue = queue
+    tool._parent_tool_call_id = "parent-sub-agent"
+
+    result = await tool.execute(task="search in child")
+
+    forwarded = []
+    while not queue.empty():
+        forwarded.append(queue.get_nowait())
+
+    assert result.success is True
+    web_events = [
+        event
+        for event in forwarded
+        if isinstance(event, SubAgentEvent) and isinstance(event.event, WebSearchEvent)
+    ]
+    assert len(web_events) == 1
+    assert web_events[0].parent_tool_call_id == "parent-sub-agent"
+    assert web_events[0].event.payload["refs"][0]["url"] == "https://example.com"
 
 
 async def test_empty_output_returns_error():

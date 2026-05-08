@@ -87,6 +87,7 @@ from box_agent.events import (
     ThinkingEvent,
     ToolCallResult as ToolCallResultEvent,
     ToolCallStart as ToolCallStartEvent,
+    WebSearchEvent,
 )
 from box_agent.llm import LLMClient
 from box_agent.acp.action_hints import (
@@ -769,6 +770,11 @@ class BoxACPAgent:
                         except Exception as exc:
                             log.exception("artifact/send_error", exc, session_id=session_id, tool_call_id=tid, payload=artifact_meta)
 
+                    case WebSearchEvent(tool_call_id=tid, payload=payload):
+                        web_search_payload = {**payload, "type": "web_search"}
+                        log.debug("web_search/payload", session_id=session_id, tool_call_id=tid, payload=web_search_payload)
+                        await self._send(session_id, update_tool_call(tid, raw_output=web_search_payload))
+
                     case ErrorEvent(message=msg, is_fatal=True):
                         log.error("error", session_id=session_id, message=msg, is_fatal=True)
                         await self._send(session_id, update_agent_message(text_block(f"Error: {msg}")))
@@ -787,6 +793,12 @@ class BoxACPAgent:
                         return reason.value
 
                     case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner):
+                        if isinstance(inner, WebSearchEvent):
+                            web_search_payload = {**inner.payload, "type": "web_search"}
+                            log.debug("sub_agent/web_search", session_id=session_id, tool_call_id=tid, payload=web_search_payload)
+                            await self._send(session_id, update_tool_call(tid, raw_output=web_search_payload))
+                            continue
+
                         # Send structured progress so officev3 can render sub-agent activity
                         progress: dict = {
                             "type": "sub_agent_progress",

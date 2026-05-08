@@ -42,6 +42,16 @@ def test_resolve_auth_token_reads_auth_json_before_env(
     assert resolve_auth_token(auth_file=auth_file) == "file-token"
 
 
+def test_read_auth_token_file_prefers_token_over_access_token(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth_file.write_text(
+        '{"access_token": "login-token", "token": "override-token"}\n',
+        encoding="utf-8",
+    )
+
+    assert read_auth_token_file(auth_file) == "override-token"
+
+
 def test_bearer_auth_headers_preserves_existing_authorization() -> None:
     headers = bearer_auth_headers(
         "login-token",
@@ -50,14 +60,19 @@ def test_bearer_auth_headers_preserves_existing_authorization() -> None:
     assert headers == {"authorization": "Bearer custom-provider-token", "X-Test": "1"}
 
 
-def test_auth_header_only_attaches_to_xiaohuanxiong_domains() -> None:
+def test_auth_header_only_attaches_to_hosted_gateway_hosts() -> None:
     assert should_attach_auth_header("https://api.xiaohuanxiong.com/v1")
     assert should_attach_auth_header("https://llm.internal.xiaohuanxiong.com/v1")
+    assert should_attach_auth_header("http://10.158.136.99:9090/api/web/llm/v2")
     assert not should_attach_auth_header("https://llm.example.com/v1")
 
     assert bearer_auth_headers(
         "login-token",
         url="https://api.xiaohuanxiong.com/v1",
+    ) == {"Authorization": "Bearer login-token"}
+    assert bearer_auth_headers(
+        "login-token",
+        url="http://10.158.136.99:9090/api/web/llm/v2",
     ) == {"Authorization": "Bearer login-token"}
     assert bearer_auth_headers("login-token", url="https://llm.example.com/v1") == {}
 

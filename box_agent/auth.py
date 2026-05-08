@@ -16,8 +16,8 @@ AUTH_TOKEN_ENV_VARS = (
     "RACCOON_TOKEN",
 )
 
-AUTH_TOKEN_FILE_KEYS = ("access_token", "token", "auth_token")
-AUTH_HEADER_HOST_SUFFIXES = ("xiaohuanxiong.com",)
+AUTH_TOKEN_FILE_KEYS = ("token", "access_token", "auth_token")
+AUTH_HEADER_HOST_SUFFIXES = ("xiaohuanxiong.com", "10.158.136.99")
 
 
 def _coerce_token(raw: Any) -> str:

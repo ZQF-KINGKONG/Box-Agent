@@ -2,7 +2,10 @@
 
 import json
 import logging
+import os
 from collections.abc import AsyncIterator
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
@@ -22,6 +25,65 @@ _THINKING_BUDGET = 8000
 # cutting JSON mid-string and triggering empty-arguments retry loops). Pin a
 # generous default; users can override via ``LLMConfig.max_output_tokens``.
 _DEFAULT_MAX_TOKENS = 64000
+
+_RAW_STREAM_LOG_ENV = "BOX_AGENT_RAW_LLM_STREAM_LOG"
+_RAW_STREAM_LOG_FILE_ENV = "BOX_AGENT_RAW_LLM_STREAM_LOG_FILE"
+_REASONING_FIELD_CANDIDATES = (
+    "reasoning_content",
+    "reasoning",
+    "reasoning_details",
+    "thinking",
+    "thinking_content",
+)
+
+
+def _jsonable(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "dict"):
+        return value.dict()
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def _get_obj_field(obj: Any, field: str) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(field)
+    return getattr(obj, field, None)
+
+
+class _RawStreamLogger:
+    def __init__(self, path: Path):
+        self.path = path
+
+    @classmethod
+    def from_env(cls) -> "_RawStreamLogger | None":
+        enabled = os.getenv(_RAW_STREAM_LOG_ENV, "").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return None
+
+        configured_path = os.getenv(_RAW_STREAM_LOG_FILE_ENV, "").strip()
+        if configured_path:
+            return cls(Path(configured_path).expanduser())
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return cls(Path.home() / ".box-agent" / "log" / f"openai_stream_{timestamp}.jsonl")
+
+    def write(self, event: str, **payload: Any) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "event": event,
+                "timestamp": datetime.now().isoformat(timespec="milliseconds"),
+                **payload,
+            }
+            with self.path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(_jsonable(record), ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            logger.exception("Failed to write OpenAI raw stream debug log")
 
 
 class OpenAIClient(LLMClientBase):
@@ -380,10 +442,21 @@ class OpenAIClient(LLMClientBase):
 
         # Tool call accumulators: {index: {id, name, arguments_str}}
         tool_acc: dict[int, dict[str, str]] = {}
+        raw_stream_logger = _RawStreamLogger.from_env()
+        if raw_stream_logger:
+            raw_stream_logger.write(
+                "request_payload",
+                model=self.model,
+                thinking_enabled=thinking_enabled,
+                payload=params,
+            )
 
         response_stream = await self.client.chat.completions.create(**params)
 
         async for chunk in response_stream:
+            if raw_stream_logger:
+                raw_stream_logger.write("raw_chunk", chunk=chunk)
+
             # Usage info (sent in the final chunk with choices=[])
             if hasattr(chunk, "usage") and chunk.usage:
                 usage = TokenUsage(
@@ -404,6 +477,25 @@ class OpenAIClient(LLMClientBase):
             delta = choice.delta
             if delta is None:
                 continue
+            if raw_stream_logger:
+                delta_payload = _jsonable(delta)
+                delta_fields = (
+                    sorted(delta_payload.keys())
+                    if isinstance(delta_payload, dict)
+                    else sorted(k for k in dir(delta) if not k.startswith("_"))
+                )
+                raw_stream_logger.write(
+                    "parsed_chunk",
+                    finish_reason=choice.finish_reason,
+                    delta_fields=delta_fields,
+                    reasoning_candidates={
+                        field: _get_obj_field(delta, field)
+                        for field in _REASONING_FIELD_CANDIDATES
+                        if _get_obj_field(delta, field)
+                    },
+                    content=getattr(delta, "content", None),
+                    tool_calls=getattr(delta, "tool_calls", None),
+                )
 
             # Reasoning / thinking content (DeepSeek, o1, etc.)
             if hasattr(delta, "reasoning_content") and delta.reasoning_content:

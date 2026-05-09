@@ -28,10 +28,9 @@ _DANGEROUS_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bsudo\s"), "sudo: runs command as root"),
     (re.compile(r"\bchmod\s"), "chmod: changes file permissions"),
     (re.compile(r"\bchown\s"), "chown: changes file ownership"),
-    (re.compile(r"(?<!2)>\s*/dev/null"), "redirect to /dev/null"),
     (re.compile(r"\bmv\s.*\s/dev/null\b"), "mv to /dev/null: destroys file"),
     (re.compile(r">\|?\s*/etc/"), "write to /etc: modifies system config"),
-    (re.compile(r"\bformat\s"), "format: formats disk"),
+    (re.compile(r"(?<!-)\bformat\s"), "format: formats disk"),
     (re.compile(r"\bdiskutil\s+erase"), "diskutil erase: erases disk"),
     (re.compile(r"\blaunchctl\s"), "launchctl: manages system services"),
 ]

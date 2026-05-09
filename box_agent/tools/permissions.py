@@ -22,6 +22,7 @@ permission_request payload format (canonical, matches box-agent-permissions.md):
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -173,6 +174,43 @@ class PermissionEngine:
         except (OSError, RuntimeError):
             self._box_agent_dir = None
 
+        # Shells and many libraries naturally use OS temp roots for transient
+        # command output. Allow those roots so harmless patterns like
+        # `cmd >/tmp/check.txt && tail /tmp/check.txt` do not require a broad
+        # filesystem grant. This does not allow reads from other system paths
+        # referenced in the same command; each extracted path is checked.
+        temp_candidates = ["/tmp", "/var/tmp"]
+        resolved_temp_dirs: list[Path] = []
+        for d in temp_candidates:
+            try:
+                resolved = Path(d).expanduser().resolve()
+            except (OSError, RuntimeError):
+                continue
+            if resolved not in resolved_temp_dirs:
+                resolved_temp_dirs.append(resolved)
+        self._temp_dirs: tuple[Path, ...] = tuple(resolved_temp_dirs)
+
+        app_candidates = [
+            "/Applications",
+            "/System/Applications",
+            "/usr/bin",
+            "/usr/local/bin",
+            "/opt",
+            "/snap/bin",
+        ]
+        for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+            if value := os.environ.get(env_name):
+                app_candidates.append(value)
+        resolved_app_dirs: list[Path] = []
+        for d in app_candidates:
+            try:
+                resolved = Path(d).expanduser().resolve()
+            except (OSError, RuntimeError):
+                continue
+            if resolved not in resolved_app_dirs:
+                resolved_app_dirs.append(resolved)
+        self._app_read_dirs: tuple[Path, ...] = tuple(resolved_app_dirs)
+
     @property
     def policy(self) -> CapabilityPolicy:
         return self._policy
@@ -222,7 +260,7 @@ class PermissionEngine:
             if self._grant_store.has_grant("filesystem", "user_home"):
                 scope = "user_home"
 
-        if self._path_allowed_by_scope(resolved, scope):
+        if self._path_allowed_by_scope(resolved, scope, operation):
             return PermissionDecision(allowed=True)
 
         escalation = self._compute_escalation(resolved, scope)
@@ -311,7 +349,7 @@ class PermissionEngine:
             resolved_parent = resolved_parent / part
         return resolved_parent
 
-    def _path_allowed_by_scope(self, resolved: Path, scope: str) -> bool:
+    def _path_allowed_by_scope(self, resolved: Path, scope: str, operation: str) -> bool:
         # workspace_dir is always allowed regardless of scope
         if self._is_inside(resolved, self._workspace_dir):
             return True
@@ -319,6 +357,21 @@ class PermissionEngine:
         # ~/.box-agent is engine-owned data — always allowed.
         if self._box_agent_dir is not None and self._is_inside(resolved, self._box_agent_dir):
             return True
+
+        # OS temp roots are allowed for transient tool output only. Commands
+        # that also touch protected paths are still denied when those other
+        # paths are checked.
+        for temp_dir in self._temp_dirs:
+            if self._is_inside(resolved, temp_dir):
+                return True
+
+        # Read-only access to common application / executable install roots is
+        # allowed so tools can probe or run dependencies such as LibreOffice
+        # without requiring broad user-home access. Writes remain blocked.
+        if operation == "read":
+            for app_dir in self._app_read_dirs:
+                if self._is_inside(resolved, app_dir):
+                    return True
 
         if scope == "user_home":
             return self._is_under_home(resolved)
@@ -441,7 +494,7 @@ class GrantStore:
 # ── Bash helper ──
 
 
-_ABS_PATH_RE = re.compile(r'(?:^|\s|["\'])(\/(?:[^\s"\'\\]|\\.)+)')
+_ABS_PATH_RE = re.compile(r'(?:^|\s|["\']|>|>>)(\/(?:[^\s"\'\\]|\\.)+)')
 _TILDE_PATH_RE = re.compile(r'(?:^|\s|["\';=])(~(?:/[^\s"\'\\;|&]*)?)')
 _HOME_VAR_RE = re.compile(r'(\$HOME(?:/[^\s"\'\\;|&]*)?)')
 

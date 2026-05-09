@@ -46,6 +46,7 @@ class TestDetectDangerousCommand:
         assert detect_dangerous_command("cat file.txt") is None
         assert detect_dangerous_command("git status") is None
         assert detect_dangerous_command("python main.py") is None
+        assert detect_dangerous_command("python render_pptx.py deck.pptx --format png") is None
 
     def test_dd_detected(self):
         assert detect_dangerous_command("dd if=/dev/zero of=/dev/sda") is not None
@@ -57,8 +58,9 @@ class TestDetectDangerousCommand:
         assert detect_dangerous_command("shutdown -h now") is not None
         assert detect_dangerous_command("reboot") is not None
 
-    def test_redirect_to_dev_null(self):
-        assert detect_dangerous_command("cat file > /dev/null") is not None
+    def test_redirect_to_dev_null_allowed(self):
+        assert detect_dangerous_command("cat file > /dev/null") is None
+        assert detect_dangerous_command("qlmanage -h >/dev/null 2>&1") is None
 
     def test_mv_to_dev_null(self):
         assert detect_dangerous_command("mv important.txt /dev/null") is not None

@@ -5,6 +5,7 @@ from .bash_tool import BashTool
 from .file_tools import EditTool, ReadTool, WriteTool
 from .setup import add_workspace_tools, initialize_base_tools
 from .todo_tool import TodoReadTool, TodoStore, TodoWriteTool
+from .vision_review_tool import VisionReviewTool
 
 __all__ = [
     "Tool",
@@ -16,6 +17,7 @@ __all__ = [
     "TodoStore",
     "TodoWriteTool",
     "TodoReadTool",
+    "VisionReviewTool",
     "add_workspace_tools",
     "initialize_base_tools",
 ]

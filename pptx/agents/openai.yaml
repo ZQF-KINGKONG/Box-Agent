@@ -1,0 +1,39 @@
+name: pptx2
+runtime: openai-codex
+summary: OpenAI/Codex friendly workflow for creating, inspecting, editing, rendering, and validating PowerPoint .pptx decks.
+entrypoint: SKILL.md
+dependency_policy:
+  install_without_user_approval: managed office-raccoon node/python environment only
+  default_new_deck_generator: html-first visual deck unless editable PowerPoint is required
+  allow_silent_fallback_to_python_pptx: false
+visual_quality_policy:
+  screenshot_generation_is_not_qa: true
+  require_image_content_inspection: true
+  require_contact_sheet: true
+  compare_source_screenshots_to_pptx_render: true
+  if_no_image_viewer_report: Visual inspection BLOCKED
+recommended_tools:
+  - shell
+  - filesystem
+  - image_viewer
+optional_dependencies:
+  python:
+    - python-pptx
+    - pillow
+    - lxml
+    - defusedxml optional for advanced OOXML helper scripts
+  node:
+    - pptxgenjs required for new deck creation unless the user explicitly approves another generator
+    - pngjs for source-vs-render slide image comparison
+  system:
+    - LibreOffice soffice or libreoffice on macOS/Linux/Windows
+    - Poppler pdftoppm on macOS/Linux/Windows
+    - macOS qlmanage as lightweight render fallback
+    - Microsoft PowerPoint export automation only with explicit user approval
+api_wrapping:
+  suggested_tools:
+    - inspect_pptx
+    - render_pptx
+    - validate_pptx
+    - create_pptx_from_spec
+    - edit_pptx_from_plan

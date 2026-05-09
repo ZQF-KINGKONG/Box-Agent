@@ -23,6 +23,7 @@ from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_con
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
+from box_agent.tools.vision_review_tool import VisionReviewTool
 
 if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
@@ -305,6 +306,18 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         tools.append(status_tool)
         _out(f"{Colors.GREEN}✅ Loaded Jupyter sandbox tool (execute_code){Colors.RESET}")
         _out(f"{Colors.GREEN}✅ Loaded sandbox status tool{Colors.RESET}")
+
+    # Vision review tool — reads local screenshots and sends image content to the current LLM
+    if llm is not None:
+        tools.append(
+            VisionReviewTool(
+                llm=llm,
+                workspace_dir=str(workspace_dir),
+                allow_full_access=allow_full_access,
+                permission_engine=permission_engine,
+            )
+        )
+        _out(f"{Colors.GREEN}✅ Loaded vision review tool (vision_review){Colors.RESET}")
 
     # Sub-agent tool — must be registered last so it can reference all other tools
     if config.tools.enable_sub_agent and llm is not None:

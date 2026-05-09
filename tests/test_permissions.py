@@ -196,6 +196,14 @@ class TestFilesystemRead:
         except (OSError, PermissionError):
             pytest.skip("Cannot create symlink in this environment")
 
+    def test_read_application_dir_allowed(self, engine: PermissionEngine):
+        """Read-only probing of app/executable install roots is allowed."""
+        decision = engine.check(
+            FILESYSTEM_READ,
+            {"path": "/Applications/LibreOffice.app/Contents/MacOS/soffice"},
+        )
+        assert decision.allowed is True
+
 
 # ── PermissionEngine: filesystem.write ───────────────────────
 
@@ -226,6 +234,20 @@ class TestFilesystemWrite:
         decision = engine.check(FILESYSTEM_WRITE, {"path": str(new_path)})
         assert decision.allowed is False
         assert decision.permission_request is not None  # under home → escalation suggested
+
+    def test_write_os_temp_allowed(self, engine: PermissionEngine):
+        """Transient shell output under the OS temp root is allowed."""
+        decision = engine.check(FILESYSTEM_WRITE, {"path": "/tmp/box_agent_check.txt"})
+        assert decision.allowed is True
+
+    def test_write_application_dir_denied(self, engine: PermissionEngine):
+        """Application install roots are probeable but not writable."""
+        decision = engine.check(
+            FILESYSTEM_WRITE,
+            {"path": "/Applications/LibreOffice.app/Contents/MacOS/soffice"},
+        )
+        assert decision.allowed is False
+        assert decision.permission_request is None
 
 
 # ── PermissionEngine: memory.openclaw_import ─────────────────
@@ -640,6 +662,19 @@ class TestBashPermissionPhase1:
         eng = self._make_engine(workspace)
         result = await self._run_bash("cp /etc/foo /tmp/bar", eng)
         assert result.success is False
+
+    async def test_tmp_redirect_allowed(self, workspace: Path):
+        """Temporary shell reports under /tmp are allowed."""
+        eng = self._make_engine(workspace)
+        result = await self._run_bash("printf ok >/tmp/box_agent_perm_test.txt && tail -n 1 /tmp/box_agent_perm_test.txt", eng)
+        assert result.success is True
+        assert "ok" in result.stdout
+
+    async def test_tmp_redirect_without_later_read_allowed(self, workspace: Path):
+        """A bare redirect target like >/tmp/file is extractable and allowed."""
+        eng = self._make_engine(workspace)
+        result = await self._run_bash("printf ok >/tmp/box_agent_perm_redirect_only.txt", eng)
+        assert result.success is True
 
     async def test_workspace_command_allowed(self, workspace: Path):
         """Commands referencing workspace paths are NOT blocked by permission engine."""

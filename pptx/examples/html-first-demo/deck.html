@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; background: #101828; }
+    body { font-family: Aptos, Inter, Arial, sans-serif; }
+    .slide {
+      width: 1280px;
+      height: 720px;
+      position: relative;
+      overflow: hidden;
+      color: #f8fafc;
+      background: linear-gradient(135deg, #102a43 0%, #14532d 52%, #f2c94c 100%);
+    }
+    .slide + .slide { margin-top: 24px; }
+    .kicker { position: absolute; left: 72px; top: 70px; font-size: 24px; font-weight: 700; color: #fde68a; }
+    h1 { position: absolute; left: 72px; top: 128px; width: 760px; margin: 0; font-size: 74px; line-height: 0.95; letter-spacing: 0; }
+    .subtitle { position: absolute; left: 76px; top: 330px; width: 610px; font-size: 28px; line-height: 1.25; color: #e0f2fe; }
+    .panel { position: absolute; right: 72px; top: 90px; width: 350px; height: 500px; border: 2px solid rgba(255,255,255,.5); background: rgba(15,23,42,.36); }
+    .star { font-size: 58px; color: #fde047; margin: 28px 0 0 30px; }
+    .metric { margin: 42px 30px 0; font-size: 22px; color: #d1fae5; }
+    .metric b { display: block; font-size: 64px; color: #fff; }
+    .grid { position: absolute; left: 72px; right: 72px; top: 140px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; }
+    .card { height: 350px; padding: 30px; background: rgba(255,255,255,.92); color: #0f172a; }
+    .card h2 { margin: 0 0 18px; font-size: 34px; }
+    .card p { margin: 0; font-size: 23px; line-height: 1.35; }
+    .title { position: absolute; left: 72px; top: 60px; margin: 0; font-size: 48px; }
+  </style>
+</head>
+<body>
+  <section class="slide" data-title="Title">
+    <div class="kicker">HTML-first visual deck</div>
+    <h1>Brazil Football Legends</h1>
+    <div class="subtitle">A fixed 16:9 HTML slide rendered to PNG, then exported into PowerPoint.</div>
+    <div class="panel">
+      <div class="star">★★★★★</div>
+      <div class="metric"><b>5</b>World Cup titles</div>
+      <div class="metric"><b>3</b>Era-defining icons</div>
+    </div>
+  </section>
+  <section class="slide" data-title="Three Legends">
+    <h1 class="title">Three Legends</h1>
+    <div class="grid">
+      <div class="card"><h2>Pele</h2><p>The global symbol of Brazilian football and the only player with three World Cup wins.</p></div>
+      <div class="card"><h2>Ronaldo</h2><p>Explosive power, ruthless finishing, and the defining striker of the 2002 tournament.</p></div>
+      <div class="card"><h2>Neymar</h2><p>The modern heir to samba flair, carrying Brazil's creativity into a new era.</p></div>
+    </div>
+  </section>
+</body>
+</html>

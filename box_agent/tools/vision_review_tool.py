@@ -1,0 +1,284 @@
+"""Visual review tool for local image artifacts."""
+
+from __future__ import annotations
+
+import base64
+import mimetypes
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from box_agent.schema import Message
+from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.safety import validate_path_in_workspace
+
+if TYPE_CHECKING:
+    from box_agent.tools.permissions import PermissionEngine
+
+
+_SUPPORTED_MIME_TYPES = {
+    "image/png",
+    "image/jpeg",
+}
+_MAX_IMAGE_BYTES = 20 * 1024 * 1024
+_DEFAULT_OUTPUT_FILENAME = "visual_review.md"
+
+
+class VisionReviewTool(Tool):
+    """Review local PNG/JPEG screenshots with the configured multimodal LLM."""
+
+    def __init__(
+        self,
+        llm: Any,
+        workspace_dir: str = ".",
+        allow_full_access: bool = True,
+        permission_engine: PermissionEngine | None = None,
+    ) -> None:
+        self.llm = llm
+        self.workspace_dir = Path(workspace_dir).absolute()
+        self.allow_full_access = allow_full_access
+        self._perm = permission_engine
+
+    @property
+    def name(self) -> str:
+        return "vision_review"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Visually review local PNG/JPEG screenshots by reading the image files, "
+            "sending them as image content to the current multimodal LLM, writing "
+            "the markdown report to visual_review.md beside the first input image by default, and returning "
+            "per-image PASS/ISSUE findings. Use this when a skill requires real "
+            "visual QA; passing image paths in text is not enough."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "image_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "description": "Local PNG/JPEG screenshot paths to review. Relative paths resolve from the workspace.",
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "Markdown report path. Defaults to visual_review.md in the first image's directory.",
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": "Optional extra review criteria from the active skill or user request.",
+                },
+            },
+            "required": ["image_paths"],
+        }
+
+    async def execute(
+        self,
+        image_paths: list[str],
+        output_path: str | None = None,
+        instructions: str | None = None,
+    ) -> ToolResult:
+        """Run visual review and write the markdown report."""
+        if not image_paths:
+            return ToolResult(success=False, error="image_paths must contain at least one image path")
+
+        try:
+            images = [self._load_image(path) for path in image_paths]
+            output_file = self._resolve_output_path(output_path, images[0]["file_path"])
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc))
+
+        content_blocks = self._build_content_blocks(images, instructions=instructions)
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    "You are a meticulous visual QA reviewer. Review the supplied local screenshots directly. "
+                    "Do not claim a page passed unless you inspected the image. Return concise markdown."
+                ),
+            ),
+            Message(role="user", content=content_blocks),
+        ]
+
+        try:
+            response = await self.llm.generate(messages=messages, tools=None)
+        except Exception as exc:  # pragma: no cover - exact provider exceptions vary
+            return ToolResult(success=False, error=f"Vision review LLM request failed: {exc}")
+
+        report = self._normalize_report(response.content, [img["path"] for img in images])
+
+        try:
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            output_file.write_text(report, encoding="utf-8")
+        except OSError as exc:
+            return ToolResult(success=False, error=f"Failed to write visual review report: {exc}")
+
+        rel_output = self._display_path(output_file)
+        return ToolResult(
+            success=True,
+            content=f"Visual review written to {rel_output}\n\n{report}",
+        )
+
+    def _load_image(self, path: str) -> dict[str, str]:
+        file_path = self._resolve_readable_path(path)
+        if not file_path.exists():
+            raise ValueError(f"Image file not found: {path}")
+        if not file_path.is_file():
+            raise ValueError(f"Image path is not a file: {path}")
+
+        mime_type = mimetypes.guess_type(file_path.name)[0]
+        if mime_type not in _SUPPORTED_MIME_TYPES:
+            raise ValueError(
+                f"Unsupported image type for {path}: {mime_type or 'unknown'}; only PNG and JPEG are supported"
+            )
+
+        size = file_path.stat().st_size
+        if size > _MAX_IMAGE_BYTES:
+            raise ValueError(
+                f"Image is too large for visual review: {path} ({size} bytes > {_MAX_IMAGE_BYTES} bytes)"
+            )
+
+        data_url = f"data:{mime_type};base64,{base64.b64encode(file_path.read_bytes()).decode('ascii')}"
+        return {
+            "path": self._display_path(file_path),
+            "file_path": str(file_path),
+            "mime_type": mime_type,
+            "data_url": data_url,
+            "base64": data_url.split(",", 1)[1],
+        }
+
+    def _resolve_output_path(self, output_path: str | None, first_image_path: str) -> Path:
+        if output_path and output_path.strip():
+            return self._resolve_writable_path(output_path)
+        return self._resolve_writable_path(str(Path(first_image_path).parent / _DEFAULT_OUTPUT_FILENAME))
+
+    def _resolve_readable_path(self, path: str) -> Path:
+        file_path = Path(path)
+        if not file_path.is_absolute():
+            file_path = self.workspace_dir / file_path
+        file_path = file_path.absolute()
+
+        if self._perm:
+            decision = self._perm.check(
+                capability="filesystem.read",
+                resource={"path": str(file_path)},
+                tool_name=self.name,
+            )
+            if not decision.allowed:
+                raise ValueError(decision.reason)
+        elif not self.allow_full_access:
+            error = validate_path_in_workspace(file_path, self.workspace_dir)
+            if error:
+                raise ValueError(error)
+        return file_path
+
+    def _resolve_writable_path(self, path: str) -> Path:
+        file_path = Path(path)
+        if not file_path.is_absolute():
+            file_path = self.workspace_dir / file_path
+        file_path = file_path.absolute()
+
+        if self._perm:
+            decision = self._perm.check(
+                capability="filesystem.write",
+                resource={"path": str(file_path)},
+                tool_name=self.name,
+            )
+            if not decision.allowed:
+                raise ValueError(decision.reason)
+        elif not self.allow_full_access:
+            error = validate_path_in_workspace(file_path, self.workspace_dir)
+            if error:
+                raise ValueError(error)
+        return file_path
+
+    def _build_content_blocks(
+        self,
+        images: list[dict[str, str]],
+        *,
+        instructions: str | None,
+    ) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": self._review_prompt(images, instructions=instructions),
+            }
+        ]
+        provider = self._provider_hint()
+        for index, image in enumerate(images, start=1):
+            blocks.append({"type": "text", "text": f"Image {index}: {image['path']}"})
+            if "anthropic" in provider:
+                media_type = image["mime_type"]
+                blocks.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": image["base64"],
+                        },
+                    }
+                )
+            else:
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": image["data_url"]},
+                    }
+                )
+        return blocks
+
+    def _provider_hint(self) -> str:
+        parts = [
+            str(getattr(self.llm, "provider", "")),
+            self.llm.__class__.__name__,
+        ]
+        nested = getattr(self.llm, "_client", None)
+        if nested is not None:
+            parts.append(nested.__class__.__name__)
+        return " ".join(parts).lower()
+
+    def _review_prompt(self, images: list[dict[str, str]], *, instructions: str | None) -> str:
+        image_list = "\n".join(f"- Image {idx}: {image['path']}" for idx, image in enumerate(images, start=1))
+        extra = f"\n\nExtra review criteria:\n{instructions.strip()}" if instructions and instructions.strip() else ""
+        return f"""Review these presentation/page screenshots and produce visual_review.md content.
+
+Images:
+{image_list}
+
+Required markdown format:
+# Visual Review
+
+## Summary
+- Overall: PASS or ISSUE
+- Reviewed images: {len(images)}
+
+## Per-page findings
+| Page | Source image | Status | Findings | Suggested fix |
+| --- | --- | --- | --- | --- |
+
+Rules:
+- Use PASS only when the page is visually acceptable.
+- Use ISSUE for text cutoff, overlap, low contrast, unreadable text, bad alignment, unintended blank areas, clipped media, broken charts/tables, or inconsistent styling.
+- Include concrete fixes for each ISSUE.
+- If every page passes, still include one table row per image with PASS.
+- Do not treat a contact sheet as the final review result; inspect the supplied image content here.{extra}
+"""
+
+    def _normalize_report(self, content: str, image_paths: list[str]) -> str:
+        report = (content or "").strip()
+        if not report:
+            rows = "\n".join(f"| {idx} | {path} | ISSUE | LLM returned an empty review. | Re-run visual review. |" for idx, path in enumerate(image_paths, start=1))
+            report = f"# Visual Review\n\n## Summary\n- Overall: ISSUE\n- Reviewed images: {len(image_paths)}\n\n## Per-page findings\n| Page | Source image | Status | Findings | Suggested fix |\n| --- | --- | --- | --- | --- |\n{rows}"
+        if not report.startswith("# Visual Review"):
+            report = "# Visual Review\n\n" + report
+        return report + "\n"
+
+    def _display_path(self, path: Path) -> str:
+        try:
+            return str(path.relative_to(self.workspace_dir))
+        except ValueError:
+            return str(path)

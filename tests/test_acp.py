@@ -69,6 +69,76 @@ class DummyLLM:
             yield StreamEvent(type="finish", finish_reason="stop")
 
 
+class TodoLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="todo1",
+                        type="function",
+                        function=FunctionCall(
+                            name="todo_write",
+                            arguments={"action": "create", "task": "Plan host integration"},
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="general", finish_reason="stop")
+
+
+class SubAgentLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="sub1",
+                        type="function",
+                        function=FunctionCall(name="sub_agent", arguments={"task": "Inspect one file"}),
+                    )
+                ],
+            )
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="child1",
+                        type="function",
+                        function=FunctionCall(name="echo", arguments={"text": "child"}),
+                    )
+                ],
+            )
+        elif self.calls == 3:
+            yield StreamEvent(type="text", delta="child summary")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        else:
+            yield StreamEvent(type="text", delta="parent done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="general", finish_reason="stop")
+
+
 class EchoTool(Tool):
     @property
     def name(self):
@@ -303,3 +373,53 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
     assert "provider: box_agent" in state.agent.system_prompt
     assert "shell command: unavailable" in state.agent.system_prompt
     assert state.agent.tools["bash"]._subprocess_env["BOX_AGENT_NODE"] == str(node)
+
+
+@pytest.mark.asyncio
+async def test_acp_emits_todo_snapshot_raw_output(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, TodoLLM(), [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "plan"}]))
+
+    assert response.stopReason == "end_turn"
+    assert any(
+        getattr(update.update, "rawOutput", None)
+        and update.update.rawOutput.get("type") == "todo_snapshot"
+        and update.update.rawOutput["items"][0]["task"] == "Plan host integration"
+        for update in conn.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=5, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, SubAgentLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "delegate"}]))
+
+    assert response.stopReason == "end_turn"
+    progress = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "sub_agent_progress"
+    ]
+    assert progress
+    assert {item["parent_tool_call_id"] for item in progress} == {"sub1"}
+    assert all(item["sub_agent_id"].startswith("subagent-") for item in progress)
+    assert {item["sub_agent_id"] for item in progress}
+    assert any(item["event"] == "tool_start" and item["tool_name"] == "echo" for item in progress)

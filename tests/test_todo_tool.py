@@ -34,10 +34,21 @@ async def test_create(writer, reader):
     result = await writer.execute(action="create", task="Implement feature A")
     assert result.success
     assert "#1" in result.content
+    assert result.raw_output["type"] == "todo_snapshot"
+    assert result.raw_output["action"] == "create"
+    assert result.raw_output["items"][0]["task"] == "Implement feature A"
+    assert result.raw_output["summary"] == {
+        "total": 1,
+        "completed": 0,
+        "in_progress": 0,
+        "pending": 1,
+    }
 
     result = await reader.execute()
     assert result.success
     assert "Implement feature A" in result.content
+    assert result.raw_output["type"] == "todo_snapshot"
+    assert result.raw_output["summary"]["pending"] == 1
 
 
 @pytest.mark.asyncio

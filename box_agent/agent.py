@@ -106,6 +106,9 @@ class Agent:
             system_prompt = system_prompt + workspace_info
 
         self.system_prompt = system_prompt
+        for tool in self.tools.values():
+            if hasattr(tool, "set_parent_system_prompt"):
+                tool.set_parent_system_prompt(system_prompt)
         self.messages: list[Message] = [Message(role="system", content=system_prompt)]
         self.logger = AgentLogger()
         self.api_total_tokens: int = 0
@@ -252,7 +255,7 @@ class Agent:
             case ArtifactEvent(artifact_type=atype, filename=fname, path=fpath):
                 print(f"{Colors.BRIGHT_CYAN}📎 Artifact ({atype}):{Colors.RESET} {fname} → {fpath}")
 
-            case SubAgentEvent(task_preview=preview, event=inner):
+            case SubAgentEvent(task_preview=preview, event=inner, sub_agent_id=_):
                 label = preview[:40] + "..." if len(preview) > 40 else preview
                 prefix = f"{Colors.DIM}  ┊ [{label}]{Colors.RESET}"
                 match inner:

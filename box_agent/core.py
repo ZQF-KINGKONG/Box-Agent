@@ -832,6 +832,7 @@ async def run_agent_loop(
                 success=result.success,
                 content=tc_content,
                 error=tc_error,
+                raw_output=result.raw_output,
             )
             if result.success:
                 web_search_payload = _extract_web_search_payload(fn_name, tc_content)
@@ -1002,6 +1003,7 @@ async def run_agent_loop(
                     success=result.success,
                     content=par_content,
                     error=par_error,
+                    raw_output=result.raw_output,
                 )
                 if result.success:
                     web_search_payload = _extract_web_search_payload(fn_name, par_content)

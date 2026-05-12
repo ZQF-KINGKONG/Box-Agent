@@ -930,6 +930,19 @@ Output formats:
                 content="",
                 error="Code appears to be empty or contains only comments.",
             )
+        if self._looks_like_python_pptx_new_deck(code):
+            return ToolResult(
+                success=False,
+                content="",
+                error=(
+                    "PYTHON_PPTX_NEW_DECK_BLOCKED: execute_code must not create "
+                    "new PPT/PPTX decks with python-pptx. Use the pptx skill's "
+                    "HTML-first workflow (deck.html -> screenshots -> images_to_pptx) "
+                    "or confirmed PptxGenJS native workflow instead. Python is "
+                    "allowed for data preparation, extraction, QA, and narrow edits "
+                    "to existing decks."
+                ),
+            )
 
         # Ensure sandbox environment is ready
         env = self._get_sandbox_env()
@@ -1066,6 +1079,18 @@ Output formats:
         "sqlalchemy": "SQLAlchemy",
         "dotenv": "python-dotenv",
     }
+
+    @staticmethod
+    def _looks_like_python_pptx_new_deck(code: str) -> bool:
+        """Detect python-pptx code that creates a brand-new presentation."""
+        if not code:
+            return False
+        if not re.search(r"^\s*(?:from\s+pptx\s+import|import\s+pptx\b)", code, re.MULTILINE):
+            return False
+        # Reading/editing existing decks uses Presentation(path). A bare
+        # Presentation() call is the python-pptx new-deck constructor and has
+        # repeatedly bypassed the HTML-first PPT workflow in ACP sessions.
+        return bool(re.search(r"\bPresentation\s*\(\s*\)", code))
 
     def _get_workspace(self, session_id: str) -> Path:
         """Get workspace directory for a session.

@@ -734,7 +734,7 @@ class BoxACPAgent:
                         label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
                         await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
 
-                    case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err):
+                    case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err, raw_output=raw_output):
                         if ok:
                             log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text)
                         else:
@@ -742,9 +742,10 @@ class BoxACPAgent:
                         status = "completed" if ok else "failed"
                         prefix = "[OK]" if ok else "[ERROR]"
                         result_text = f"{prefix} {text if ok else err or 'Tool execution failed'}"
+                        output = raw_output if isinstance(raw_output, dict) else result_text
                         await self._send(
                             session_id,
-                            update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=result_text),
+                            update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output),
                         )
 
                     case ArtifactEvent(tool_call_id=tid, artifact_type=atype, filename=fname, path=fpath, mime_type=mime, size_bytes=sz):
@@ -792,7 +793,7 @@ class BoxACPAgent:
                         log.debug("done", session_id=session_id, stop_reason=reason.value)
                         return reason.value
 
-                    case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner):
+                    case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id):
                         if isinstance(inner, WebSearchEvent):
                             web_search_payload = {**inner.payload, "type": "web_search"}
                             log.debug("sub_agent/web_search", session_id=session_id, tool_call_id=tid, payload=web_search_payload)
@@ -802,6 +803,8 @@ class BoxACPAgent:
                         # Send structured progress so officev3 can render sub-agent activity
                         progress: dict = {
                             "type": "sub_agent_progress",
+                            "parent_tool_call_id": tid,
+                            "sub_agent_id": sub_agent_id,
                             "task_preview": preview,
                         }
                         match inner:

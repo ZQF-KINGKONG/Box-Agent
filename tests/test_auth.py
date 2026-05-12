@@ -6,6 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 
+import httpx
 import pytest
 
 from box_agent.auth import (
@@ -224,13 +225,13 @@ async def test_anthropic_client_reads_auth_json_for_each_request(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_mcp_loader_adds_auth_header_for_url_servers(
+async def test_mcp_loader_adds_dynamic_auth_for_hosted_url_servers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    captured: list[dict[str, str]] = []
+    captured: list[tuple[dict[str, str], object]] = []
 
     async def fake_connect(self) -> bool:
-        captured.append(self.headers)
+        captured.append((self.headers, self.auth))
         return False
 
     monkeypatch.setattr(mcp_loader.MCPServerConnection, "connect", fake_connect)
@@ -257,7 +258,24 @@ async def test_mcp_loader_adds_auth_header_for_url_servers(
             auth_file.unlink(missing_ok=True)
             Path(f.name).unlink()
 
-    assert captured == [{"Authorization": "Bearer login-token"}]
+    assert captured[0][0] == {}
+    assert isinstance(captured[0][1], mcp_loader.DynamicBearerAuth)
+
+
+def test_dynamic_mcp_auth_reads_auth_json_for_each_request(tmp_path: Path) -> None:
+    auth_file = tmp_path / "auth.json"
+    auth = mcp_loader.DynamicBearerAuth(auth_file=str(auth_file))
+
+    auth_file.write_text('{"access_token": "token-one"}\n', encoding="utf-8")
+    request_one = httpx.Request("POST", "https://mcp.xiaohuanxiong.com/mcp")
+    next(auth.sync_auth_flow(request_one))
+
+    auth_file.write_text('{"access_token": "token-two"}\n', encoding="utf-8")
+    request_two = httpx.Request("POST", "https://mcp.xiaohuanxiong.com/mcp")
+    next(auth.sync_auth_flow(request_two))
+
+    assert request_one.headers["Authorization"] == "Bearer token-one"
+    assert request_two.headers["Authorization"] == "Bearer token-two"
 
 
 @pytest.mark.asyncio

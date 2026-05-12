@@ -59,6 +59,7 @@ def detect_platform() -> tuple[str, str]:
 
 # ── Build ────────────────────────────────────────────────────
 
+
 def build_runtime(version: str, output_dir: Path) -> Path:
     """Build the runtime artifact and return the archive path."""
     plat, arch = detect_platform()

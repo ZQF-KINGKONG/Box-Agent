@@ -93,6 +93,9 @@ Run `box-agent setup` for interactive configuration, or manually copy `box_agent
 
 ```bash
 # Bump version in pyproject.toml and box_agent/__init__.py
+# Regenerate the builtin skills whitelist so orphan SKILL.md files left
+# behind by downstream installers (e.g. officev3) are filtered out at runtime.
+python scripts/generate_skills_manifest.py  # writes box_agent/skills/_manifest.json
 uv build
 uvx twine upload dist/box_agent-<version>*
 gh release create v<version> dist/box_agent-<version>* --repo Raccoon-Office/Box-Agent --title "v<version>"

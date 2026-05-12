@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+
 
 # Python 3.10 compatibility: asyncio.timeout was added in 3.11
 if sys.version_info >= (3, 11):
@@ -32,7 +34,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
-from box_agent.auth import request_auth_headers
+from box_agent.auth import request_auth_headers, resolve_auth_token, should_attach_auth_header
 
 from .base import Tool, ToolResult
 
@@ -56,6 +58,54 @@ class MCPTimeoutConfig:
 
 # Global default timeout config
 _default_timeout_config = MCPTimeoutConfig()
+
+
+class DynamicBearerAuth(httpx.Auth):
+    """Attach the latest hosted login token to every HTTP request.
+
+    URL-based MCP transports keep a persistent HTTP client alive across tool
+    calls. Reading auth.json in this auth hook keeps MCP behavior aligned with
+    LLM clients, which refresh login auth before each API request.
+    """
+
+    requires_request_body = False
+    requires_response_body = False
+
+    def __init__(self, auth_file: str = "", explicit_token: str = ""):
+        self.auth_file = auth_file
+        self.explicit_token = explicit_token
+
+    def sync_auth_flow(self, request: httpx.Request):
+        yield self._with_current_auth(request)
+
+    async def async_auth_flow(self, request: httpx.Request):
+        yield self._with_current_auth(request)
+
+    def _with_current_auth(self, request: httpx.Request) -> httpx.Request:
+        if "authorization" in request.headers:
+            return request
+
+        token = resolve_auth_token(self.explicit_token, self.auth_file)
+        if not token or not should_attach_auth_header(str(request.url)):
+            return request
+
+        request.headers["Authorization"] = f"Bearer {token}"
+        return request
+
+
+def _has_authorization_header(headers: dict[str, str] | None) -> bool:
+    return any(key.lower() == "authorization" for key in (headers or {}))
+
+
+def _dynamic_bearer_auth_for_url(
+    url: str | None,
+    headers: dict[str, str],
+    auth_file: str = "",
+    auth_token: str = "",
+) -> DynamicBearerAuth | None:
+    if not url or _has_authorization_header(headers) or not should_attach_auth_header(url):
+        return None
+    return DynamicBearerAuth(auth_file=auth_file, explicit_token=auth_token)
 
 
 def set_mcp_timeout_config(
@@ -160,6 +210,7 @@ class MCPServerConnection:
         # URL-based params
         url: str | None = None,
         headers: dict[str, str] | None = None,
+        auth: httpx.Auth | None = None,
         # Timeout overrides (per-server)
         connect_timeout: float | None = None,
         execute_timeout: float | None = None,
@@ -174,6 +225,7 @@ class MCPServerConnection:
         # URL-based
         self.url = url
         self.headers = headers or {}
+        self.auth = auth
         # Timeout settings (per-server overrides)
         self.connect_timeout = connect_timeout
         self.execute_timeout = execute_timeout
@@ -280,6 +332,7 @@ class MCPServerConnection:
                 headers=self.headers if self.headers else None,
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
+                auth=self.auth,
             )
         )
 
@@ -295,6 +348,7 @@ class MCPServerConnection:
                 headers=self.headers if self.headers else None,
                 timeout=connect_timeout,
                 sse_read_timeout=sse_read_timeout,
+                auth=self.auth,
             )
         )
         return read_stream, write_stream
@@ -435,6 +489,24 @@ async def load_mcp_tools_async(
                 _warn(f"No url specified for {conn_type.upper()} server: {server_name}")
                 continue
 
+            configured_headers = server_config.get("headers", {})
+            auth = _dynamic_bearer_auth_for_url(
+                url=url,
+                headers=configured_headers,
+                auth_file=auth_file,
+                auth_token=auth_token,
+            )
+            connection_headers = (
+                configured_headers
+                if auth is not None
+                else request_auth_headers(
+                    auth_file=auth_file,
+                    explicit_token=auth_token,
+                    existing=configured_headers,
+                    url=url,
+                )
+            )
+
             connection = MCPServerConnection(
                 name=server_name,
                 connection_type=conn_type,
@@ -442,12 +514,8 @@ async def load_mcp_tools_async(
                 args=server_config.get("args", []),
                 env=server_config.get("env", {}),
                 url=url,
-                headers=request_auth_headers(
-                    auth_file=auth_file,
-                    explicit_token=auth_token,
-                    existing=server_config.get("headers", {}),
-                    url=url,
-                ),
+                headers=connection_headers,
+                auth=auth,
                 # Per-server timeout overrides from mcp.json
                 connect_timeout=server_config.get("connect_timeout"),
                 execute_timeout=server_config.get("execute_timeout"),

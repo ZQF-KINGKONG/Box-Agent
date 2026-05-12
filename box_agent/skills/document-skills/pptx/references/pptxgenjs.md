@@ -1,10 +1,19 @@
 # Creating PPTX Files With PptxGenJS
 
-Use this native editable PptxGenJS path when PowerPoint editability matters:
-editable text/shapes/charts/tables, template preservation, manual recipient
-edits, or narrow edits to an existing deck. For new polished visual decks where
-appearance matters more than native editability, prefer the HTML-first workflow.
+Use this native editable PptxGenJS path directly for editing existing `.pptx`
+files, preserving a supplied template/master/theme, or narrow modifications to
+an existing deck. For newly created decks, this is the exception path, not the
+default creation path. Prefer HTML-first editable with `dom-to-pptx` by default.
 Keep the generation script readable and deterministic.
+
+Before using this path for a new deck, confirm with the user and state why both
+HTML-first editable and the bundled `dom-to-pptx` exporter are not suitable. Do
+not proceed silently with native PptxGenJS for a new deck just because it is
+simpler to script or because the user mentioned editability.
+
+Do not replace this path with `python-pptx` for new deck creation. If native
+editable creation is confirmed, use PptxGenJS. Use Python only for narrow edits,
+inspection, extraction, or QA helpers.
 
 Before writing a deck generation script, verify that PptxGenJS is already available:
 

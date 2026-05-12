@@ -9,6 +9,7 @@ import pytest
 
 from box_agent.events import DoneEvent, StopReason, SubAgentEvent, WebSearchEvent
 from box_agent.schema import LLMResponse, Message, StreamEvent
+from box_agent.agent import Agent
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.sub_agent_tool import SubAgentTool
 
@@ -105,6 +106,23 @@ def test_schema():
     assert openai_schema["function"]["name"] == "sub_agent"
 
 
+def test_description_encourages_bounded_parallel_units_with_parent_merge():
+    llm = AsyncMock()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    description = tool.description
+
+    assert "Mandatory trigger" in description
+    assert "more than 5 structurally similar units" in description
+    assert "launch 3-5 sub_agent calls first" in description
+    assert "single small unit" in description
+    assert "unique path, directory, or filename prefix" in description
+    assert "If the final deliverable is a single file" in description
+    assert "draft fragments or local partial files" in description
+    assert "Do not assign two sub-agents to write the same file" in description
+    assert "parent agent must own coordination" in description
+    assert "write final deliverables" in description
+
+
 # ── Tool filtering ───────────────────────────────────────────
 
 
@@ -128,6 +146,50 @@ async def test_basic_execution():
     result = await tool.execute(task="Analyze revenue data")
     assert result.success is True
     assert "revenue up 20%" in result.content
+
+
+async def test_sub_agent_inherits_parent_system_prompt_constraints():
+    """Child system prompt includes finalized parent instructions automatically."""
+    captured_messages = None
+
+    async def fake_stream(*, messages, tools, **kwargs):
+        nonlocal captured_messages
+        captured_messages = messages
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop", tool_calls=None)
+
+    llm = AsyncMock()
+    llm.generate_stream = fake_stream
+
+    parent_prompt = "Parent constraint: write drafts under draft-a/ only."
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    tool.set_parent_system_prompt(parent_prompt)
+
+    result = await tool.execute(task="Draft one isolated section")
+
+    assert result.success is True
+    assert captured_messages is not None
+    child_system_prompt = captured_messages[0].content
+    assert "Inherited parent system prompt" in child_system_prompt
+    assert parent_prompt in child_system_prompt
+    assert "Do not overwrite shared files or final deliverables" in child_system_prompt
+
+
+def test_agent_wires_system_prompt_into_sub_agent(tmp_path):
+    """Agent initialization attaches its finalized system prompt to SubAgentTool."""
+    llm = AsyncMock()
+    tool = SubAgentTool(llm=llm, parent_tools={})
+
+    Agent(
+        llm_client=llm,
+        system_prompt="Parent constraint: keep output generic.",
+        tools=[tool],
+        workspace_dir=str(tmp_path),
+    )
+
+    assert tool._parent_system_prompt is not None
+    assert "Parent constraint: keep output generic." in tool._parent_system_prompt
+    assert "Current Workspace" in tool._parent_system_prompt
 
 
 async def test_web_search_tool_emits_reference_event():
@@ -222,6 +284,7 @@ async def test_sub_agent_forwards_web_search_reference_event():
     ]
     assert len(web_events) == 1
     assert web_events[0].parent_tool_call_id == "parent-sub-agent"
+    assert web_events[0].sub_agent_id.startswith("subagent-")
     assert web_events[0].event.payload["refs"][0]["url"] == "https://example.com"
 
 

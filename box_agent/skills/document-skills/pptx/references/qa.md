@@ -12,14 +12,16 @@ Keep every temporary report, helper script, extracted text file, and rendered
 image inside the current workspace or requested output folder. Do not write to
 `/tmp`, `/var/tmp`, or another absolute temp path.
 
-For HTML-first visual decks, inspect the PNG files produced by Playwright
-MCP/Browser or by `scripts/html_to_pptx.js` before creating the PPTX. Those
-PNGs are the primary visual QA artifact. PPTX package validation, text
-extraction, and placeholder scan still remain required after export.
+For HTML-first decks exported with `scripts/html_to_editable_pptx.js` and
+`dom-to-pptx`, inspect both the source HTML preview PNGs and the rendered PPTX
+output. Editable export can reflow text, shift layers, or lose CSS effects, so
+source previews alone are not enough.
 
 0. HTML self-check for HTML-first decks:
-   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html` before screenshots, or rely on `scripts/html_to_pptx.js` which runs the same check internally.
-   - Fix failures before capturing screenshots. This catches DOM/CSS layout bugs such as progress `.fill` elements left as `display:inline`, zero-size bars/charts, text overflow, missing images, and content outside the slide.
+   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --report qa/html_self_check.json` before export, or rely on `scripts/html_to_editable_pptx.js` which writes the same check internally.
+   - Always use the stricter `--dom-to-pptx` compatibility profile for new HTML-first decks.
+   - Confirm `qa/html_self_check.json` exists, is non-empty, and has `"ok": true`. If it is missing, report HTML self-check as `BLOCKED`.
+   - Fix failures before export. This catches DOM/CSS layout bugs such as progress `.fill` elements left as `display:inline`, zero-size bars/charts, text overflow, missing images, and content outside the slide.
    - This is a preflight gate, not visual QA. Passing it does not mean the slide looks good.
 
 1. Package validation:
@@ -42,26 +44,27 @@ extraction, and placeholder scan still remain required after export.
 
 4. Render:
    - Run `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py output.pptx --out rendered`.
-   - For HTML-first visual decks, this PPTX render is used for source-vs-output image comparison. If LibreOffice is missing, report PPTX render comparison as `BLOCKED` but do not discard the HTML screenshot QA.
+   - For HTML-first decks, this PPTX render is used for source-preview-vs-output image comparison. If LibreOffice is missing, report PPTX render comparison as `BLOCKED` but do not discard the HTML preview QA.
    - Do not pre-check `soffice` and skip this command. The render script owns renderer discovery, Quick Look fallback, and missing-LibreOffice messaging.
-   - Do not pass `--format png`; PNG is the default and some host safety filters may treat `format` as a dangerous disk command.
+   - Do not pass `--format png` for visual-model inputs unless a PNG is explicitly required; the default JPG output is intentionally compressed to reduce request size.
    - The preferred path is `soffice` PPTX-to-PDF plus `pdftoppm` PDF-to-PNG.
    - If Poppler is unavailable, the script may use Node pdf.js with `pdfjs-dist` and `@napi-rs/canvas`.
    - On macOS, Quick Look is only a lightweight fallback.
 
 5. Image comparison for HTML-first decks:
-   - When both source screenshots and PPTX-rendered slide images exist, compare them with `${BOX_AGENT_NODE:-node} scripts/compare_slide_images.js slides rendered --out qa/diff`.
-   - This checks whether packaging/export/rendering changed the slide image: missing slides, wrong order, scaling changes, cropping, or altered pixels.
+   - When both source preview images and PPTX-rendered slide images exist, compare them with `${BOX_AGENT_NODE:-node} scripts/compare_slide_images.js slides rendered --out qa/diff`.
+   - This checks whether DOM-to-PPTX export/rendering changed the slide image: missing slides, wrong order, scaling changes, cropping, text wrapping, gradients, SVGs, shadows, z-order, or image masks.
    - Treat non-empty image checks as insufficient. A PNG can be non-empty while the chart, bar, or image is missing.
    - If PPTX-rendered images are blocked, report `Image comparison: BLOCKED` and name the renderer limitation.
-   - Pixel comparison only proves fidelity to the source screenshots. It does not judge whether the original screenshot is well-designed or semantically correct.
+   - Pixel comparison only proves fidelity to the source previews. It does not judge whether the original slide is well-designed or semantically correct.
 
 6. Visual inspection:
-   - Use `vision_review` when it is available. Pass the actual generated image files, not only their paths in normal chat text.
-   - For HTML-first visual decks, prefer every generated `slides/slide-*.png` from Playwright MCP/Browser or `html_to_pptx.js`.
-   - For rendered PPTX decks, prefer every generated `rendered/slide-*.png` or preview image.
-   - For decks with 20 or fewer slides, pass every individual slide image to `vision_review`. For larger decks, pass every changed, title, section, data-heavy, and image-heavy slide, and say which range was sampled.
-   - Generate a contact sheet for overview, for example `${BOX_AGENT_NODE:-node} scripts/make_contact_sheet.js slides --out qa/vision-contact-sheet.png`. Include it as an additional image if useful, but do not use it as the only input when individual slide PNGs are available.
+   - Use `vision_review` when it is available. Pass actual image files, not only their paths in normal chat text.
+   - Before calling `vision_review`, create compressed review-size copies of the slide images: `${BOX_AGENT_NODE:-node} scripts/make_vision_inputs.js slides --out qa/vision_inputs`. Use `rendered` instead of `slides` when reviewing rendered PPTX images. Keep original full-size images for export and image comparison; `qa/vision_inputs` is only for vision-model review.
+   - For HTML-first decks, prefer every generated `qa/vision_inputs/slide-*.jpg` derived from `html_to_editable_pptx.js` source previews.
+   - For rendered PPTX decks, prefer every generated review-size copy of `rendered/slide-*.png` or preview image, emitted as compressed JPG by default.
+   - For decks with 20 or fewer slides, pass every individual `qa/vision_inputs/slide-*.jpg` image to `vision_review`. For larger decks, pass every changed, title, section, data-heavy, and image-heavy slide, and say which range was sampled.
+   - Generate a contact sheet for overview, for example `${BOX_AGENT_NODE:-node} scripts/make_contact_sheet.js slides --out qa/vision-contact-sheet.png`. Include it as an additional image if useful, but do not use it as the only input when individual compressed slide images are available.
    - Treat the contact sheet as review material, not as the review result. The script also writes `qa/vision-review-prompt.txt`; use that prompt in the `vision_review` instructions.
    - Use an image-viewing or vision-capable tool. Do not count file existence, image dimensions, package XML, text extraction, OCR, histogram checks, or pixel diff as visual inspection.
    - Check blank or near-blank slides, clipped text, blurry or unreadable text, overlap, bad spacing, missing media, wrong slide order, low contrast, bad crop/scaling, missing charts, and low-quality shape-built people.
@@ -73,15 +76,15 @@ extraction, and placeholder scan still remain required after export.
 ## How To Perform Vision Review
 
 Use `vision_review` as the preferred image-capable path. The required input is
-the individual `slide-*.png` files whenever they exist; the contact sheet is an
-overview image, not the primary evidence.
+the individual compressed review-size `qa/vision_inputs/slide-*.jpg` files whenever they
+exist; the contact sheet is an overview image, not the primary evidence.
 
-- If the `vision_review` tool is available, call it with all individual slide
-  PNG/JPG paths and `output_path` set to the deck folder's `qa/visual_review.md`.
+- If the `vision_review` tool is available, call it with all individual
+  review-size slide JPG/PNG paths and `output_path` set to the deck folder's `qa/visual_review.md`.
   Include `qa/vision-contact-sheet.png` only as an additional overview image.
-- If all individual images exceed the model request limit, split the review into
-  small batches of 1-3 slides or make lower-resolution review copies under
-  `qa/vision_inputs/`. Merge the batch reports into the final
+- If all individual review-size images exceed the model request limit, split the
+  review into small batches of 1-3 slides or rerun `make_vision_inputs.js` with
+  `--max-width 720 --quality 0.76`. Merge the batch reports into the final
   `qa/visual_review.md`. Never downgrade to a contact-sheet-only PASS because
   of a request-size error.
 - If another agent host provides a vision/image tool, call that tool with the
@@ -89,7 +92,7 @@ overview image, not the primary evidence.
   consistency and order.
 - If the host supports multimodal messages, attach the contact sheet image in a
   message to the vision-capable model only as a fallback; inspect individual
-  slide PNGs if the sheet is too small to judge text, charts, or bars.
+  individual compressed slide images if the sheet is too small to judge text, charts, or bars.
 - If running in Codex with local image viewing, use the local image viewer for
   `qa/vision-contact-sheet.png`, then inspect individual slide files as needed.
 - If only shell, text extraction, image dimensions, histogram, pixel diff, or
@@ -101,9 +104,9 @@ Suggested `vision_review` call:
 ```json
 {
   "image_paths": [
-    "slides/slide-01.png",
-    "slides/slide-02.png",
-    "slides/slide-03.png"
+    "qa/vision_inputs/slide-01.jpg",
+    "qa/vision_inputs/slide-02.jpg",
+    "qa/vision_inputs/slide-03.jpg"
   ],
   "output_path": "qa/visual_review.md",
   "instructions": "Review every slide image for blank output, clipped or overlapping text, unreadable small text, missing charts/bars/images, low contrast, bad crop/scaling, wrong order, and poor shape-built people. Return per-slide PASS/ISSUE with concrete fixes."
@@ -123,7 +126,7 @@ The QA report must say which image was reviewed, for example:
 
 ```text
 Visual inspection: PASS
-Reviewed: slides/slide-01.png; slides/slide-02.png; slides/slide-03.png
+Reviewed: qa/vision_inputs/slide-01.jpg; qa/vision_inputs/slide-02.jpg; qa/vision_inputs/slide-03.jpg
 Verdict: slide-01 PASS; slide-02 PASS; slide-03 ISSUE probability bars missing
 ```
 
@@ -192,7 +195,11 @@ Look is only a lightweight fallback and does not provide full per-slide QA.
 The permission engine may block common shell habits. Avoid them.
 
 - Do not write QA logs to `/tmp`, `/dev/null`, `/var/tmp`, or absolute output paths.
-- Do not use shell redirects to absolute paths, for example `>/tmp/check.txt`.
+- Do not use shell redirects for QA output. The permission engine can block
+  redirects before it proves whether the path is safe, especially for absolute
+  paths. Instead, run helpers that write files directly or pass explicit output
+  arguments such as `--out rendered`, `--out qa/diff`, or
+  `output_path: "qa/visual_review.md"`.
 - Do not use inline heredocs such as `python3 - <<'PY'`.
 - Do not chain a long command that mixes `unzip`, `cat`, `tail`, and inline Python.
 - Do not call Node `execFileSync()` with a full shell command string such as
@@ -202,8 +209,9 @@ The permission engine may block common shell habits. Avoid them.
 - Do not manually probe Quick Look with `qlmanage -h >/dev/null`; run
   `scripts/render_pptx.py` and let it decide whether Quick Look is available.
 - Prefer the provided helper scripts. If custom logic is needed, create a short
-  `.py` or `.js` helper file inside the workspace, run it, and write outputs to
-  paths such as `qa/package_check.txt`, `qa/text_extract.txt`, or `rendered/`.
+  `.py` or `.js` helper file inside the workspace, run it, and let that helper
+  write outputs to paths such as `qa/package_check.txt`,
+  `qa/text_extract.txt`, or `rendered/`.
 
 For package tests, prefer Python `zipfile` or Node zip readers over extracting
 the deck to a temporary directory.

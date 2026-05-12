@@ -35,7 +35,21 @@ Excel, or run statistics/plots over data.
 - general          : none of the above; general chat, coding help, file \
 operations, or anything ambiguous.
 
+Important: if the user asks to create, generate, make, export, or deliver a \
+PowerPoint/PPT/PPTX/slide deck, classify it as general even when the task also \
+requires research or data analysis. Deck-generation workflows must not inherit \
+the data_analysis sandbox prompt by default.
+
 Respond with exactly one label from the list above."""
+
+_PPT_DELIVERABLE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:pptx?|powerpoint|slide\s*deck|slides?|演示文稿|幻灯片|PPT|PPTX)",
+    re.IGNORECASE,
+)
+_CREATE_DELIVERABLE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:create|generate|make|build|produce|draft|export|deliver|形成|生成|制作|创建|做(?:一份)?|导出|交付)",
+    re.IGNORECASE,
+)
 
 
 def _normalize(raw: str) -> str | None:
@@ -78,6 +92,15 @@ async def classify_session_mode(
     """
     text = (user_text or "").strip()
     if not text:
+        return None
+    if _PPT_DELIVERABLE_RE.search(text) and _CREATE_DELIVERABLE_RE.search(text):
+        preview = text[:80].replace("\n", " ")
+        log.info(
+            "session_mode/auto_classified",
+            mode=_GENERAL_LABEL,
+            raw="ppt_deliverable_rule",
+            user_text_preview=preview,
+        )
         return None
 
     messages = [

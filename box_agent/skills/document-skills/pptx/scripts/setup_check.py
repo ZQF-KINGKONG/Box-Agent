@@ -26,8 +26,13 @@ FALLBACK_BINARIES_BY_SYSTEM = {
     "Windows": ["powershell"],
 }
 NODE_PACKAGES = ["pptxgenjs", "pdfjs-dist", "@napi-rs/canvas"]
-OPTIONAL_NODE_PACKAGES = ["playwright"]
+OPTIONAL_NODE_PACKAGES: dict[str, str] = {
+    "pngjs": "source-vs-render image comparison QA only",
+    "playwright": "browser host for CLI HTML editable PPTX export",
+}
 LIBREOFFICE_DOWNLOAD_URL = "https://www.libreoffice.org/download/download-libreoffice/"
+PLAYWRIGHT_INSTALL_CMD = '${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" playwright'
+PLAYWRIGHT_CHROMIUM_CMD = '"$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium'
 
 
 def node_command() -> str:
@@ -116,6 +121,29 @@ def has_node_package(package: str) -> bool:
     return result.returncode == 0
 
 
+def has_playwright_chromium() -> bool:
+    node_path = os.environ.get("NODE_PATH", "")
+    managed = str(managed_node_modules())
+    merged_node_path = managed if not node_path else os.pathsep.join([managed, node_path])
+    result = subprocess.run(
+        [
+            node_command(),
+            "-e",
+            (
+                "process.env.NODE_PATH = "
+                + repr(merged_node_path)
+                + "; require('module').Module._initPaths(); "
+                "const fs=require('fs'); "
+                "const {chromium}=require('playwright'); "
+                "process.exit(fs.existsSync(chromium.executablePath()) ? 0 : 1);"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
 def main() -> int:
     missing: list[str] = []
 
@@ -159,20 +187,21 @@ def main() -> int:
             print(f"  {'ok  ' if ok else 'miss'} {package}")
             if not ok:
                 missing.append(f"node package: {package}")
-        for package in OPTIONAL_NODE_PACKAGES:
+        for package, description in OPTIONAL_NODE_PACKAGES.items():
             ok = has_node_package(package)
-            print(f"  {'ok  ' if ok else 'warn'} {package} (local HTML screenshot fallback)")
+            print(f"  {'ok  ' if ok else 'warn'} {package} ({description})")
+            if package == "pngjs" and not ok:
+                print("       image comparison QA is blocked without pngjs; PPTX generation/export can continue")
         if has_node_package("playwright"):
-            browser_ok = subprocess.run(
-                [
-                    node_command(),
-                    "-e",
-                    "const {chromium}=require('playwright'); console.log(chromium.executablePath())",
-                ],
-                capture_output=True,
-                text=True,
-            ).returncode == 0
+            browser_ok = has_playwright_chromium()
             print(f"  {'ok  ' if browser_ok else 'warn'} playwright chromium browser")
+            if not browser_ok:
+                print("       CLI editable PPTX export is blocked until Chromium is installed; deliver deck.html or use a host renderer instead")
+                print(f"       download Chromium: {PLAYWRIGHT_CHROMIUM_CMD}")
+        else:
+            print("       CLI editable PPTX export is blocked without a browser host; deliver deck.html or use a host renderer instead")
+            print(f"       install Playwright: {PLAYWRIGHT_INSTALL_CMD}")
+            print(f"       download Chromium: {PLAYWRIGHT_CHROMIUM_CMD}")
     else:
         print("  skip node package checks because node is missing")
 

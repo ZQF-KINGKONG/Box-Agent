@@ -20,6 +20,25 @@ from typing import Any
 from .base import Tool, ToolResult
 
 
+def _todo_snapshot(items: list[dict]) -> dict[str, Any]:
+    """Return a host-friendly todo snapshot payload."""
+    normalized = [dict(item) for item in items]
+    total = len(normalized)
+    completed = sum(1 for item in normalized if item.get("status") == "completed")
+    in_progress = sum(1 for item in normalized if item.get("status") == "in_progress")
+    pending = sum(1 for item in normalized if item.get("status") == "pending")
+    return {
+        "type": "todo_snapshot",
+        "items": normalized,
+        "summary": {
+            "total": total,
+            "completed": completed,
+            "in_progress": in_progress,
+            "pending": pending,
+        },
+    }
+
+
 # ── Shared store ────────────────────────────────────────────
 
 
@@ -112,6 +131,13 @@ class TodoWriteTool(Tool):
     def __init__(self, store: TodoStore):
         self._store = store
 
+    def _result(self, *, content: str, action: str, item: dict | None = None) -> ToolResult:
+        snapshot = _todo_snapshot(self._store.list())
+        raw_output = {**snapshot, "action": action}
+        if item is not None:
+            raw_output["item"] = dict(item)
+        return ToolResult(success=True, content=content, raw_output=raw_output)
+
     @property
     def name(self) -> str:
         return "todo_write"
@@ -169,7 +195,7 @@ class TodoWriteTool(Tool):
             if not task:
                 return ToolResult(success=False, error="'task' is required for create.")
             item = self._store.create(task, priority)
-            return ToolResult(success=True, content=f"Created todo #{item['id']}: {task}")
+            return self._result(content=f"Created todo #{item['id']}: {task}", action="create", item=item)
 
         if action == "update":
             if not todo_id:
@@ -177,14 +203,18 @@ class TodoWriteTool(Tool):
             item = self._store.update(todo_id, status=status, task=task)
             if item is None:
                 return ToolResult(success=False, error=f"Todo #{todo_id} not found.")
-            return ToolResult(success=True, content=f"Updated todo #{todo_id}: [{item['status']}] {item['task']}")
+            return self._result(
+                content=f"Updated todo #{todo_id}: [{item['status']}] {item['task']}",
+                action="update",
+                item=item,
+            )
 
         if action == "delete":
             if not todo_id:
                 return ToolResult(success=False, error="'todo_id' is required for delete.")
             if not self._store.delete(todo_id):
                 return ToolResult(success=False, error=f"Todo #{todo_id} not found.")
-            return ToolResult(success=True, content=f"Deleted todo #{todo_id}.")
+            return self._result(content=f"Deleted todo #{todo_id}.", action="delete")
 
         return ToolResult(success=False, error=f"Unknown action: {action}")
 
@@ -229,14 +259,14 @@ class TodoReadTool(Tool):
             item = self._store.get(todo_id)
             if item is None:
                 return ToolResult(success=False, error=f"Todo #{todo_id} not found.")
-            return ToolResult(success=True, content=self._format_items([item]))
+            return ToolResult(success=True, content=self._format_items([item]), raw_output=_todo_snapshot([item]))
 
         # List (optionally filtered)
         items = self._store.list(status)
         if not items:
             label = f" ({status})" if status else ""
-            return ToolResult(success=True, content=f"No todo items{label}.")
-        return ToolResult(success=True, content=self._format_items(items))
+            return ToolResult(success=True, content=f"No todo items{label}.", raw_output=_todo_snapshot([]))
+        return ToolResult(success=True, content=self._format_items(items), raw_output=_todo_snapshot(items))
 
     @staticmethod
     def _format_items(items: list[dict]) -> str:

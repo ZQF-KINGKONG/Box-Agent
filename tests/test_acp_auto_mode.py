@@ -101,7 +101,7 @@ async def test_missing_mode_ignores_legacy_ppt_classification(tmp_path):
         )
     )
 
-    assert llm.classifier_calls == 1
+    assert llm.classifier_calls == 0
     assert state.session_mode is None
     assert state.auto_classify_pending is False
     # Legacy PPT events are not emitted unless the caller explicitly opts in.

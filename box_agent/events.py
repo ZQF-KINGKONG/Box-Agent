@@ -91,6 +91,7 @@ class ToolCallResult:
     success: bool
     content: str
     error: str | None = None
+    raw_output: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -218,6 +219,7 @@ class SubAgentEvent:
     parent_tool_call_id: str
     task_preview: str  # first ~80 chars of the task
     event: AgentEvent  # the nested event
+    sub_agent_id: str = ""  # stable child-run id for host-side grouping
 
 
 # ── PPT structured progress ───────────────────────────────────

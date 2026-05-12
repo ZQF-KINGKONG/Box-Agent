@@ -1,0 +1,111 @@
+# PPTX Outline Planning
+
+Use this planning stage only when it improves the deck. Do not turn every prompt
+into a new invented storyline. If the user already provides enough page-by-page
+content, order, titles, data, or structure, treat that prompt as the outline and
+move directly to `deck.html` after a light mapping/consistency check.
+
+The goal is to make the storyline, per-slide message, visual intent, and
+evidence explicit before visual layout starts without overriding user intent.
+
+## Decision Gate
+
+Create a separate `outline.json` when one or more of these are true:
+
+- The user gives only a broad topic, goal, or document type.
+- The deck is narrative-heavy, such as BP, strategy, consulting, research,
+  investment, product launch, annual review, or data-story work.
+- Page count, slide order, audience, evidence, or key claims are unclear.
+- The request contains raw material that needs grouping, prioritization, or
+  evidence-to-slide mapping.
+- The prompt asks for "帮我规划", "大纲", "结构", "storyline", or equivalent.
+
+Do not create a separate deep outline when:
+
+- The user already specifies each page or a sufficiently detailed structure.
+- The task is a narrow edit to an existing deck.
+- The user asks for fast direct generation and the content is already clear.
+- Adding a storyline would require inventing facts, data, claims, or strategy.
+
+In those cases, preserve the user's structure. If useful, keep only a minimal
+internal or file-local mapping from user-provided slides to `deck.html`; do not
+expand, reorder, or add claims unless the user asked for that.
+
+## Required Output
+
+When the decision gate says an outline is needed, create an `outline.json`
+beside the future `deck.html`:
+
+```json
+{
+  "deck_goal": "What this deck must achieve",
+  "audience": "Who will read or hear it",
+  "tone": "Visual and narrative tone",
+  "storyline": "One-sentence narrative arc",
+  "slides": [
+    {
+      "page": 1,
+      "title": "Slide title",
+      "message": "One core claim this slide proves",
+      "layout": "cover | section | comparison | dashboard | timeline | matrix | chart | cards | closing",
+      "visual": "Main chart/card/composition to build",
+      "evidence": ["Data source, user-provided fact, assumption, or empty array for non-evidence slides"],
+      "notes": "Speaker intent, caveats, or source assumptions"
+    }
+  ]
+}
+```
+
+Keep this as a planning artifact. Do not put CSS, HTML, or PowerPoint object
+details into `outline.json`.
+
+## Generation Steps
+
+1. Restate the user request as a deck goal, audience, and decision/action the
+   deck should drive. Stay within facts supplied by the user or clearly marked
+   assumptions.
+2. Pick a storyline arc before listing slides only when the user did not already
+   provide a clear order. Examples:
+   - BP: problem -> solution -> product -> market -> traction -> business model
+     -> competition -> team -> financing ask.
+   - Strategy report: context -> diagnosis -> options -> recommendation ->
+     roadmap -> risks -> next steps.
+   - Analysis deck: question -> data -> findings -> implications ->
+     recommendations.
+3. Draft one slide per narrative beat, or map directly from the user's supplied
+   page list. Each slide must have exactly one core `message`.
+4. Bind evidence to every analytical, chart, market, traction, or financial
+   slide. If evidence is assumed or illustrative, say so in `evidence` or
+   `notes`; do not imply fabricated data is sourced.
+5. Choose the intended `layout` and `visual` for each slide before writing HTML.
+6. Run `scripts/validate_outline.js outline.json` and fix failures before
+   creating `deck.html`.
+
+## Quality Bar
+
+- Every slide has one job. If a slide has two unrelated claims, split it.
+- Titles should be short and presentation-ready.
+- `message` should be a claim, not a topic label. Prefer "AI cuts manual QC
+  scheduling from hours to minutes" over "Product overview".
+- Avoid repetitive slides with the same title, message, layout, or visual.
+- Use a section-divider slide only when it helps pacing.
+- Put source assumptions in `evidence` or `notes`; do not hide missing data.
+- Keep page numbers consecutive and aligned with the final slide count.
+
+## Validation
+
+Run:
+
+```bash
+${BOX_AGENT_NODE:-node} scripts/validate_outline.js outline.json
+```
+
+The validator checks structure, required fields, page numbering, obvious
+duplicates, overlong titles/messages, missing evidence on data-heavy slides, and
+basic storyline completeness. It is a hard-rule gate, not a substitute for
+human/model narrative judgment.
+
+After validation passes, use `outline.json` as the source of truth when writing
+`deck.html`. The slide title, core message, visual intent, and evidence notes
+should trace back to the outline. If no separate outline was needed, trace the
+same fields back to the user's prompt instead.

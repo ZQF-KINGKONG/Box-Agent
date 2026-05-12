@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "box_agent_version": "0.8.37",
+  "generated_at": "2026-05-10T14:50:31Z",
+  "skills": [
+    {
+      "name": "artifacts-builder",
+      "path": "artifacts-builder/SKILL.md"
+    },
+    {
+      "name": "canvas-design",
+      "path": "canvas-design/SKILL.md"
+    },
+    {
+      "name": "docx",
+      "path": "document-skills/docx/SKILL.md"
+    },
+    {
+      "name": "pdf",
+      "path": "document-skills/pdf/SKILL.md"
+    },
+    {
+      "name": "pptx",
+      "path": "document-skills/pptx/SKILL.md"
+    },
+    {
+      "name": "xlsx",
+      "path": "document-skills/xlsx/SKILL.md"
+    },
+    {
+      "name": "internal-comms",
+      "path": "internal-comms/SKILL.md"
+    },
+    {
+      "name": "memory-guide",
+      "path": "memory-guide/SKILL.md"
+    },
+    {
+      "name": "theme-factory",
+      "path": "theme-factory/SKILL.md"
+    },
+    {
+      "name": "webapp-testing",
+      "path": "webapp-testing/SKILL.md"
+    }
+  ]
+}

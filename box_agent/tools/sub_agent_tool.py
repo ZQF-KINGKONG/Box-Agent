@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
+from uuid import uuid4
 
 from ..events import (
     ArtifactEvent,
@@ -30,12 +31,17 @@ _SUB_AGENT_SYSTEM_PROMPT = """\
 You are a focused sub-agent executing a specific task delegated by the main agent.
 
 Rules:
-1. Complete the assigned task thoroughly using the available tools.
-2. If a Jupyter kernel session already exists, variables from previous executions \
+1. You inherit the parent agent's system instructions and must follow them unless the \
+delegated task gives a narrower, non-conflicting scope.
+2. Complete only the assigned isolated work unit. Respect any path, file, prefix, \
+or output constraints in the delegated task.
+3. Do not overwrite shared files or final deliverables unless the delegated task \
+explicitly assigns that exact output to you.
+4. If a Jupyter kernel session already exists, variables from previous executions \
 are still in scope — reuse them directly.
-3. When you are done, output a concise but complete summary of your findings or \
+5. When you are done, output a concise but complete summary of your findings or \
 results.  Include key numbers, conclusions, and any file paths produced.
-4. Do NOT ask follow-up questions — complete the task with what you have.
+6. Do NOT ask follow-up questions — complete the task with what you have.
 """
 
 
@@ -58,6 +64,7 @@ class SubAgentTool(EventEmittingTool):
         workspace_dir: str | None = None,
         max_steps: int = 20,
         token_limit: int = 40_000,
+        parent_system_prompt: str | None = None,
     ):
         super().__init__()
         self._llm = llm
@@ -66,6 +73,11 @@ class SubAgentTool(EventEmittingTool):
         self._workspace_dir = workspace_dir
         self._max_steps = max_steps
         self._token_limit = token_limit
+        self._parent_system_prompt = parent_system_prompt
+
+    def set_parent_system_prompt(self, system_prompt: str) -> None:
+        """Attach the finalized parent prompt so child agents inherit constraints."""
+        self._parent_system_prompt = system_prompt
 
     @property
     def name(self) -> str:
@@ -74,18 +86,23 @@ class SubAgentTool(EventEmittingTool):
     @property
     def description(self) -> str:
         return (
-            "Delegate a self-contained INVESTIGATION to a sub-agent that runs in an "
-            "isolated context. The sub-agent has access to the same tools (file, bash, "
-            "sandbox, etc.) but maintains its own conversation history. Only its final "
-            "TEXT SUMMARY is returned to the parent — no artifacts, no partial state.\n\n"
-            "Use this ONLY when a task will produce a lot of intermediate output you "
-            "don't want polluting the main context — e.g. reading many files to answer "
-            "one question, exploratory data analysis, deep codebase search.\n\n"
-            "DO NOT use sub_agent to schedule deliverable work, to parallelize a list "
-            "of todos, or to 'kick off' subtasks that produce files/code/output. That "
-            "is what `todo_write` is for. If the work needs to produce artifacts or be "
-            "visible step-by-step to the user, run it in the main loop and track it "
-            "with todo_write — not as sub_agent calls."
+            "Delegate one isolated, self-contained work unit to a sub-agent. "
+            "Use sub_agent when the work can run independently and the parent only needs a concise "
+            "summary, findings, or paths to draft artifacts. Good examples include reading many files "
+            "to answer one question, deep codebase search, exploratory data analysis, reviewing one "
+            "slice of outputs, processing one input file, or drafting one independent page/section/file.\n\n"
+            "Mandatory trigger: when a task needs generating or reviewing more than 5 structurally "
+            "similar units that can be isolated, launch 3-5 sub_agent calls first unless the user "
+            "explicitly says not to parallelize or the units cannot be safely isolated. Each call "
+            "must be scoped to a single small unit such as 1 page, 1 file, 1 data slice, or 1 QA dimension. Each sub-agent "
+            "may create draft files or artifacts only in an explicitly assigned unique path, directory, "
+            "or filename prefix. If the final deliverable is a single file, still split independent "
+            "units into draft fragments or local partial files and let the parent merge them into the "
+            "single final file. Do not assign two sub-agents to write the same file or shared output.\n\n"
+            "The parent agent must own coordination: choose the split, merge results, resolve conflicts, "
+            "write final deliverables, package/release outputs, update shared files, and run final "
+            "validation. The sub-agent must report changed/created paths, findings, assumptions, and "
+            "remaining risks."
         )
 
     @property
@@ -112,14 +129,26 @@ class SubAgentTool(EventEmittingTool):
         # Import here to avoid circular dependency (core → tools → core).
         from ..core import run_agent_loop
 
+        system_prompt = _SUB_AGENT_SYSTEM_PROMPT
+        if self._parent_system_prompt:
+            system_prompt = (
+                f"{system_prompt.rstrip()}\n\n"
+                "## Inherited parent system prompt\n"
+                "The following instructions are inherited from the parent agent. "
+                "They define global behavior, safety, workspace, skill, output, and "
+                "task-specific constraints that also apply inside this sub-agent.\n\n"
+                f"{self._parent_system_prompt}"
+            )
+
         messages: list[Message] = [
-            Message(role="system", content=_SUB_AGENT_SYSTEM_PROMPT),
+            Message(role="system", content=system_prompt),
             Message(role="user", content=task),
         ]
 
         queue = self._event_queue
         # Single-line preview: collapse whitespace, truncate
         task_preview = " ".join(task.split())[:50]
+        sub_agent_id = f"subagent-{uuid4().hex}"
 
         final_content = ""
         try:
@@ -139,6 +168,7 @@ class SubAgentTool(EventEmittingTool):
                             parent_tool_call_id=self._parent_tool_call_id,
                             task_preview=task_preview,
                             event=event,
+                            sub_agent_id=sub_agent_id,
                         )
                     )
         except Exception as exc:

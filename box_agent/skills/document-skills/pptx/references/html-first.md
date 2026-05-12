@@ -1,32 +1,43 @@
-# HTML-First Visual Decks
+# HTML-First Editable Decks
 
-Use this workflow for new polished decks unless the user explicitly requires
-editable PowerPoint text, native charts, or a provided PowerPoint template.
+Use this workflow for newly created decks by default unless the user provides an
+existing PowerPoint template to preserve or explicitly requires native PowerPoint
+charts/tables. New decks should be authored as fixed-size HTML first, then
+exported to editable PPTX with `scripts/html_to_editable_pptx.js`, which loads
+the skill-bundled `scripts/dom-to-pptx.bundle.js`.
 
-Choose this mode for from-scratch decks where visual quality, layout fidelity,
-and browser-rendered QA matter more than editing visible text inside PowerPoint.
-It is the default for beautiful/polished decks, editorial storytelling,
-infographics, dashboards, maps, screenshots, custom charts, and immersive
-topic-specific designs.
+If `dom-to-pptx` export is blocked because no browser host is available, deliver
+`deck.html`, mark editable PPTX export as `BLOCKED`, and tell the user how to
+install/download or open the browser dependency instead of producing a weaker
+deck through another generator. A host app's Electron renderer can provide the
+browser environment; an agent child process still needs a bridge or Playwright.
+
+Do not use `python-pptx` or `from pptx import Presentation` to create the final
+PPTX for a new deck. Python may be used for data preparation and QA helpers, but
+the deck itself should be created from `deck.html` through the editable
+DOM-to-PPTX exporter.
 
 ## Contract
 
 - Build a fixed-size HTML slide deck first.
-- Render every slide to PNG with an available browser renderer. Prefer the
-  host-provided Playwright MCP or Browser tool when available; otherwise use
-  the local Node Playwright fallback script.
-- Inspect the PNGs for visual quality with an image-capable viewer/model before
-  creating the PPTX. Screenshot generation alone is not visual QA.
-- Create the PPTX by placing each rendered PNG as a full-slide image.
-- Preserve the source HTML and write searchable text metadata into the PPTX
-  when possible.
+- Before writing HTML, decide whether `references/outline.md` calls for a
+  separate `outline.json`. Use one for broad or structurally unclear prompts;
+  skip it when the user's prompt is already a sufficient page-level outline.
+  Never invent extra claims, data, or strategy just to make an outline look
+  deeper.
+- Use one `.slide` element per page.
+- Run the stricter HTML self-check profile with `--dom-to-pptx`.
+- Export with `scripts/html_to_editable_pptx.js`.
+- Keep the source HTML and generated preview images beside the output deck for
+  QA and future edits.
+- Render the exported PPTX and inspect for DOM-to-PPTX drift before delivery.
 - Add a visible, consistent page number to every non-cover slide. Use one
   placement across the deck, preferably top-right or bottom-right, and keep the
   total count correct after adding/removing slides.
 
-This produces a visually stable deck. Text in the PPTX is not directly editable
-because the visible slide is a screenshot. The user edits the HTML source and
-exports again.
+This produces an editable PowerPoint deck from HTML-authored slides. The output
+is more editable than an image-only deck, but CSS-to-PPTX mapping can drift, so
+render QA is mandatory.
 
 ## File Layout
 
@@ -37,6 +48,9 @@ deck.html
 slides/
   slide-01.png
   slide-02.png
+qa/
+  html_self_check.json
+  visual_review.md
 output.pptx
 ```
 
@@ -50,8 +64,8 @@ Use one `.slide` element per page:
   <style>
     html, body { margin: 0; background: #111; }
     .slide {
-      width: 1280px;
-      height: 720px;
+      width: 1920px;
+      height: 1080px;
       position: relative;
       overflow: hidden;
       page-break-after: always;
@@ -66,112 +80,85 @@ Use one `.slide` element per page:
 </html>
 ```
 
-## Render And Export
+## Export
 
-Before screenshot capture, run the HTML structural self-check:
-
-```bash
-${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx2/scripts/html_self_check.js deck.html
-```
-
-This catches DOM/CSS bugs that are visible from computed layout before visual
-comparison, such as progress bars whose `.fill` element is still `display:inline`,
-zero-size chart elements, text overflow, missing images, or content outside the
-slide bounds. Fix self-check failures before taking screenshots.
-
-If Playwright MCP/Browser screenshots are available, use them to capture each
-`.slide` element or each route/page state into `slides/slide-01.png`,
-`slides/slide-02.png`, and so on. Browser tools such as `browser_navigate`,
-`browser_snapshot`, and `browser_take_screenshot` count as this preferred path.
-Then package the screenshots:
+Before export, run the HTML structural self-check with the editable compatibility
+profile:
 
 ```bash
-${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx2/scripts/images_to_pptx.js output.pptx slides/slide-01.png slides/slide-02.png
+${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx/scripts/html_self_check.js deck.html --dom-to-pptx --report qa/html_self_check.json
 ```
 
-If no browser MCP/tool is available, run the local Node fallback:
+Then export:
 
 ```bash
-${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx2/scripts/html_to_pptx.js deck.html output.pptx --out slides
+${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx/scripts/html_to_editable_pptx.js deck.html output.pptx --out slides
 ```
 
-The fallback script uses Playwright to capture each `.slide` element and
-PptxGenJS to create a widescreen PPTX with each screenshot as a full-slide
-image. It also runs the same HTML self-check before screenshot/export and stops
-early on layout failures.
+The export script runs self-check again, writes `qa/html_self_check.json`,
+creates `slides/slide-*.png` preview images for visual QA, loads
+`scripts/dom-to-pptx.bundle.js`, and writes `output.pptx`.
 
-If PptxGenJS is missing in Office Raccoon, install it into the managed app
-support prefix, not globally:
+Do not install the npm `dom-to-pptx` package for this workflow. The editable
+export must use this skill's bundled `scripts/dom-to-pptx.bundle.js`, which may
+contain local fixes that are not in the published package.
 
-```bash
-${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" pptxgenjs
+If the current process has no browser host and Playwright/Chromium cannot be
+installed, do not switch to an image-only PPTX fallback. Keep the finished
+`deck.html` as the deliverable and report:
+
+```text
+Editable PPTX export: BLOCKED (missing browser host)
+Install Playwright: ${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" playwright
+Download Chromium: "$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium
 ```
 
-Install the `playwright` npm package only when the local Node fallback is needed
-and no Playwright MCP/Browser screenshot path is available. Never install Node
-dependencies into the deliverable project folder; use the managed Office Raccoon
-app support prefix for reusable dependencies.
+If the host app exposes an Electron renderer conversion/import path, use that
+host route instead of installing Playwright. Do not assume Electron main or a
+Node child process has DOM layout APIs.
 
 ## Visual QA
 
-HTML self-check is not a replacement for visual QA. It is the first gate.
-After it passes, still inspect the screenshot pixels.
+HTML self-check is not a replacement for visual QA. It is the first gate. Keep
+`qa/html_self_check.json` with the delivery artifacts. If that report is missing
+or `"ok"` is not `true`, do not claim HTML self-check passed.
 
-Inspect the generated `slides/slide-*.png` files before final PPTX delivery.
-First create a contact sheet for overview:
-
-```bash
-${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx2/scripts/make_contact_sheet.js slides --out qa/vision-contact-sheet.png
-```
-
-The contact sheet only prepares visual review. It is not proof that review
-happened. When `vision_review` is available, call it with every individual
-`slides/slide-*.png` file and set `output_path` to the deck folder's
-`qa/visual_review.md`. Include the contact sheet only as an additional overview
-image if useful.
-
-Open or attach every PNG to an image-capable review tool and write a short
-per-slide verdict before packaging the final deck. Do not treat file existence,
-image dimensions, successful screenshot capture, OCR, histogram checks, or pixel
-diff as visual inspection.
-Check:
-
-- blank or near-blank slides
-- text clipping or overflow
-- blurry or unreadable text
-- overlapping labels, cards, charts, legends, or icons
-- low contrast
-- missing images
-- missing charts, maps, screenshots, or icons
-- bad crop or scaling
-- inconsistent margins
-- content hidden outside the 16:9 slide
-- missing or inconsistent page numbers
-- generic placeholder silhouettes for named people
-
-If any issue is found, edit the HTML and re-render the affected PNGs before
-running `images_to_pptx.js`. If no image-capable review tool is available,
-report `Visual inspection: BLOCKED` and do not claim visual QA passed.
-
-After the PPTX is created, still run package validation, text extraction, and
-placeholder scan. When PPTX-rendered slide images are available, compare the
-source screenshots against the rendered PPTX images:
+Inspect the generated `slides/slide-*.png` source previews before final PPTX
+delivery. First create compressed review-size inputs:
 
 ```bash
-${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx2/scripts/compare_slide_images.js slides rendered --out qa/diff
+${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx/scripts/make_vision_inputs.js slides --out qa/vision_inputs
 ```
 
-This image comparison checks export fidelity: whether the PPTX render still
-matches the HTML source screenshots, without missing slides, order changes,
-scaling drift, crop, or altered pixels. It is not the same as visual quality
-judgment; still inspect the source screenshots with an image-capable tool.
+When `vision_review` is available, call it with every individual
+`qa/vision_inputs/slide-*.jpg` file and set `output_path` to the deck folder's
+`qa/visual_review.md`. A contact sheet may be added as overview material, but it
+is not proof that review happened.
+
+After the PPTX is created, run package validation, text extraction, placeholder
+scan, render, and compare rendered PPTX images against source previews when
+possible:
+
+```bash
+${BOX_AGENT_NODE:-node} /Users/malin1/.box-agent/skills/pptx/scripts/compare_slide_images.js slides rendered --out qa/diff
+```
+
+This comparison checks DOM-to-PPTX drift: missing slides, wrong order, scaling
+changes, crop, text reflow, missing gradients, changed SVGs, wrong z-order, or
+image mask differences. It is not the same as visual quality judgment; still
+inspect the source previews and rendered PPTX images with an image-capable tool.
 
 ## When Not To Use
 
 Use native PptxGenJS instead when:
 
-- the user asks for editable PowerPoint text or shapes
+- the user explicitly confirms direct native PPT generation
 - the user provides a `.pptx` template to preserve
-- the deck needs native editable charts or tables
-- the recipient is expected to make manual edits inside PowerPoint
-- accessibility/editability is more important than pixel-perfect visual design
+- the deck needs native editable PowerPoint charts or tables
+- the recipient must use PowerPoint-native chart/table editing
+- the task is a narrow edit to an existing deck rather than a new deck
+- accessibility or template preservation is more important than HTML-authored
+  layout
+
+For a new deck, these exceptions require user confirmation before native
+implementation unless the user already provided a template to preserve.

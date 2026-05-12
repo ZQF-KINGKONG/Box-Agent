@@ -42,7 +42,7 @@ async def test_classify_ppt_outline_is_no_longer_auto_mode():
     llm = _FixedLLM("ppt_outline")
     mode = await classify_session_mode(llm, "帮我做一个讲解 AI 发展的 PPT 大纲")
     assert mode is None
-    assert llm.call_count == 1
+    assert llm.call_count == 0
 
 
 @pytest.mark.asyncio
@@ -50,6 +50,17 @@ async def test_classify_data_analysis():
     llm = _FixedLLM("data_analysis")
     mode = await classify_session_mode(llm, "分析一下这个 Excel 表格的趋势")
     assert mode == "data_analysis"
+
+
+@pytest.mark.asyncio
+async def test_classify_ppt_deliverable_with_data_as_general():
+    llm = _FixedLLM("data_analysis")
+    mode = await classify_session_mode(
+        llm,
+        "请根据2026年一季度经济运行数据，整体介绍产业，并形成一个15页的PPT。",
+    )
+    assert mode is None
+    assert llm.call_count == 0
 
 
 @pytest.mark.asyncio

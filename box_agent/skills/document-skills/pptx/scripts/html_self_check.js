@@ -16,7 +16,7 @@ process.env.NODE_PATH = process.env.NODE_PATH
 Module._initPaths();
 
 function usage() {
-  console.error("Usage: html_self_check.js deck.html [--width 1280] [--height 720]");
+  console.error("Usage: html_self_check.js deck.html [--width 1920] [--height 1080] [--dom-to-pptx] [--report qa/html_self_check.json]");
   process.exit(2);
 }
 
@@ -24,8 +24,10 @@ function parseArgs(argv) {
   if (argv.length < 1) usage();
   const opts = {
     html: argv[0],
-    width: 1280,
-    height: 720,
+    width: 1920,
+    height: 1080,
+    domToPptx: false,
+    report: null,
   };
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -35,6 +37,11 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg === "--height" && value) {
       opts.height = Number(value);
+      i += 1;
+    } else if (arg === "--dom-to-pptx") {
+      opts.domToPptx = true;
+    } else if (arg === "--report" && value) {
+      opts.report = value;
       i += 1;
     } else {
       usage();
@@ -51,18 +58,39 @@ function requireModule(name, installHint) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);
       console.error(installHint);
+      console.error("Without a browser host, keep deck.html as the deliverable and mark editable PPTX export as BLOCKED.");
       process.exit(1);
     }
     throw error;
   }
 }
 
-async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
+function printBrowserInstallHint() {
+  console.error("Playwright Chromium is not available.");
+  console.error('Install/download it with: "$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium');
+  console.error("Without a browser host, keep deck.html as the deliverable and mark editable PPTX export as BLOCKED.");
+}
+
+async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx = false) {
   return page.evaluate(
-    ({ expectedWidth, expectedHeight }) => {
+    ({ expectedWidth, expectedHeight, domToPptx }) => {
       const issues = [];
       const warnings = [];
       const slideEls = Array.from(document.querySelectorAll(".slide"));
+      const badTransform = /\b(?:translate|translateX|translateY|translate3d|scale|scaleX|scaleY|scale3d|skew|skewX|skewY|matrix|matrix3d)\s*\(/i;
+      const badBackground = /\b(?:radial-gradient|conic-gradient)\s*\(/i;
+      const badFilter = /\b(?:brightness|contrast|saturate|hue-rotate|grayscale|sepia|invert|drop-shadow)\s*\(/i;
+      const viewportUnits = /\b\d*\.?\d+(?:vh|vw|vmin|vmax)\b/i;
+      const pptxTextSlackPx = 12;
+      const badgeTextRe = /^[\p{L}\p{N}\p{Script=Han}\s·•|+\-_/()[\].,%:：]+$/u;
+      const blockedStyleRules = [
+        { name: "backdrop-filter", re: /backdrop-filter\s*:/i },
+        { name: "clip-path", re: /clip-path\s*:/i },
+        { name: "mix-blend-mode", re: /mix-blend-mode\s*:/i },
+        { name: "text-shadow", re: /text-shadow\s*:/i },
+        { name: "animation", re: /(?:^|[;\s])animation(?:-\w+)?\s*:/i },
+        { name: "transition", re: /(?:^|[;\s])transition(?:-\w+)?\s*:/i },
+      ];
       const px = value => Number.parseFloat(String(value || "0")) || 0;
       const isVisible = (el, style = getComputedStyle(el)) => {
         const rect = el.getBoundingClientRect();
@@ -80,10 +108,29 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
         const tag = el.tagName.toLowerCase();
         return `slide-${String(slideIndex + 1).padStart(2, "0")} ${tag}${id}${classes ? `.${classes.split(/\s+/).join(".")}` : ""}`;
       };
+      const transformedAncestor = slide => {
+        let current = slide.parentElement;
+        while (current && current !== document.body) {
+          const transform = getComputedStyle(current).transform;
+          if (transform && transform !== "none") return current;
+          current = current.parentElement;
+        }
+        return null;
+      };
 
       if (!slideEls.length) {
         issues.push("No .slide elements found.");
         return { ok: false, slideCount: 0, issues, warnings };
+      }
+
+      if (domToPptx) {
+        document
+          .querySelectorAll('link[rel="stylesheet"][href*="fonts.googleapis.com"]')
+          .forEach(link => {
+            if (link.getAttribute("crossorigin") !== "anonymous") {
+              issues.push(`Google Fonts link missing crossorigin="anonymous": ${link.getAttribute("href") || ""}`);
+            }
+          });
       }
 
       slideEls.forEach((slide, slideIndex) => {
@@ -98,6 +145,18 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
         if (slideStyle.position === "static") {
           warnings.push(`${slideName}: .slide should usually use position: relative for stable layout.`);
         }
+        if (domToPptx && slideStyle.position !== "relative" && slideStyle.position !== "absolute") {
+          issues.push(`${slideName}: dom-to-pptx requires .slide position:relative or absolute.`);
+        }
+        if (domToPptx && slideStyle.overflow !== "hidden") {
+          issues.push(`${slideName}: dom-to-pptx requires .slide overflow:hidden.`);
+        }
+        if (domToPptx) {
+          const ancestor = transformedAncestor(slide);
+          if (ancestor) {
+            issues.push(`${slideName}: .slide has a transformed ancestor; move it outside transformed wrappers.`);
+          }
+        }
         if (!(slide.innerText || "").trim() && !slide.querySelector("img,svg,canvas,video")) {
           issues.push(`${slideName}: slide appears empty.`);
         }
@@ -105,6 +164,32 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
         const descendants = Array.from(slide.querySelectorAll("*"));
         descendants.forEach(el => {
           const style = getComputedStyle(el);
+          const inline = el.getAttribute("style") || "";
+          if (domToPptx) {
+            const inlineTransform = (inline.match(/transform\s*:\s*([^;]+)/i) || [])[1] || "";
+            if (inlineTransform && badTransform.test(inlineTransform)) {
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx does not support transform:${inlineTransform.trim()}; use left/top or flex centering.`);
+            }
+            const background = style.backgroundImage || "";
+            if (badBackground.test(background)) {
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx only reliably supports linear gradients; avoid radial/conic gradients.`);
+            }
+            const filter = style.filter || "";
+            if (filter && filter !== "none" && !/^\s*blur\(/i.test(filter) && badFilter.test(filter)) {
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx supports blur only; bake filter "${filter}" into the image.`);
+            }
+            blockedStyleRules.forEach(rule => {
+              if (rule.re.test(inline)) {
+                issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx blocked style ${rule.name}; use a supported alternative.`);
+              }
+            });
+            if (viewportUnits.test(inline)) {
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx export should use fixed px, not viewport units.`);
+            }
+            if (["VIDEO", "AUDIO", "IFRAME", "CANVAS"].includes(el.tagName)) {
+              issues.push(`${labelFor(el, slideIndex)}: <${el.tagName.toLowerCase()}> is not captured by dom-to-pptx; convert it to an image/SVG first.`);
+            }
+          }
           if (!isVisible(el, style)) return;
           const rect = el.getBoundingClientRect();
           const name = labelFor(el, slideIndex);
@@ -124,6 +209,80 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
             issues.push(
               `${name}: text/content overflow detected (${overflowX ? "x" : ""}${overflowY ? "y" : ""}).`
             );
+          }
+          if (domToPptx && text) {
+            const bgColor = style.backgroundColor || "";
+            const hasVisibleBg = bgColor && bgColor !== "transparent" && !/rgba?\([^)]*,\s*0(?:\.0+)?\s*\)$/i.test(bgColor);
+            const paddingTop = px(style.paddingTop);
+            const paddingBottom = px(style.paddingBottom);
+            const paddingX = px(style.paddingLeft) + px(style.paddingRight);
+            const paddingY = paddingTop + paddingBottom;
+            const radius = Math.max(
+              px(style.borderRadius),
+              px(style.borderTopLeftRadius),
+              px(style.borderTopRightRadius),
+              px(style.borderBottomRightRadius),
+              px(style.borderBottomLeftRadius)
+            );
+            const hasExplicitStableSize =
+              (inline && /\bwidth\s*:\s*[^;]+/i.test(inline) && /\bheight\s*:\s*[^;]+/i.test(inline)) ||
+              (style.width && style.width !== "auto" && style.height && style.height !== "auto" && paddingX === 0 && paddingY === 0);
+            const isFlexCentered =
+              style.display.includes("flex") &&
+              style.alignItems === "center" &&
+              style.justifyContent === "center";
+            const looksLikeShortLabel =
+              text.length <= 24 &&
+              !text.includes("\n") &&
+              badgeTextRe.test(text) &&
+              !["P", "H1", "H2", "H3", "H4", "H5", "H6", "LI"].includes(el.tagName);
+            const parent = el.parentElement;
+            const parentStyle = parent ? getComputedStyle(parent) : null;
+            const isPlainFlexLabelChild =
+              parentStyle &&
+              parentStyle.display.includes("flex") &&
+              parentStyle.alignItems === "center" &&
+              parentStyle.justifyContent === "center" &&
+              looksLikeShortLabel &&
+              !hasVisibleBg &&
+              paddingX === 0 &&
+              paddingY === 0 &&
+              radius === 0;
+            if (
+              looksLikeShortLabel &&
+              hasVisibleBg &&
+              paddingY > 0 &&
+              !isFlexCentered
+            ) {
+              issues.push(
+                `${name}: short background text uses vertical padding to simulate centering; dom-to-pptx may shift or clip it. Use a fixed width/height outer background container with display:flex; align-items:center; justify-content:center, and an inner text element with margin:0; padding:0; line-height:1.`
+              );
+            }
+
+            if (!isPlainFlexLabelChild) {
+              const range = document.createRange();
+              range.selectNodeContents(el);
+              const lineRects = Array.from(range.getClientRects()).filter(lineRect => lineRect.width > 1 && lineRect.height > 1);
+              range.detach();
+              if (lineRects.length) {
+                const paddingRight = px(style.paddingRight);
+                const paddingBottom = px(style.paddingBottom);
+                const contentRight = rect.right - paddingRight;
+                const contentBottom = rect.bottom - paddingBottom;
+                const minRightSlack = Math.min(...lineRects.map(lineRect => contentRight - lineRect.right));
+                const minBottomSlack = Math.min(...lineRects.map(lineRect => contentBottom - lineRect.bottom));
+                if (minRightSlack < pptxTextSlackPx) {
+                  issues.push(
+                    `${name}: text has only ${Math.round(minRightSlack)}px right slack; PowerPoint may rewrap after dom-to-pptx. Widen the text box by 16-24px or reduce font-size.`
+                  );
+                }
+                if (minBottomSlack < pptxTextSlackPx) {
+                  warnings.push(
+                    `${name}: text has only ${Math.round(minBottomSlack)}px bottom slack; leave extra vertical room for PowerPoint font metrics.`
+                  );
+                }
+              }
+            }
           }
 
           const classAndRole = `${el.className || ""} ${el.getAttribute("role") || ""} ${el.getAttribute("aria-label") || ""}`;
@@ -146,6 +305,15 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
 
         Array.from(slide.querySelectorAll("img")).forEach(img => {
           const name = labelFor(img, slideIndex);
+          const src = img.getAttribute("src") || "";
+          if (domToPptx) {
+            if (!/^(https:\/\/|data:)/i.test(src)) {
+              issues.push(`${name}: dom-to-pptx images must use https:// or data: URLs, not relative/file paths.`);
+            }
+            if (img.getAttribute("loading") === "lazy") {
+              issues.push(`${name}: remove loading="lazy"; it can race dom-to-pptx export.`);
+            }
+          }
           if (!img.complete || img.naturalWidth === 0 || img.naturalHeight === 0) {
             issues.push(`${name}: image did not load.`);
           }
@@ -159,7 +327,7 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight) {
         warnings,
       };
     },
-    { expectedWidth, expectedHeight }
+    { expectedWidth, expectedHeight, domToPptx }
   );
 }
 
@@ -173,20 +341,34 @@ async function main() {
 
   const { chromium } = requireModule(
     "playwright",
-    'Install in Office Raccoon with: ${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" playwright'
+    'Install in Office Raccoon with: ${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" playwright; then download Chromium with "$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium'
   );
 
-  const browser = await chromium.launch({ headless: true });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    printBrowserInstallHint();
+    throw error;
+  }
   const page = await browser.newPage({
     viewport: { width: opts.width, height: opts.height },
     deviceScaleFactor: 2,
   });
-  await page.goto(`file://${htmlPath}`, { waitUntil: "networkidle" });
+  await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready);
-  const report = await runHtmlSelfCheck(page, opts.width, opts.height);
+  const report = await runHtmlSelfCheck(page, opts.width, opts.height, opts.domToPptx);
   await browser.close();
 
-  console.log(JSON.stringify(report, null, 2));
+  const reportText = JSON.stringify(report, null, 2);
+  if (opts.report) {
+    const reportPath = path.resolve(opts.report);
+    fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+    fs.writeFileSync(reportPath, `${reportText}\n`);
+  }
+  console.log(reportText);
+  console.log(`HTML self-check: ${report.ok ? "PASS" : "FAIL"} (${report.slideCount} slides)`);
   if (!report.ok) {
     process.exit(1);
   }

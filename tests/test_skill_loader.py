@@ -272,3 +272,97 @@ Skill content here.
         assert "Skill Root Directory" in prompt
         assert str(skill_dir) in prompt
         assert "All files and references in this skill are relative to this directory" in prompt
+
+
+def _write_manifest(builtin_dir: Path, names: list[str]) -> None:
+    import json
+
+    payload = {
+        "schema_version": 1,
+        "skills": [{"name": name, "path": f"{name}/SKILL.md"} for name in names],
+    }
+    (builtin_dir / "_manifest.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+
+def test_builtin_manifest_filters_orphan_skills():
+    """Orphan SKILL.md (left on disk by a non-deleting installer) is ignored."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        builtin_dir = Path(tmpdir) / "builtin"
+        builtin_dir.mkdir()
+
+        # Two skills exist on disk; manifest only lists one.
+        for name in ("kept", "orphan"):
+            sd = builtin_dir / name
+            sd.mkdir()
+            create_test_skill(sd, name, f"{name} desc", f"{name} content")
+        _write_manifest(builtin_dir, ["kept"])
+
+        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        assert loader.get_skill("kept") is not None
+        assert loader.get_skill("orphan") is None
+        assert set(loader.list_skills()) == {"kept"}
+
+
+def test_user_source_not_filtered_by_manifest():
+    """Manifest filtering must only apply to builtin sources, never user."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        builtin_dir = Path(tmpdir) / "builtin"
+        user_dir = Path(tmpdir) / "user"
+        builtin_dir.mkdir()
+        user_dir.mkdir()
+
+        # Builtin manifest is empty → all builtin skills are orphans.
+        sd = builtin_dir / "builtin-orphan"
+        sd.mkdir()
+        create_test_skill(sd, "builtin-orphan", "x", "x")
+        _write_manifest(builtin_dir, [])
+
+        # User skill must still load even with no manifest there.
+        sd = user_dir / "user-skill"
+        sd.mkdir()
+        create_test_skill(sd, "user-skill", "y", "y")
+
+        loader = SkillLoader(sources=[(user_dir, "user"), (builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        assert loader.get_skill("user-skill") is not None
+        assert loader.get_skill("builtin-orphan") is None
+
+
+def test_missing_manifest_falls_back_to_unfiltered():
+    """No manifest in builtin dir → behave like before (load everything)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        builtin_dir = Path(tmpdir) / "builtin"
+        builtin_dir.mkdir()
+
+        sd = builtin_dir / "any-skill"
+        sd.mkdir()
+        create_test_skill(sd, "any-skill", "x", "x")
+        # no _manifest.json written
+
+        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        assert loader.get_skill("any-skill") is not None
+
+
+def test_malformed_manifest_falls_back_to_unfiltered():
+    """Malformed manifest → warn + load everything (don't break startup)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        builtin_dir = Path(tmpdir) / "builtin"
+        builtin_dir.mkdir()
+
+        sd = builtin_dir / "any-skill"
+        sd.mkdir()
+        create_test_skill(sd, "any-skill", "x", "x")
+        (builtin_dir / "_manifest.json").write_text("not json {", encoding="utf-8")
+
+        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        assert loader.get_skill("any-skill") is not None
+

@@ -6,17 +6,23 @@ Supports:
 - User skills at ~/.box-agent/skills/ (writable from officev3)
 - User skills override builtin ones on name conflict
 - mtime-based auto reload (no explicit trigger needed)
+- Manifest-based whitelist for builtin sources: any SKILL.md left on disk
+  (e.g. by a downstream host that updated box-agent without deleting old
+  files) but absent from ``_manifest.json`` is ignored as an orphan.
 """
 
+import json
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Set, Tuple
 
 import yaml
 
 SkillSource = Literal["builtin", "user"]
+
+MANIFEST_FILENAME = "_manifest.json"
 
 
 def _warn(msg: str) -> None:
@@ -72,6 +78,10 @@ class _SourceEntry:
     directory: Path
     source: SkillSource
     last_mtime: float = 0.0
+    # Optional whitelist of skill names. None means "no manifest, accept all".
+    # Empty set means "manifest present but lists zero skills" → load nothing.
+    manifest_names: Optional[Set[str]] = None
+    manifest_loaded: bool = False
 
 
 class SkillLoader:
@@ -205,16 +215,83 @@ class SkillLoader:
         for entry in reversed(self._sources):
             if not entry.directory.exists():
                 continue
+
+            # Manifest only applies to builtin sources. For user skills we
+            # never want to hide SKILL.md files the user (or officev3) dropped
+            # in at runtime.
+            if entry.source == "builtin":
+                self._load_manifest(entry)
+
             for skill_file in entry.directory.rglob("SKILL.md"):
                 skill = self.load_skill(skill_file, source=entry.source)
-                if skill:
-                    self.loaded_skills[skill.name] = skill
+                if skill is None:
+                    continue
+
+                if (
+                    entry.source == "builtin"
+                    and entry.manifest_names is not None
+                    and skill.name not in entry.manifest_names
+                ):
+                    _warn(
+                        f"⚠️  Ignoring orphan builtin skill '{skill.name}' at "
+                        f"{skill_file} (not listed in {MANIFEST_FILENAME}). "
+                        f"This usually means a previous box-agent version "
+                        f"shipped the skill and the current installer left "
+                        f"the files behind."
+                    )
+                    continue
+
+                self.loaded_skills[skill.name] = skill
 
             # Cache mtime for reload detection
             entry.last_mtime = self._dir_mtime(entry.directory)
 
         discovered = list(self.loaded_skills.values())
         return discovered
+
+    def _load_manifest(self, entry: _SourceEntry) -> None:
+        """Populate ``entry.manifest_names`` from ``_manifest.json`` if present.
+
+        Missing manifest → ``manifest_names`` stays ``None`` (no filtering),
+        preserving backward compatibility with builtin skills directories that
+        pre-date the manifest (dev trees, third-party bundles, etc.).
+        """
+
+        manifest_path = entry.directory / MANIFEST_FILENAME
+        if not manifest_path.is_file():
+            entry.manifest_names = None
+            entry.manifest_loaded = True
+            return
+
+        try:
+            data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            _warn(
+                f"⚠️  Failed to read builtin skills manifest at {manifest_path}: {exc}. "
+                f"Falling back to unfiltered discovery."
+            )
+            entry.manifest_names = None
+            entry.manifest_loaded = True
+            return
+
+        raw_skills = data.get("skills") if isinstance(data, dict) else None
+        if not isinstance(raw_skills, list):
+            _warn(
+                f"⚠️  Builtin skills manifest {manifest_path} is malformed "
+                f"(missing 'skills' list); falling back to unfiltered discovery."
+            )
+            entry.manifest_names = None
+            entry.manifest_loaded = True
+            return
+
+        names: Set[str] = set()
+        for item in raw_skills:
+            if isinstance(item, dict) and isinstance(item.get("name"), str):
+                names.add(item["name"])
+            elif isinstance(item, str):
+                names.add(item)
+        entry.manifest_names = names
+        entry.manifest_loaded = True
 
     @staticmethod
     def _dir_mtime(directory: Path) -> float:

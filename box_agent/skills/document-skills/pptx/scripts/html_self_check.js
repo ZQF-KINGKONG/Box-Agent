@@ -3,20 +3,27 @@ const fs = require("fs");
 const Module = require("module");
 const path = require("path");
 
-const managedNodeModules = path.join(
-  process.env.HOME || "",
-  "Library",
-  "Application Support",
-  "office-raccoon",
-  "node_modules"
-);
+function officeRaccoonPrefix() {
+  if (process.env.BOX_AGENT_NODE_PREFIX) return process.env.BOX_AGENT_NODE_PREFIX;
+  if (process.env.BOX_AGENT_RUNTIME_PREFIX) return process.env.BOX_AGENT_RUNTIME_PREFIX;
+  const home = process.env.HOME || "";
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "office-raccoon");
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || home, "office-raccoon");
+  }
+  return path.join(home, ".config", "office-raccoon");
+}
+
+const managedNodeModules = path.join(officeRaccoonPrefix(), "node_modules");
 process.env.NODE_PATH = process.env.NODE_PATH
   ? `${managedNodeModules}${path.delimiter}${process.env.NODE_PATH}`
   : managedNodeModules;
 Module._initPaths();
 
 function usage() {
-  console.error("Usage: html_self_check.js deck.html [--width 1920] [--height 1080] [--dom-to-pptx] [--report qa/html_self_check.json]");
+  console.error("Usage: html_self_check.js deck.html [--width 1920] [--height 1080] [--dom-to-pptx] [--report qa/html_self_check.json] [--verbose]");
   process.exit(2);
 }
 
@@ -28,6 +35,7 @@ function parseArgs(argv) {
     height: 1080,
     domToPptx: false,
     report: null,
+    verbose: false,
   };
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -43,6 +51,8 @@ function parseArgs(argv) {
     } else if (arg === "--report" && value) {
       opts.report = value;
       i += 1;
+    } else if (arg === "--verbose") {
+      opts.verbose = true;
     } else {
       usage();
     }
@@ -58,7 +68,7 @@ function requireModule(name, installHint) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);
       console.error(installHint);
-      console.error("Without a browser host, keep deck.html as the deliverable and mark editable PPTX export as BLOCKED.");
+      console.error("Without a browser host, ask the user to choose HTML delivery or native PptxGenJS PPTX.");
       process.exit(1);
     }
     throw error;
@@ -66,9 +76,10 @@ function requireModule(name, installHint) {
 }
 
 function printBrowserInstallHint() {
+  const prefix = officeRaccoonPrefix();
   console.error("Playwright Chromium is not available.");
-  console.error('Install/download it with: "$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium');
-  console.error("Without a browser host, keep deck.html as the deliverable and mark editable PPTX export as BLOCKED.");
+  console.error(`Install/download it with: "${path.join(prefix, "node_modules", ".bin", "playwright")}" install chromium`);
+  console.error("Without a browser host, ask the user to choose HTML delivery or native PptxGenJS PPTX.");
 }
 
 async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx = false) {
@@ -172,7 +183,7 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
             }
             const background = style.backgroundImage || "";
             if (badBackground.test(background)) {
-              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx only reliably supports linear gradients; avoid radial/conic gradients.`);
+              warnings.push(`${labelFor(el, slideIndex)}: dom-to-pptx only reliably supports linear gradients; avoid radial/conic gradients.`);
             }
             const filter = style.filter || "";
             if (filter && filter !== "none" && !/^\s*blur\(/i.test(filter) && badFilter.test(filter)) {
@@ -254,12 +265,15 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
               paddingY > 0 &&
               !isFlexCentered
             ) {
-              issues.push(
+              warnings.push(
                 `${name}: short background text uses vertical padding to simulate centering; dom-to-pptx may shift or clip it. Use a fixed width/height outer background container with display:flex; align-items:center; justify-content:center, and an inner text element with margin:0; padding:0; line-height:1.`
               );
             }
 
-            if (!isPlainFlexLabelChild) {
+            const hasDirectText = Array.from(el.childNodes).some(
+              node => node.nodeType === Node.TEXT_NODE && (node.textContent || "").trim()
+            );
+            if (!isPlainFlexLabelChild && hasDirectText) {
               const range = document.createRange();
               range.selectNodeContents(el);
               const lineRects = Array.from(range.getClientRects()).filter(lineRect => lineRect.width > 1 && lineRect.height > 1);
@@ -272,7 +286,7 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
                 const minRightSlack = Math.min(...lineRects.map(lineRect => contentRight - lineRect.right));
                 const minBottomSlack = Math.min(...lineRects.map(lineRect => contentBottom - lineRect.bottom));
                 if (minRightSlack < pptxTextSlackPx) {
-                  issues.push(
+                  warnings.push(
                     `${name}: text has only ${Math.round(minRightSlack)}px right slack; PowerPoint may rewrap after dom-to-pptx. Widen the text box by 16-24px or reduce font-size.`
                   );
                 }
@@ -367,8 +381,21 @@ async function main() {
     fs.mkdirSync(path.dirname(reportPath), { recursive: true });
     fs.writeFileSync(reportPath, `${reportText}\n`);
   }
-  console.log(reportText);
-  console.log(`HTML self-check: ${report.ok ? "PASS" : "FAIL"} (${report.slideCount} slides)`);
+  if (!opts.report || opts.verbose) {
+    console.log(reportText);
+  }
+  console.log(
+    `HTML self-check: ${report.ok ? "PASS" : "FAIL"} (${report.slideCount} slides, ${report.issues.length} issues, ${report.warnings.length} warnings)`
+  );
+  if (opts.report) {
+    console.log(`Report: ${path.resolve(opts.report)}`);
+  }
+  if (!report.ok) {
+    report.issues.slice(0, 8).forEach(issue => console.log(`- ${issue}`));
+    if (report.issues.length > 8) {
+      console.log(`- ... ${report.issues.length - 8} more issue(s) in report`);
+    }
+  }
   if (!report.ok) {
     process.exit(1);
   }

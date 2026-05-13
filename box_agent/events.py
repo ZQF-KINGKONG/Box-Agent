@@ -70,6 +70,19 @@ class TokenUsageEvent:
     total_tokens: int
 
 
+@dataclass(frozen=True)
+class LLMOutputEvent:
+    """Complete model output for one LLM call, intended for host logging."""
+
+    step: int
+    content: str
+    thinking: str | None = None
+    tool_calls: list[Any] | None = None
+    finish_reason: str = "stop"
+    usage: dict[str, Any] | None = None
+    provider_request_id: str | None = None
+
+
 # ── Tool execution ──────────────────────────────────────────────
 
 
@@ -288,6 +301,7 @@ AgentEvent = Union[
     ThinkingEvent,
     ContentEvent,
     TokenUsageEvent,
+    LLMOutputEvent,
     ToolCallStart,
     ToolCallResult,
     WebSearchEvent,

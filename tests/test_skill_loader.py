@@ -307,6 +307,70 @@ def test_builtin_manifest_filters_orphan_skills():
         assert set(loader.list_skills()) == {"kept"}
 
 
+def test_builtin_manifest_reload_signature_ignores_resource_files():
+    """Builtin reload checks should not stat every bundled resource file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        builtin_dir = Path(tmpdir) / "builtin"
+        builtin_dir.mkdir()
+
+        sd = builtin_dir / "kept"
+        sd.mkdir()
+        create_test_skill(sd, "kept", "kept desc", "kept content")
+        asset = sd / "scripts" / "large-bundle.js"
+        asset.parent.mkdir()
+        asset.write_text("bundle v1", encoding="utf-8")
+        _write_manifest(builtin_dir, ["kept"])
+
+        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        asset.write_text("bundle v2 with unrelated resource changes", encoding="utf-8")
+
+        assert loader.maybe_reload() is False
+        assert loader.get_skill("kept") is not None
+
+
+def test_builtin_manifest_reload_detects_listed_skill_change():
+    """Changing a manifest-listed SKILL.md should still trigger reload."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        builtin_dir = Path(tmpdir) / "builtin"
+        builtin_dir.mkdir()
+
+        sd = builtin_dir / "kept"
+        sd.mkdir()
+        create_test_skill(sd, "kept", "old desc", "old content")
+        _write_manifest(builtin_dir, ["kept"])
+
+        loader = SkillLoader(sources=[(builtin_dir, "builtin")])
+        loader.discover_skills()
+
+        create_test_skill(sd, "kept", "new desc", "new content that changes size")
+
+        assert loader.maybe_reload() is True
+        assert loader.get_skill("kept").description == "new desc"
+
+
+def test_user_source_reload_detects_new_skill_without_manifest():
+    """User skills remain dynamically discoverable without a manifest."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        user_dir = Path(tmpdir) / "user"
+        user_dir.mkdir()
+
+        sd = user_dir / "first"
+        sd.mkdir()
+        create_test_skill(sd, "first", "first desc", "first content")
+
+        loader = SkillLoader(sources=[(user_dir, "user")])
+        loader.discover_skills()
+
+        sd = user_dir / "second"
+        sd.mkdir()
+        create_test_skill(sd, "second", "second desc", "second content")
+
+        assert loader.maybe_reload() is True
+        assert set(loader.list_skills()) == {"first", "second"}
+
+
 def test_user_source_not_filtered_by_manifest():
     """Manifest filtering must only apply to builtin sources, never user."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -365,4 +429,3 @@ def test_malformed_manifest_falls_back_to_unfiltered():
         loader.discover_skills()
 
         assert loader.get_skill("any-skill") is not None
-

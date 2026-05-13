@@ -217,6 +217,72 @@ def test_search_empty_query(mgr: MemoryManager):
     assert results == []
 
 
+def test_auto_match_context_matches_related_phrase_conservatively(mgr: MemoryManager):
+    mgr.write_context(
+        "- PPTX QA环境最新记录：在本轮AI科技公司入职培训PPT中，render_pptx.py 可成功导出PDF。\n"
+        "- 会话连续性反馈：用户会以“科技公司入职培训 ppt 做好了吗”等方式追问既有交付状态。\n"
+        "- Quick Bar history should default to visible records."
+    )
+
+    matches = mgr.auto_match_context("科技公司入职培训 PPT 做好了吗")
+
+    assert [item["text"] for item in matches] == [
+        "- PPTX QA环境最新记录：在本轮AI科技公司入职培训PPT中，render_pptx.py 可成功导出PDF。",
+        "- 会话连续性反馈：用户会以“科技公司入职培训 ppt 做好了吗”等方式追问既有交付状态。",
+    ]
+
+
+def test_auto_match_context_ignores_weak_single_word_overlap(mgr: MemoryManager):
+    mgr.write_context("- PPTX QA环境最新记录：在本轮AI科技公司入职培训PPT中，render_pptx.py 可成功导出PDF。")
+
+    assert mgr.auto_match_context("帮我写一个培训方案") == []
+
+
+def test_auto_match_context_ignores_host_appended_file_output_rules(mgr: MemoryManager):
+    mgr.write_context(
+        "- [文件输出规范] 当你生成了多个文件，将它们打包成 ZIP 并提供下载链接。\n"
+        "- PPTX QA环境最新记录：在本轮AI科技公司入职培训PPT中，render_pptx.py 可成功导出PDF。"
+    )
+
+    matches = mgr.auto_match_context("科技公司入职培训 都需要注意什么\n\n[文件输出规范] 当你生成了多个文件")
+
+    assert [item["text"] for item in matches] == [
+        "- PPTX QA环境最新记录：在本轮AI科技公司入职培训PPT中，render_pptx.py 可成功导出PDF。"
+    ]
+
+
+def test_auto_match_context_filters_file_delivery_memory_unless_user_asks_delivery(mgr: MemoryManager):
+    mgr.write_context(
+        "- 科技公司入职培训文件交付偏好：若生成多个文件必须使用 zip 命令打包。\n"
+        "- 会话连续性反馈：用户会以“科技公司入职培训 ppt 做好了吗”等方式追问既有交付状态。"
+    )
+
+    assert [
+        item["text"] for item in mgr.auto_match_context("科技公司入职培训 都需要注意什么")
+    ] == [
+        "- 会话连续性反馈：用户会以“科技公司入职培训 ppt 做好了吗”等方式追问既有交付状态。"
+    ]
+    assert [
+        item["text"] for item in mgr.auto_match_context("科技公司入职培训 文件怎么打包交付")
+    ][0] == "- 科技公司入职培训文件交付偏好：若生成多个文件必须使用 zip 命令打包。"
+
+
+def test_auto_match_context_filters_title_meta_memory_unless_user_asks_title(mgr: MemoryManager):
+    mgr.write_context(
+        "- 会话标题提炼偏好：遇到“查询 科技公司入职培训”时标题可提炼为“科技公司入职培训”。\n"
+        "- 会话连续性反馈：用户会以“科技公司入职培训 ppt 做好了吗”等方式追问既有交付状态。"
+    )
+
+    assert [
+        item["text"] for item in mgr.auto_match_context("科技公司入职培训 都需要注意什么")
+    ] == [
+        "- 会话连续性反馈：用户会以“科技公司入职培训 ppt 做好了吗”等方式追问既有交付状态。"
+    ]
+    assert [
+        item["text"] for item in mgr.auto_match_context("科技公司入职培训 这个会话标题怎么提炼")
+    ][0] == "- 会话标题提炼偏好：遇到“查询 科技公司入职培训”时标题可提炼为“科技公司入职培训”。"
+
+
 # ── Recall ─────────────────────────────────────────────────────
 
 

@@ -34,8 +34,8 @@ class LLMConfig(BaseModel):
     model: str = DEFAULT_MODEL
     provider: str = "anthropic"  # "anthropic" or "openai"
     auth_file: str = ""
-    context_window: int = 190000
-    max_output_tokens: int = 64000
+    context_window: int = 180000
+    max_output_tokens: int = 80000
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
     @property
@@ -231,8 +231,8 @@ class Config(BaseModel):
             model=model,
             provider=data.get("provider", "anthropic"),
             auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
-            context_window=data.get("context_window", 190000),
-            max_output_tokens=data.get("max_output_tokens", 64000),
+            context_window=data.get("context_window", 180000),
+            max_output_tokens=data.get("max_output_tokens", 80000),
             retry=retry_config,
         )
 

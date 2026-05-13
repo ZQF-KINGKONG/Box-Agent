@@ -30,54 +30,56 @@ provider: "anthropic"
 # `max_output_tokens` is the per-request output cap (`max_tokens` on the wire).
 # Defaults target Claude Sonnet 4 (200k window, 64k output). The summarization
 # trigger is derived: 90% of (context_window - max_output_tokens).
-context_window: 190000
-max_output_tokens: 64000
+context_window: 180000
+max_output_tokens: 80000
 
 # ===== Retry Configuration =====
 retry:
-  enabled: true           # Enable retry mechanism
-  max_retries: 3          # Maximum number of retries
-  initial_delay: 1.0      # Initial delay time (seconds)
-  max_delay: 60.0         # Maximum delay time (seconds)
-  exponential_base: 2.0   # Exponential backoff base (delay = initial_delay * base^attempt)
+  enabled: true # Enable retry mechanism
+  max_retries: 3 # Maximum number of retries
+  initial_delay: 1.0 # Initial delay time (seconds)
+  max_delay: 60.0 # Maximum delay time (seconds)
+  exponential_base: 2.0 # Exponential backoff base (delay = initial_delay * base^attempt)
 
 # ===== Agent Configuration =====
-max_steps: 100  # Maximum execution steps
-workspace_dir: "./workspace"  # Working directory
-system_prompt_path: "system_prompt.md"  # System prompt file (same config directory)
+max_steps: 100 # Maximum execution steps
+workspace_dir: "./workspace" # Working directory
+system_prompt_path: "system_prompt.md" # System prompt file (same config directory)
 
 # ===== Memory Configuration =====
-enable_memory: true                    # Enable cross-session memory system
-memory_dir: "~/.box-agent/memory"      # Memory storage directory
+enable_memory: true # Enable cross-session memory system
+memory_dir: "~/.box-agent/memory" # Memory storage directory
 
 # ===== Memory Auto-Extraction =====
-enable_memory_extraction: true         # Auto-extract memories at lifecycle points
-memory_extraction_cooldown: 300        # Seconds between extractions (prevents LLM spam)
-memory_extraction_step_interval: 10    # Extract every N agent steps
+enable_memory_extraction: true # Auto-extract memories at lifecycle points
+memory_extraction_cooldown: 300 # Seconds between extractions (prevents LLM spam)
+memory_extraction_step_interval: 10 # Extract every N agent steps
 
 # ===== Tools Configuration =====
 tools:
   # Safety: restrict tools to workspace directory only
-  allow_full_access: false  # true: tools can access full system; false: restricted to workspace
+  allow_full_access: false # true: tools can access full system; false: restricted to workspace
 
   # Basic tool switches
-  enable_file_tools: true  # File read/write/edit tools (ReadTool, WriteTool, EditTool)
-  enable_bash: true        # Bash command execution tool
-  enable_todo: true        # Task tracking tool (TodoWriteTool, TodoReadTool)
+  enable_file_tools: true # File read/write/edit tools (ReadTool, WriteTool, EditTool)
+  enable_bash: true # Bash command execution tool
+  enable_todo: true # Task tracking tool (TodoWriteTool, TodoReadTool)
 
   # Claude Skills
-  enable_skills: true      # Enable Skills
-  skills_dir: "./skills"   # Skills directory path
+  enable_skills: true # Enable Skills
+  skills_dir: "./skills" # Skills directory path
 
   # MCP Tools
-  enable_mcp: true         # Enable MCP tools
-  mcp_config_path: "mcp.json"  # MCP configuration file (same config directory)
-                           # Note: API Keys for MCP tools are configured in mcp.json
+  enable_mcp: true # Enable MCP tools
+  mcp_config_path:
+    "mcp.json" # MCP configuration file (same config directory)
+    # Note: API Keys for MCP tools are configured in mcp.json
   # MCP timeout configuration (prevents hanging on network issues)
   mcp:
-    connect_timeout: 10.0    # Connection timeout in seconds (default: 10)
-    execute_timeout: 60.0    # Tool execution timeout in seconds (default: 60)
-    sse_read_timeout: 120.0  # SSE read timeout in seconds (default: 120)
+    connect_timeout: 10.0 # Connection timeout in seconds (default: 10)
+    execute_timeout: 60.0 # Tool execution timeout in seconds (default: 60)
+    sse_read_timeout: 120.0 # SSE read timeout in seconds (default: 120)
+
 
 # ===== officev3 Permission Settings =====
 # Optional. Only honored when this whole block is present in the loaded

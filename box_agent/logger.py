@@ -5,6 +5,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .llm.debug_logging import (
+    full_payload_logging_enabled,
+    summarize_request_payload_for_logging,
+)
 from .schema import Message, ToolCall
 
 
@@ -76,6 +80,9 @@ class AgentLogger:
         if tools:
             request_data["tools"] = [tool.name for tool in tools]
 
+        if not full_payload_logging_enabled():
+            request_data = summarize_request_payload_for_logging(request_data)
+
         # Format as JSON
         content = "LLM Request:\n\n"
         content += json.dumps(request_data, indent=2, ensure_ascii=False)
@@ -113,11 +120,34 @@ class AgentLogger:
         if finish_reason:
             response_data["finish_reason"] = finish_reason
 
+        if not full_payload_logging_enabled():
+            response_data = summarize_request_payload_for_logging(response_data)
+
         # Format as JSON
         log_content = "LLM Response:\n\n"
         log_content += json.dumps(response_data, indent=2, ensure_ascii=False)
 
         self._write_log("RESPONSE", log_content)
+
+    def log_llm_debug_record(self, record: dict[str, Any]):
+        """Log provider-level LLM request/response metadata.
+
+        These records are produced by the LLM client layer and contain the
+        exact SDK request payload sent to the provider (with credentials
+        redacted) plus response metadata such as the provider request id.
+        """
+        self.log_index += 1
+
+        event = record.get("event", "llm/debug")
+        request_id = record.get("request_id") or ""
+        summary = f"LLM Debug Record: {event}"
+        if request_id:
+            summary += f" request_id={request_id}"
+
+        content = summary + "\n\n"
+        content += json.dumps(record, indent=2, ensure_ascii=False, default=str)
+
+        self._write_log("LLM_DEBUG", content)
 
     def log_tool_result(
         self,
@@ -126,6 +156,7 @@ class AgentLogger:
         result_success: bool,
         result_content: str | None = None,
         result_error: str | None = None,
+        raw_output: dict[str, Any] | None = None,
     ):
         """Log tool execution result
 
@@ -135,6 +166,7 @@ class AgentLogger:
             result_success: Whether successful
             result_content: Result content (on success)
             result_error: Error message (on failure)
+            raw_output: Optional structured result payload for host/CLI UIs
         """
         self.log_index += 1
 
@@ -149,6 +181,11 @@ class AgentLogger:
             tool_result_data["result"] = result_content
         else:
             tool_result_data["error"] = result_error
+        if raw_output is not None:
+            tool_result_data["raw_output"] = raw_output
+
+        if not full_payload_logging_enabled():
+            tool_result_data = summarize_request_payload_for_logging(tool_result_data)
 
         # Format as JSON
         content = "Tool Execution:\n\n"

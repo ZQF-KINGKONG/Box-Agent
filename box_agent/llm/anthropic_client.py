@@ -1,5 +1,6 @@
 """Anthropic LLM client implementation."""
 
+import inspect
 import logging
 from collections.abc import AsyncIterator
 from typing import Any
@@ -9,6 +10,12 @@ import anthropic
 from ..retry import RetryConfig, async_retry
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
+from .debug_logging import (
+    log_llm_error_meta,
+    log_llm_request,
+    log_llm_response_meta,
+    request_id_from_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +23,13 @@ logger = logging.getLogger(__name__)
 # larger than this rarely improve answer quality for agentic workflows and
 # waste tokens. Tune here if we ever expose it as config.
 _THINKING_BUDGET = 8000
+
+
+async def _await_if_needed(value: Any) -> Any:
+    """Return awaitable SDK values and direct SDK values through one path."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class AnthropicClient(LLMClientBase):
@@ -100,8 +114,28 @@ class AnthropicClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
-        # Use Anthropic SDK's async messages.create
-        response = await self.client.messages.create(**params)
+        log_llm_request(provider="anthropic", mode="completion", api_base=self.api_base, params=params)
+
+        try:
+            raw_response = await _await_if_needed(
+                self.client.messages.with_raw_response.create(**params)
+            )
+            log_llm_response_meta(
+                provider="anthropic",
+                mode="completion",
+                request_id=getattr(raw_response, "request_id", None),
+                headers=getattr(raw_response, "headers", None),
+            )
+            response = await _await_if_needed(raw_response.parse())
+        except AttributeError:
+            # Test doubles and older SDK-compatible clients may not expose
+            # ``with_raw_response``. Keep the request log and fall back to the
+            # existing behavior, but request-id metadata will be unavailable.
+            response = await _await_if_needed(self.client.messages.create(**params))
+        except Exception as exc:
+            log_llm_error_meta(provider="anthropic", mode="completion", exc=exc)
+            raise
+
         return response
 
     def _convert_tools(self, tools: list[Any]) -> list[dict[str, Any]]:
@@ -352,6 +386,8 @@ class AnthropicClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
+        log_llm_request(provider="anthropic", mode="stream", api_base=self.api_base, params=params)
+
         # Accumulators for the finish event
         text_content = ""
         thinking_content = ""
@@ -368,8 +404,23 @@ class AnthropicClient(LLMClientBase):
         current_tool_id: str | None = None
         current_tool_name: str | None = None
         current_tool_json = ""
+        provider_request_id: str | None = None
 
-        async with self.client.messages.stream(**params) as stream:
+        try:
+            stream_context = self.client.messages.stream(**params)
+        except Exception as exc:
+            log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
+            raise
+
+        async with stream_context as stream:
+            response_headers = getattr(getattr(stream, "response", None), "headers", None)
+            provider_request_id = request_id_from_headers(response_headers)
+            log_llm_response_meta(
+                provider="anthropic",
+                mode="stream",
+                request_id=provider_request_id,
+                headers=response_headers,
+            )
             async for event in stream:
                 # ── Message start (input token usage) ──
                 if event.type == "message_start":
@@ -442,4 +493,5 @@ class AnthropicClient(LLMClientBase):
             finish_reason=finish_reason,
             usage=usage,
             tool_calls=tool_calls if tool_calls else None,
+            provider_request_id=provider_request_id,
         )

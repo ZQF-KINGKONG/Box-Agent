@@ -9,11 +9,12 @@
 
 ## 协议清单
 
-| 协议 | 方向 | 入口 | 文档 | 用途 |
-|---|---|---|---|---|
-| **Action Hint** | 后端 → 前端 | 模型 markdown 围栏块 | [ACTION_HINT_PROTOCOL.md](./ACTION_HINT_PROTOCOL.md) | 模型在合适场景输出 ```action_hint``` 块，前端解析为可点击设置入口 |
-| **Env Context** | 前端 → 后端 | `session/new._meta.env_context` | [ENV_CONTEXT_PROTOCOL.md](./ENV_CONTEXT_PROTOCOL.md) | 宿主把 CLI 路径 / 平台 / 浏览器工具状态等已知事实喂给模型，避免它否认已可用的工具 |
-| **Filesystem Policy** | 前端 → 后端 | `session/new._meta.filesystem_policy` | [FILESYSTEM_POLICY_PROTOCOL.md](./FILESYSTEM_POLICY_PROTOCOL.md) | 宿主声明 session 工作区根 + 额外允许目录，避免反复触发 `permission/request` 协商 |
+| 协议                  | 方向        | 入口                                  | 文档                                                             | 用途                                                                              |
+| --------------------- | ----------- | ------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| **Action Hint**       | 后端 → 前端 | 模型 markdown 围栏块                  | [ACTION_HINT_PROTOCOL.md](./ACTION_HINT_PROTOCOL.md)             | 模型在合适场景输出 `action_hint` 块，前端解析为可点击设置入口                     |
+| **Memory Match**      | 后端 → 前端 | `update_tool_call.rawOutput`          | [MEMORY_MATCH_PROTOCOL.md](./MEMORY_MATCH_PROTOCOL.md)           | 宿主展示本轮 `memory_search` 或后端自动匹配到的上下文记忆                         |
+| **Env Context**       | 前端 → 后端 | `session/new._meta.env_context`       | [ENV_CONTEXT_PROTOCOL.md](./ENV_CONTEXT_PROTOCOL.md)             | 宿主把 CLI 路径 / 平台 / 浏览器工具状态等已知事实喂给模型，避免它否认已可用的工具 |
+| **Filesystem Policy** | 前端 → 后端 | `session/new._meta.filesystem_policy` | [FILESYSTEM_POLICY_PROTOCOL.md](./FILESYSTEM_POLICY_PROTOCOL.md) | 宿主声明 session 工作区根 + 额外允许目录，避免反复触发 `permission/request` 协商  |
 
 > 已经存在但本次未变更的扩展点：`_meta.session_mode`（会话模式）、`_meta.deep_think`（深度思考开关）、`_meta.officev3_permissions_override`（已废弃）。
 
@@ -68,13 +69,14 @@ tests/
 
 ## 版本与变更
 
-| 版本 | 变更 |
-|---|---|
+| 版本   | 变更                                                                                                                                                                             |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0.8.38 | 新增 Memory Match 协议：`memory_search.rawOutput` 返回本轮显式搜索或后端自动匹配到的 context memory；core memory 只注入模型，不返回前端                                      |
 | 0.8.29 | `PermissionEngine` 把 `~/.box-agent/` 视为引擎自有数据，所有 scope 下都默认放行（skills / runtime-packages / browsers / log / trash 等子目录不再触发 `permission/request` 弹窗） |
-| 0.8.28 | system prompt 注入 skills 源目录，限定模型只从 `~/.box-agent/skills/`（user）和 builtin 包内目录加载 skill，禁止扫描其它路径 |
-| 0.8.27 | 新增 `_meta.filesystem_policy`（宿主声明 session 工作区根 + 额外允许目录）；修复 bash 路径提取裸系统根误报（`cd /; ls` → `/`）；权限拒绝诊断日志增强 |
-| 0.8.26 | 首次引入 `action_hint` 协议、`_meta.env_context`、`enable_mcp` 防护；env_context 包含输入校验与 extras 不进 prompt |
-| 0.8.25 | `context_window` / `max_output_tokens` 配置化（与 ACP 无关） |
-| 0.8.24 | `max_tokens` 截断防护（与 ACP 无关） |
+| 0.8.28 | system prompt 注入 skills 源目录，限定模型只从 `~/.box-agent/skills/`（user）和 builtin 包内目录加载 skill，禁止扫描其它路径                                                     |
+| 0.8.27 | 新增 `_meta.filesystem_policy`（宿主声明 session 工作区根 + 额外允许目录）；修复 bash 路径提取裸系统根误报（`cd /; ls` → `/`）；权限拒绝诊断日志增强                             |
+| 0.8.26 | 首次引入 `action_hint` 协议、`_meta.env_context`、`enable_mcp` 防护；env_context 包含输入校验与 extras 不进 prompt                                                               |
+| 0.8.25 | `context_window` / `max_output_tokens` 配置化（与 ACP 无关）                                                                                                                     |
+| 0.8.24 | `max_tokens` 截断防护（与 ACP 无关）                                                                                                                                             |
 
 后续协议变更会在本表追加，并在对应协议文档第 1 节注明适用版本。

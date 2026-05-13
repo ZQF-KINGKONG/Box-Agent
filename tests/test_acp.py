@@ -16,6 +16,7 @@ from box_agent.config import (
     Officev3Permissions,
     ToolsConfig,
 )
+from box_agent.memory import MemoryManager
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 
@@ -180,8 +181,39 @@ async def test_acp_turn_executes_tool(acp_agent):
     response = await agent.prompt(prompt)
     assert response.stopReason == "end_turn"
     assert any("tool:ping" in str(update) for update in conn.updates)
+    llm_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "llm_output"
+    ]
+    assert [item["finish_reason"] for item in llm_outputs] == ["tool", "stop"]
+    assert llm_outputs[0]["thinking"] == "calling echo"
+    assert llm_outputs[0]["tool_calls"][0]["function"]["name"] == "echo"
+    assert llm_outputs[1]["content"] == "done"
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
+
+
+@pytest.mark.asyncio
+async def test_acp_new_session_injects_core_memory_without_returning_it(tmp_path):
+    memory_mgr = MemoryManager(memory_dir=str(tmp_path / "memory"))
+    memory_mgr.write_core("- User prefers concise Chinese responses\n- User works on officev3")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path), memory_dir=str(tmp_path / "memory")),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system", memory_manager=memory_mgr)
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+
+    assert session.field_meta is None
+    assert "--- MEMORY START ---" in agent._sessions[session.sessionId].agent.system_prompt
+    assert "User prefers concise Chinese responses" in agent._sessions[session.sessionId].agent.system_prompt
 
 
 @pytest.mark.asyncio
@@ -423,3 +455,4 @@ async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
     assert all(item["sub_agent_id"].startswith("subagent-") for item in progress)
     assert {item["sub_agent_id"] for item in progress}
     assert any(item["event"] == "tool_start" and item["tool_name"] == "echo" for item in progress)
+    assert any(item["event"] == "llm_output" and item["content"] == "child summary" for item in progress)

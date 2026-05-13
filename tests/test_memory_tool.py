@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from box_agent.memory import MemoryManager
-from box_agent.tools.memory_tool import MemoryWriteTool
+from box_agent.tools.memory_tool import MemorySearchTool, MemoryWriteTool
 
 
 @pytest.fixture
@@ -47,3 +47,38 @@ async def test_memory_write_context_without_llm_uses_append_dedup(mgr: MemoryMan
     context = mgr.read_context()
     assert context.lower().count("q2 goal: dashboard") == 1
     assert "team lead: Bob" in context
+
+
+async def test_memory_search_returns_structured_matches_for_host_ui(mgr: MemoryManager):
+    mgr.write_context("- Weekly report format: progress/issues/next week\n- Q2 goal: dashboard")
+    tool = MemorySearchTool(mgr)
+
+    result = await tool.execute("weekly")
+
+    assert result.success is True
+    assert result.raw_output == {
+        "type": "memory_search",
+        "query": "weekly",
+        "matched_memories": [
+            {
+                "id": "context:1",
+                "source": "context",
+                "category": "context",
+                "text": "- Weekly report format: progress/issues/next week",
+            }
+        ],
+    }
+
+
+async def test_memory_search_returns_empty_structured_payload(mgr: MemoryManager):
+    mgr.write_context("- Q2 goal: dashboard")
+    tool = MemorySearchTool(mgr)
+
+    result = await tool.execute("weekly")
+
+    assert result.success is True
+    assert result.raw_output == {
+        "type": "memory_search",
+        "query": "weekly",
+        "matched_memories": [],
+    }

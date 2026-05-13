@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -142,6 +143,46 @@ class MemoryManager:
         return [
             line for line in context.splitlines()
             if line.strip() and query_lower in line.lower()
+        ]
+
+    def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
+        """Return high-confidence context-memory matches for a user prompt.
+
+        This is intentionally conservative: it only returns context lines that
+        share strong phrase/token overlap with the prompt.  The result is meant
+        to provide *possibly relevant* context, never to force the model to
+        treat a new request as a continuation of an old task.
+        """
+        query = _sanitize_auto_match_query(query)
+        context = self.read_context()
+        if not query or not context:
+            return []
+
+        query_lower = query.lower()
+        query_terms = _extract_match_terms(query_lower)
+        if not query_terms:
+            return []
+
+        scored: list[tuple[float, int, str]] = []
+        for line_no, line in enumerate(context.splitlines(), start=1):
+            text = line.strip()
+            if not text:
+                continue
+            if _should_skip_auto_match_line(query_lower, text.lower()):
+                continue
+            score = _score_memory_match(query_lower, query_terms, text.lower())
+            if score >= 2.0:
+                scored.append((score, line_no, text))
+
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [
+            {
+                "id": f"context:{line_no}",
+                "source": "context",
+                "category": "context",
+                "text": text,
+            }
+            for _, line_no, text in scored[:limit]
         ]
 
     # ── Recall (system prompt injection) ────────────────────────
@@ -447,6 +488,104 @@ def _strip_json_fences(text: str) -> str:
     if text.endswith("```"):
         text = "\n".join(text.split("\n")[:-1])
     return text.strip()
+
+
+def _extract_match_terms(text: str) -> list[str]:
+    """Extract conservative phrase-like terms from a prompt or memory line."""
+    terms: set[str] = set()
+
+    for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text):
+        terms.add(token)
+
+    for segment in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        if len(segment) <= 6:
+            terms.add(segment)
+        else:
+            for size in (6, 5, 4):
+                for idx in range(0, len(segment) - size + 1):
+                    terms.add(segment[idx:idx + size])
+
+    return sorted(terms, key=lambda term: (-len(term), term))
+
+
+def _sanitize_auto_match_query(query: str) -> str:
+    """Remove host-appended operational instructions before auto matching."""
+    text = query.strip()
+    if not text:
+        return ""
+
+    markers = (
+        "[文件输出规范]",
+        "文件输出规范",
+        "通用文件输出规范",
+        "文件交付偏好",
+        "通用文件交付规则",
+    )
+    cut = len(text)
+    for marker in markers:
+        idx = text.find(marker)
+        if idx > 0:
+            cut = min(cut, idx)
+    return text[:cut].strip()
+
+
+def _should_skip_auto_match_line(query_lower: str, memory_lower: str) -> bool:
+    """Filter broad operational memories unless the user explicitly asks for them."""
+    operational_markers = (
+        "文件输出规范",
+        "文件交付",
+        "zip",
+        "下载链接",
+        "打包",
+    )
+    if any(marker in memory_lower for marker in operational_markers):
+        user_asks_delivery = any(marker in query_lower for marker in operational_markers)
+        if not user_asks_delivery:
+            return True
+
+    meta_markers = (
+        "会话标题",
+        "标题提炼",
+        "第一条输入",
+        "元指令前缀",
+        "查询/记忆中查询",
+    )
+    if any(marker in memory_lower for marker in meta_markers):
+        user_asks_title = any(marker in query_lower for marker in ("标题", "命名", "提炼"))
+        if not user_asks_title:
+            return True
+
+    return False
+
+
+def _score_memory_match(query_lower: str, query_terms: list[str], memory_lower: str) -> float:
+    """Score prompt/context overlap with a high threshold for auto matching."""
+    if query_lower and query_lower in memory_lower:
+        return 10.0
+
+    matched = [term for term in query_terms if term in memory_lower]
+    if not matched:
+        return 0.0
+
+    score = 0.0
+    long_matches = 0
+    for term in matched:
+        if re.search(r"[\u4e00-\u9fff]", term):
+            if len(term) >= 6:
+                score += 2.5
+                long_matches += 1
+            elif len(term) >= 4:
+                score += 1.25
+            else:
+                score += 0.35
+        else:
+            score += 1.5
+            long_matches += 1
+
+    # One short Chinese overlap such as "培训" or "公司" is too weak.
+    if score < 2.0 and long_matches == 0 and len(matched) < 2:
+        return 0.0
+    return score
 
 
 class MemoryExtractor:

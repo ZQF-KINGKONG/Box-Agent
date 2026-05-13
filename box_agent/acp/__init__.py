@@ -79,6 +79,7 @@ from box_agent.events import (
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
+    LLMOutputEvent,
     PPTProgressEvent,
     StepEnd,
     StepStart,
@@ -387,9 +388,12 @@ class BoxACPAgent:
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
 
         kwargs: dict[str, Any] = {"sessionId": session_id}
+        response_meta: dict[str, Any] = {}
         skills = self._skills_meta()
         if skills is not None:
-            kwargs["field_meta"] = {"skills": skills}
+            response_meta["skills"] = skills
+        if response_meta:
+            kwargs["field_meta"] = response_meta
         return NewSessionResponse(**kwargs)
 
     def _filesystem_access_prompt(self, workspace: Path, policy: CapabilityPolicy | None) -> str:
@@ -701,6 +705,7 @@ class BoxACPAgent:
             workspace_dir=str(agent.workspace_dir),
             permission_negotiator=negotiator,
             hooks=self._hooks,
+            memory_manager=self._memory,
             memory_extractor=state.memory_extractor,
             inject_queue=state.inject_queue,
             thinking_enabled=agent.thinking_enabled,
@@ -724,6 +729,37 @@ class BoxACPAgent:
                     case ContentEvent(content=text):
                         log.debug("content", session_id=session_id, content=text)
                         await self._send(session_id, update_agent_message(text_block(text)))
+
+                    case LLMOutputEvent(
+                        step=s,
+                        content=content,
+                        thinking=thinking,
+                        tool_calls=tool_calls,
+                        finish_reason=finish_reason,
+                        usage=usage,
+                        provider_request_id=provider_request_id,
+                    ):
+                        payload = {
+                            "type": "llm_output",
+                            "step": s,
+                            "content": content,
+                            "thinking": thinking,
+                            "tool_calls": tool_calls,
+                            "finish_reason": finish_reason,
+                            "usage": usage,
+                            "provider_request_id": provider_request_id,
+                        }
+                        log.debug(
+                            "llm/output",
+                            session_id=session_id,
+                            step=s,
+                            finish_reason=finish_reason,
+                            payload=payload,
+                        )
+                        await self._send(
+                            session_id,
+                            update_tool_call(f"llm-output-{s}", raw_output=payload),
+                        )
 
                     case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args):
                         log.info("tool/start", session_id=session_id, tool_call_id=tid, tool_name=name, arguments=args)
@@ -831,6 +867,23 @@ class BoxACPAgent:
                             case ErrorEvent(message=msg):
                                 progress["event"] = "error"
                                 progress["message"] = msg
+                            case LLMOutputEvent(
+                                step=s,
+                                content=content,
+                                thinking=thinking,
+                                tool_calls=tool_calls,
+                                finish_reason=finish_reason,
+                                usage=usage,
+                                provider_request_id=provider_request_id,
+                            ):
+                                progress["event"] = "llm_output"
+                                progress["step"] = s
+                                progress["content"] = content
+                                progress["thinking"] = thinking
+                                progress["tool_calls"] = tool_calls
+                                progress["finish_reason"] = finish_reason
+                                progress["usage"] = usage
+                                progress["provider_request_id"] = provider_request_id
                             case _:
                                 progress["event"] = type(inner).__name__
                         log.debug("sub_agent/progress", session_id=session_id, tool_call_id=tid, progress=progress)

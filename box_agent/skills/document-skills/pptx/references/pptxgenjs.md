@@ -7,8 +7,10 @@ default creation path. Prefer HTML-first editable with `dom-to-pptx` by default.
 Keep the generation script readable and deterministic.
 
 Before using this path for a new deck, confirm with the user and state why both
-HTML-first editable and the bundled `dom-to-pptx` exporter are not suitable. Do
-not proceed silently with native PptxGenJS for a new deck just because it is
+HTML-first editable and the bundled `dom-to-pptx` exporter are not suitable. A
+valid confirmation point is that `scripts/check_html_export_env.js` found
+missing Playwright/Chromium and no host renderer, and the user chose `PPTX`.
+Do not proceed silently with native PptxGenJS for a new deck just because it is
 simpler to script or because the user mentioned editability.
 
 Do not replace this path with `python-pptx` for new deck creation. If native

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -164,3 +165,22 @@ async def test_classifier_returns_general_keeps_session_general(tmp_path):
     assert state.auto_classify_pending is False
     # System message should still reflect the base prompt (no mode-specific prompt injected)
     assert "base system" in state.agent.messages[0].content
+
+
+def test_data_analysis_prompt_includes_plot_contract_and_general_prompt_does_not(tmp_path):
+    llm = _TrackingLLM(mode_label="general")
+    agent, _ = _make_agent(tmp_path, llm)
+    agent._system_prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    general_prompt = agent._build_session_prompt("general", workspace=tmp_path)
+    analysis_prompt = agent._build_session_prompt("data_analysis", workspace=tmp_path)
+
+    assert "文件交付规则" in general_prompt
+    assert "zip -r output.zip" in general_prompt
+    assert "Interactive Chart Data Output" not in general_prompt
+    assert "<!--PLOT_DATA:" not in general_prompt
+
+    assert "文件交付规则" in analysis_prompt
+    assert "Interactive Chart Data Output" in analysis_prompt
+    assert "<!--PLOT_DATA:" in analysis_prompt
+    assert "sandbox:/mnt/data/<filename>" in analysis_prompt

@@ -155,6 +155,7 @@ class Agent:
             workspace_dir=str(self.workspace_dir),
             permission_negotiator=self._permission_negotiator,
             hooks=self._hooks,
+            memory_manager=getattr(self._memory_extractor, "_mgr", None),
             memory_extractor=self._memory_extractor,
             inject_queue=self.inject_queue,
             thinking_enabled=self.thinking_enabled,
@@ -245,10 +246,12 @@ class Agent:
                 for line in json.dumps(truncated, indent=2, ensure_ascii=False).split("\n"):
                     print(f"   {Colors.DIM}{line}{Colors.RESET}")
 
-            case ToolCallResult(success=ok, content=text, error=err):
+            case ToolCallResult(success=ok, content=text, error=err, raw_output=raw_output):
                 if ok:
                     display = text[:300] + f"{Colors.DIM}...{Colors.RESET}" if len(text) > 300 else text
                     print(f"{Colors.BRIGHT_GREEN}✓ Result:{Colors.RESET} {display}")
+                    if raw_output and raw_output.get("type") == "memory_search":
+                        self._render_memory_search(raw_output)
                 else:
                     print(f"{Colors.BRIGHT_RED}✗ Error:{Colors.RESET} {Colors.RED}{err}{Colors.RESET}")
 
@@ -299,6 +302,24 @@ class Agent:
 
             case _:
                 pass  # TokenUsageEvent etc. — no terminal output needed
+
+    def _render_memory_search(self, raw_output: dict) -> None:
+        """Render structured memory_search matches in the terminal."""
+        matches = raw_output.get("matched_memories")
+        if not isinstance(matches, list):
+            return
+
+        query = raw_output.get("query", "")
+        if matches:
+            print(f"{Colors.BRIGHT_CYAN}🧠 Matched memories:{Colors.RESET} {query}")
+            for item in matches:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text", "")).strip()
+                if text:
+                    print(f"  {Colors.DIM}{text}{Colors.RESET}")
+        else:
+            print(f"{Colors.DIM}🧠 Matched memories: none for {query}{Colors.RESET}")
 
     def get_history(self) -> list[Message]:
         """Get message history."""

@@ -78,9 +78,12 @@ class _SourceEntry:
     directory: Path
     source: SkillSource
     last_mtime: float = 0.0
+    signature: Tuple[Tuple[str, int, int], ...] = field(default_factory=tuple)
     # Optional whitelist of skill names. None means "no manifest, accept all".
     # Empty set means "manifest present but lists zero skills" → load nothing.
     manifest_names: Optional[Set[str]] = None
+    # Optional manifest-listed SKILL.md paths. None means "scan with rglob".
+    manifest_paths: Optional[Tuple[Path, ...]] = None
     manifest_loaded: bool = False
 
 
@@ -222,7 +225,7 @@ class SkillLoader:
             if entry.source == "builtin":
                 self._load_manifest(entry)
 
-            for skill_file in entry.directory.rglob("SKILL.md"):
+            for skill_file in self._iter_skill_files(entry):
                 skill = self.load_skill(skill_file, source=entry.source)
                 if skill is None:
                     continue
@@ -243,11 +246,30 @@ class SkillLoader:
 
                 self.loaded_skills[skill.name] = skill
 
-            # Cache mtime for reload detection
-            entry.last_mtime = self._dir_mtime(entry.directory)
+            # Cache a cheap signature for reload detection. Keep last_mtime for
+            # backward compatibility with older tests/debug code that may read it.
+            entry.signature = self._source_signature(entry)
+            entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
         discovered = list(self.loaded_skills.values())
         return discovered
+
+    def _iter_skill_files(self, entry: _SourceEntry) -> List[Path]:
+        """Return candidate SKILL.md files for one source.
+
+        Builtin package skills usually ship a manifest with explicit paths; use
+        it to avoid walking large resource trees such as OOXML schemas or JS
+        bundles on every discovery. User skills keep recursive discovery so
+        officev3-authored skills are picked up without regenerating a manifest.
+        """
+        if (
+            entry.source == "builtin"
+            and entry.manifest_names is not None
+            and entry.manifest_paths is not None
+        ):
+            return [path for path in entry.manifest_paths if path.is_file()]
+
+        return list(entry.directory.rglob("SKILL.md"))
 
     def _load_manifest(self, entry: _SourceEntry) -> None:
         """Populate ``entry.manifest_names`` from ``_manifest.json`` if present.
@@ -260,6 +282,7 @@ class SkillLoader:
         manifest_path = entry.directory / MANIFEST_FILENAME
         if not manifest_path.is_file():
             entry.manifest_names = None
+            entry.manifest_paths = None
             entry.manifest_loaded = True
             return
 
@@ -271,6 +294,7 @@ class SkillLoader:
                 f"Falling back to unfiltered discovery."
             )
             entry.manifest_names = None
+            entry.manifest_paths = None
             entry.manifest_loaded = True
             return
 
@@ -281,17 +305,65 @@ class SkillLoader:
                 f"(missing 'skills' list); falling back to unfiltered discovery."
             )
             entry.manifest_names = None
+            entry.manifest_paths = None
             entry.manifest_loaded = True
             return
 
         names: Set[str] = set()
+        paths: list[Path] = []
+        all_paths_known = True
         for item in raw_skills:
             if isinstance(item, dict) and isinstance(item.get("name"), str):
                 names.add(item["name"])
+                raw_path = item.get("path")
+                if isinstance(raw_path, str) and raw_path.strip():
+                    paths.append(entry.directory / raw_path)
+                else:
+                    all_paths_known = False
             elif isinstance(item, str):
                 names.add(item)
+                all_paths_known = False
         entry.manifest_names = names
+        entry.manifest_paths = tuple(paths) if all_paths_known else None
         entry.manifest_loaded = True
+
+    @staticmethod
+    def _stat_signature(path: Path, root: Path) -> tuple[str, int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            rel = str(path)
+        return (rel, stat.st_mtime_ns, stat.st_size)
+
+    def _source_signature(self, entry: _SourceEntry) -> Tuple[Tuple[str, int, int], ...]:
+        """Return a lightweight signature for files that affect skill loading."""
+        if not entry.directory.exists():
+            return ()
+
+        candidates: list[Path] = []
+        manifest = entry.directory / MANIFEST_FILENAME
+        if manifest.is_file():
+            candidates.append(manifest)
+
+        if (
+            entry.source == "builtin"
+            and entry.manifest_names is not None
+            and entry.manifest_paths is not None
+        ):
+            candidates.extend(entry.manifest_paths)
+        else:
+            candidates.extend(entry.directory.rglob("SKILL.md"))
+
+        signatures = [
+            signature
+            for path in candidates
+            if (signature := self._stat_signature(path, entry.directory)) is not None
+        ]
+        return tuple(sorted(signatures))
 
     @staticmethod
     def _dir_mtime(directory: Path) -> float:
@@ -322,8 +394,8 @@ class SkillLoader:
         """
         changed = False
         for entry in self._sources:
-            current = self._dir_mtime(entry.directory)
-            if current != entry.last_mtime:
+            current = self._source_signature(entry)
+            if current != entry.signature:
                 changed = True
                 break
 

@@ -16,6 +16,7 @@ class ToolResult(BaseModel):
     error: str | None = None
     permission_request: dict | None = None  # capability request payload
     raw_output: dict | None = None  # optional structured payload for host UIs
+    model_context: str | None = None  # optional compact content for future LLM turns
 
 
 class Tool:

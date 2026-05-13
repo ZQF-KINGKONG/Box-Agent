@@ -29,6 +29,7 @@ from .events import (
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
+    LLMOutputEvent,
     LogFileEvent,
     PPTProgressEvent,
     PermissionRequestEvent,
@@ -45,7 +46,8 @@ from .events import (
 )
 from .hooks import HookManager
 from .logger import AgentLogger
-from .schema import LLMResponse, Message, StreamEvent
+from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
+from .schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from .tools.base import EventEmittingTool, Tool, ToolResult
 
 # Type alias — consumers supply a zero-arg callable that returns True
@@ -63,6 +65,11 @@ _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg"}
 # they must NOT be fed back into the model context.
 _PLOT_DATA_RE = re.compile(r"<!--PLOT_DATA:.+?-->", re.DOTALL)
 
+_MODEL_CONTEXT_PATH_EXTS = {".html", ".htm", ".json", ".md", ".txt", ".log", ".xml"}
+_MODEL_CONTEXT_PATH_NAMES = {"qa.json", "html_self_check.json", "visual_review.md", "vision-review-prompt.txt"}
+_MODEL_CONTEXT_PATH_PARTS = {"qa", "rendered", "slides", "vision_inputs"}
+_MODEL_CONTEXT_CONTENT_THRESHOLD = 12_000
+
 
 def _strip_plot_data(text: str) -> str:
     """Remove ``<!--PLOT_DATA:...-->`` markers from code-execution stdout.
@@ -75,6 +82,188 @@ def _strip_plot_data(text: str) -> str:
     """
     cleaned = _PLOT_DATA_RE.sub("", text).strip()
     return cleaned if cleaned else "图表已生成"
+
+
+def _path_needs_compact_model_context(path_value: Any, content: str) -> bool:
+    """Detect generated artifacts that should not stay verbatim in LLM history."""
+    if not isinstance(path_value, str) or not path_value:
+        return len(content) > _MODEL_CONTEXT_CONTENT_THRESHOLD
+
+    path = Path(path_value)
+    suffix = path.suffix.lower()
+    if path.name in _MODEL_CONTEXT_PATH_NAMES:
+        return True
+    if suffix in {".html", ".htm"}:
+        return True
+    if any(part in _MODEL_CONTEXT_PATH_PARTS for part in path.parts) and suffix in _MODEL_CONTEXT_PATH_EXTS:
+        return True
+    return len(content) > _MODEL_CONTEXT_CONTENT_THRESHOLD and suffix in _MODEL_CONTEXT_PATH_EXTS
+
+
+def _compact_visible_tool_content_for_model(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    content: str,
+) -> str:
+    """Fallback compaction for tool content before it is appended to history."""
+    if tool_name != "read_file" or not _path_needs_compact_model_context(arguments.get("path"), content):
+        return content
+
+    lines = content.splitlines()
+    preview_limit = 20
+    preview = "\n".join(lines[:preview_limit])
+    path = arguments.get("path", "unknown")
+    return (
+        "[Full tool output omitted from model history]\n"
+        f"Tool: {tool_name}\n"
+        f"Path: {path}\n"
+        f"Lines returned: {len(lines)}\n"
+        f"Characters returned: {len(content)}\n"
+        "Reason: generated/QA artifact content can bloat future LLM turns; "
+        "call read_file again with offset/limit if exact content is needed.\n\n"
+        f"Preview first {min(preview_limit, len(lines))} lines:\n"
+        f"{preview}"
+    )
+
+
+def _summarize_tool_argument_for_model(
+    *,
+    tool_name: str,
+    argument_name: str,
+    value: str,
+    path: str | None = None,
+) -> str:
+    """Return a compact placeholder for large tool-call arguments in history."""
+    lines = value.splitlines()
+    path_obj = Path(path) if path else None
+    preview_limit = 12 if (path_obj and path_obj.suffix.lower() in {".html", ".htm"}) else 20
+    preview = ""
+    is_generated_file_write = (
+        tool_name == "write_file"
+        and argument_name == "content"
+        and path_obj is not None
+        and path_obj.suffix.lower() in _MODEL_CONTEXT_PATH_EXTS
+    )
+    is_generated_file_edit = (
+        tool_name == "edit_file"
+        and argument_name in {"old_str", "new_str"}
+        and path_obj is not None
+        and path_obj.suffix.lower() in _MODEL_CONTEXT_PATH_EXTS
+    )
+    if not (
+        is_generated_file_write
+        or is_generated_file_edit
+        or (
+            path_obj
+            and (
+                path_obj.name in _MODEL_CONTEXT_PATH_NAMES
+                or ("qa" in path_obj.parts and path_obj.suffix.lower() in _MODEL_CONTEXT_PATH_EXTS)
+            )
+        )
+    ):
+        preview = "\n".join(lines[:preview_limit])
+        if len(preview) > 1200:
+            preview = preview[:1200] + "\n..."
+    summary = [
+        "[Full tool-call argument omitted from model history]",
+        f"Tool: {tool_name}",
+        f"Argument: {argument_name}",
+        f"Path: {path or 'unknown'}",
+        f"Lines: {len(lines)}",
+        f"Characters: {len(value)}",
+        "Reason: generated artifact/script content was already written to disk; read the file with offset/limit if exact content is needed.",
+    ]
+    if preview:
+        summary.extend(["", f"Preview first {min(preview_limit, len(lines))} lines:", preview])
+    return "\n".join(summary)
+
+
+def _tool_argument_needs_compaction(tool_name: str, argument_name: str, value: Any, path: str | None) -> bool:
+    """Detect large/generated tool-call arguments that should not stay verbatim."""
+    if not isinstance(value, str):
+        return False
+
+    if tool_name == "write_file" and argument_name == "content":
+        if path and Path(path).suffix.lower() in _MODEL_CONTEXT_PATH_EXTS:
+            return True
+        return _path_needs_compact_model_context(path, value)
+
+    if tool_name == "edit_file" and argument_name in {"old_str", "new_str"}:
+        if path and _path_needs_compact_model_context(path, value):
+            return True
+        return len(value) > _MODEL_CONTEXT_CONTENT_THRESHOLD
+
+    # Catch accidental inline scripts/HTML in generic tool arguments, while
+    # leaving normal short commands and prompts intact.
+    return len(value) > _MODEL_CONTEXT_CONTENT_THRESHOLD
+
+
+def _compact_tool_call_arguments_for_model(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Compact tool-call arguments before storing assistant calls in history.
+
+    ToolCallStart events, logs, and actual tool execution keep the original
+    arguments.  This affects only future LLM turns, preventing generated files
+    such as ``deck.html`` from being resent after every step.
+    """
+    path = arguments.get("path")
+    path_value = path if isinstance(path, str) else None
+    compacted: dict[str, Any] = {}
+    for key, value in arguments.items():
+        if _tool_argument_needs_compaction(tool_name, key, value, path_value):
+            compacted[key] = _summarize_tool_argument_for_model(
+                tool_name=tool_name,
+                argument_name=key,
+                value=value,
+                path=path_value,
+            )
+        else:
+            compacted[key] = value
+    return compacted
+
+
+def _tool_calls_for_model_history(tool_calls: list[ToolCall] | None) -> list[ToolCall] | None:
+    """Return tool calls safe to keep in model-facing message history."""
+    if not tool_calls:
+        return None
+    return [
+        ToolCall(
+            id=tc.id,
+            type=tc.type,
+            function=FunctionCall(
+                name=tc.function.name,
+                arguments=_compact_tool_call_arguments_for_model(tc.function.name, tc.function.arguments),
+            ),
+        )
+        for tc in tool_calls
+    ]
+
+
+def _tool_message_content_for_model(
+    *,
+    tool_name: str,
+    arguments: dict[str, Any],
+    result: ToolResult,
+    visible_content: str,
+    visible_error: str | None,
+) -> str:
+    """Return the content stored in conversation history for a tool result.
+
+    ToolCallResult events and logs keep full visible output.  This path controls
+    only what future LLM calls receive in ``messages``.
+    """
+    if not result.success:
+        return f"Error: {visible_error}"
+
+    if result.model_context is not None and visible_content == result.content:
+        return result.model_context
+
+    compacted = _compact_visible_tool_content_for_model(
+        tool_name=tool_name,
+        arguments=arguments,
+        content=visible_content,
+    )
+    return _strip_plot_data(compacted)
 
 
 def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] | None:
@@ -91,6 +280,52 @@ def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] 
         return None
 
     return payload
+
+
+def _auto_match_memory_for_latest_prompt(messages: list[Message], memory_manager: Any) -> ToolCallResult | None:
+    """Conservatively match CONTEXT.md against the latest user prompt.
+
+    Matches are injected as weak, one-turn context: the model is told these
+    memories may be relevant and must ignore them when the user is starting a
+    new task.  This avoids depending on the model deciding to call
+    ``memory_search`` while keeping the memory signal non-authoritative.
+    """
+    latest_user = next((msg for msg in reversed(messages) if msg.role == "user"), None)
+    if latest_user is None:
+        return None
+
+    user_text = latest_user.content if isinstance(latest_user.content, str) else str(latest_user.content)
+    try:
+        matches = memory_manager.auto_match_context(user_text)
+    except Exception:
+        return None
+
+    if not matches:
+        return None
+
+    memory_lines = "\n".join(item["text"] for item in matches)
+    latest_user.content = (
+        f"{user_text.rstrip()}\n\n"
+        "## Possibly relevant memory\n"
+        "The following memories were automatically matched from prior context. "
+        "Use them only if they are clearly relevant to the user's current request. "
+        "If the user is starting a new task or the memories do not fit, ignore them and do not assume continuity.\n\n"
+        f"{memory_lines}"
+    )
+
+    raw_output = {
+        "type": "memory_search",
+        "trigger": "auto",
+        "query": user_text,
+        "matched_memories": matches,
+    }
+    return ToolCallResult(
+        tool_call_id="memory-auto-match",
+        tool_name="memory_search",
+        success=True,
+        content=f"Auto-matched {len(matches)} possible context memor{'y' if len(matches) == 1 else 'ies'}.",
+        raw_output=raw_output,
+    )
 
 
 def _detect_artifacts(
@@ -414,6 +649,7 @@ async def run_agent_loop(
     workspace_dir: str | None = None,
     permission_negotiator: Any | None = None,
     hooks: list | None = None,
+    memory_manager: Any | None = None,
     memory_extractor: Any | None = None,
     inject_queue: asyncio.Queue[str] | None = None,
     thinking_enabled: bool = False,
@@ -444,6 +680,8 @@ async def run_agent_loop(
             are called at key lifecycle points (step start/end, tool
             start/result, done, error).  Loaded identically by CLI
             and ACP from ``config.yaml``.
+        memory_manager: Optional ``MemoryManager`` instance for conservative
+            prompt-level context memory auto matching.
         memory_extractor: Optional ``MemoryExtractor`` instance for
             lifecycle-triggered memory extraction.  When present,
             extraction is attempted before context compression and
@@ -464,6 +702,11 @@ async def run_agent_loop(
 
     if hook_mgr.hooks:
         await hook_mgr.fire_agent_start(messages=messages, tools=tools, max_steps=max_steps)
+
+    if memory_manager:
+        injected = _auto_match_memory_for_latest_prompt(messages, memory_manager)
+        if injected is not None:
+            yield injected
 
     api_total_tokens = 0
     skip_next_token_check = False
@@ -522,6 +765,9 @@ async def run_agent_loop(
         if logger:
             logger.log_request(messages=messages, tools=tool_list)
 
+        llm_debug_sink_token = (
+            set_llm_debug_sink(logger.log_llm_debug_record) if logger else None
+        )
         try:
             # Stream thinking/text deltas, accumulate for final response
             text_content = ""
@@ -574,10 +820,21 @@ async def run_agent_loop(
                 finish_reason=finish_event.finish_reason or "stop",
                 usage=finish_event.usage,
             )
+            provider_request_id = finish_event.provider_request_id
+            yield LLMOutputEvent(
+                step=step + 1,
+                content=response.content,
+                thinking=response.thinking,
+                tool_calls=[tc.model_dump() for tc in response.tool_calls] if response.tool_calls else None,
+                finish_reason=response.finish_reason,
+                usage=response.usage.model_dump() if response.usage else None,
+                provider_request_id=provider_request_id,
+            )
 
         except Exception as exc:
             from .retry import RetryExhaustedError
 
+            provider_request_id = None
             if isinstance(exc, RetryExhaustedError):
                 msg = f"LLM call failed after {exc.attempts} retries\nLast error: {exc.last_exception!s}"
             else:
@@ -588,6 +845,9 @@ async def run_agent_loop(
             yield ErrorEvent(message=msg, is_fatal=True, exception=exc)
             yield DoneEvent(stop_reason=StopReason.ERROR, final_content=msg)
             return
+        finally:
+            if llm_debug_sink_token is not None:
+                reset_llm_debug_sink(llm_debug_sink_token)
 
         # ── Token tracking ──────────────────────────────────
         if response.usage:
@@ -612,7 +872,7 @@ async def run_agent_loop(
             role="assistant",
             content=response.content,
             thinking=response.thinking,
-            tool_calls=response.tool_calls,
+            tool_calls=_tool_calls_for_model_history(response.tool_calls),
         )
         messages.append(assistant_msg)
 
@@ -791,6 +1051,7 @@ async def run_agent_loop(
                     result_success=result.success,
                     result_content=result.content if result.success else None,
                     result_error=result.error if not result.success else None,
+                    raw_output=result.raw_output,
                 )
 
             # ── Permission negotiation + retry ──────────────
@@ -815,6 +1076,7 @@ async def run_agent_loop(
                             result_success=result.success,
                             result_content=result.content if result.success else None,
                             result_error=result.error if not result.success else None,
+                            raw_output=result.raw_output,
                         )
 
             # Hook: tool result (interceptor — may modify content/error)
@@ -857,10 +1119,15 @@ async def run_agent_loop(
                 for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
                     yield artifact
 
-            # Append tool message (use possibly-modified content from hooks).
-            # Strip <!--PLOT_DATA:--> markers so chart payloads (already sent
-            # to the frontend via SSE) don't bloat the model context.
-            msg_content = _strip_plot_data(tc_content) if result.success else f"Error: {tc_error}"
+            # Append compact model-facing tool content. Full tool output is
+            # still emitted above via ToolCallResult for hosts/UI/logs.
+            msg_content = _tool_message_content_for_model(
+                tool_name=fn_name,
+                arguments=fn_args,
+                result=result,
+                visible_content=tc_content,
+                visible_error=tc_error,
+            )
             tool_msg = Message(
                 role="tool",
                 content=msg_content,
@@ -954,7 +1221,7 @@ async def run_agent_loop(
             for tc, result in gathered:
                 tc_id = tc.id
                 fn_name = tc.function.name
-                fn_args = tc.function.arguments
+                fn_args = par_args_map[tc_id]
 
                 if logger:
                     logger.log_tool_result(
@@ -963,6 +1230,7 @@ async def run_agent_loop(
                         result_success=result.success,
                         result_content=result.content if result.success else None,
                         result_error=result.error if not result.success else None,
+                        raw_output=result.raw_output,
                     )
 
                 # ── Permission negotiation + retry ──────────────
@@ -986,6 +1254,7 @@ async def run_agent_loop(
                                 result_success=result.success,
                                 result_content=result.content if result.success else None,
                                 result_error=result.error if not result.success else None,
+                                raw_output=result.raw_output,
                             )
 
                 # Hook: tool result (interceptor)
@@ -1016,9 +1285,15 @@ async def run_agent_loop(
                     pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                     yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
 
-                # Append tool message — strip <!--PLOT_DATA:--> markers from
-                # model context (same rationale as the sequential block above).
-                msg_content = _strip_plot_data(par_content) if result.success else f"Error: {par_error}"
+                # Append compact model-facing tool content. Full tool output is
+                # still emitted above via ToolCallResult for hosts/UI/logs.
+                msg_content = _tool_message_content_for_model(
+                    tool_name=fn_name,
+                    arguments=fn_args,
+                    result=result,
+                    visible_content=par_content,
+                    visible_error=par_error,
+                )
                 tool_msg = Message(
                     role="tool",
                     content=msg_content,

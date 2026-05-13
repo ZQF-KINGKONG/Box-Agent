@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic import Field, model_validator
 
 from .base import Tool, ToolResult
+from .pptx_safety import detect_pptx_self_check_bypass
 from .safety import (
     ask_user_confirmation,
     backup_file,
@@ -428,6 +429,15 @@ Examples:
 
         try:
             # --- Safety checks ---
+            bypass_error = detect_pptx_self_check_bypass(None, command)
+            if bypass_error:
+                return BashOutputResult(
+                    success=False,
+                    error=bypass_error,
+                    stdout="",
+                    stderr=bypass_error,
+                    exit_code=1,
+                )
 
             # 1. Dangerous command detection (always active)
             danger_reason = detect_dangerous_command(command)

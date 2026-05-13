@@ -64,8 +64,8 @@ async def test_anthropic_request_no_thinking_by_default(monkeypatch):
 # ───────────────────────── OpenAI ─────────────────────────
 
 @pytest.mark.asyncio
-async def test_openai_request_has_extra_body_when_enabled(monkeypatch):
-    """OpenAIClient injects Qwen-style ``extra_body.enable_thinking`` when enabled."""
+async def test_openai_request_sends_no_vendor_thinking_params_when_enabled(monkeypatch):
+    """OpenAIClient keeps deep-think no-op for broad gateway compatibility."""
     client = OpenAIClient(api_key="k", api_base="https://x.example", model="qwen")
 
     captured: dict = {}
@@ -85,11 +85,8 @@ async def test_openai_request_has_extra_body_when_enabled(monkeypatch):
         thinking_enabled=True,
     )
 
-    assert captured["extra_body"] == {
-        "enable_thinking": True,
-        "thinking_budget": 8000,
-    }
-    assert captured["reasoning_effort"] == "medium"
+    assert "extra_body" not in captured
+    assert "reasoning_effort" not in captured
 
 
 @pytest.mark.asyncio
@@ -115,6 +112,42 @@ async def test_openai_request_no_extra_body_by_default(monkeypatch):
 
     assert "extra_body" not in captured, "extra_body must not be sent by default"
     assert "reasoning_effort" not in captured, "reasoning_effort must not be sent by default"
+
+
+@pytest.mark.asyncio
+async def test_openai_raw_response_parse_may_be_sync():
+    """OpenAI SDK raw responses can parse to a direct ChatCompletion object."""
+    client = OpenAIClient(api_key="k", api_base="https://x.example", model="qwen")
+
+    parsed = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="ok", tool_calls=None, reasoning_details=None),
+            )
+        ],
+        usage=None,
+    )
+
+    class FakeRawResponse:
+        request_id = "req-123"
+        headers = {}
+
+        def parse(self):
+            return parsed
+
+    class FakeRawCompletions:
+        async def create(self, **params):
+            return FakeRawResponse()
+
+    class FakeCompletions:
+        with_raw_response = FakeRawCompletions()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    client.client.chat = FakeChat()
+
+    assert await client._make_api_request([{"role": "user", "content": "go"}]) is parsed
 
 
 # ───────────────────────── Core plumbing ─────────────────────────

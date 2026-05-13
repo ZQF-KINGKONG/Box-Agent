@@ -31,20 +31,32 @@ OPTIONAL_NODE_PACKAGES: dict[str, str] = {
     "playwright": "browser host for CLI HTML editable PPTX export",
 }
 LIBREOFFICE_DOWNLOAD_URL = "https://www.libreoffice.org/download/download-libreoffice/"
-PLAYWRIGHT_INSTALL_CMD = '${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" playwright'
-PLAYWRIGHT_CHROMIUM_CMD = '"$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium'
-
-
 def node_command() -> str:
     return os.environ.get("BOX_AGENT_NODE") or shutil.which("node") or "node"
 
 
-def managed_node_modules() -> Path:
+def managed_node_prefix() -> Path:
+    if os.environ.get("BOX_AGENT_NODE_PREFIX"):
+        return Path(os.environ["BOX_AGENT_NODE_PREFIX"])
+    if os.environ.get("BOX_AGENT_RUNTIME_PREFIX"):
+        return Path(os.environ["BOX_AGENT_RUNTIME_PREFIX"])
     if platform.system() == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "office-raccoon" / "node_modules"
+        return Path.home() / "Library" / "Application Support" / "office-raccoon"
     if platform.system() == "Windows":
-        return Path(os.environ.get("APPDATA", str(Path.home()))) / "office-raccoon" / "node_modules"
-    return Path.home() / ".config" / "office-raccoon" / "node_modules"
+        return Path(os.environ.get("APPDATA", str(Path.home()))) / "office-raccoon"
+    return Path.home() / ".config" / "office-raccoon"
+
+
+def managed_node_modules() -> Path:
+    return managed_node_prefix() / "node_modules"
+
+
+def playwright_install_cmd() -> str:
+    return f'${{BOX_AGENT_NPM:-npm}} install --prefix "{managed_node_prefix()}" playwright'
+
+
+def playwright_chromium_cmd() -> str:
+    return f'"{managed_node_prefix() / "node_modules" / ".bin" / "playwright"}" install chromium'
 
 
 def find_binary(candidates: list[str]) -> str | None:
@@ -196,12 +208,12 @@ def main() -> int:
             browser_ok = has_playwright_chromium()
             print(f"  {'ok  ' if browser_ok else 'warn'} playwright chromium browser")
             if not browser_ok:
-                print("       CLI editable PPTX export is blocked until Chromium is installed; deliver deck.html or use a host renderer instead")
-                print(f"       download Chromium: {PLAYWRIGHT_CHROMIUM_CMD}")
+                print("       CLI editable PPTX export is blocked until Chromium is installed; ask the user to choose HTML delivery or native PptxGenJS PPTX")
+                print(f"       download Chromium: {playwright_chromium_cmd()}")
         else:
-            print("       CLI editable PPTX export is blocked without a browser host; deliver deck.html or use a host renderer instead")
-            print(f"       install Playwright: {PLAYWRIGHT_INSTALL_CMD}")
-            print(f"       download Chromium: {PLAYWRIGHT_CHROMIUM_CMD}")
+            print("       CLI editable PPTX export is blocked without a browser host; ask the user to choose HTML delivery or native PptxGenJS PPTX")
+            print(f"       install Playwright: {playwright_install_cmd()}")
+            print(f"       download Chromium: {playwright_chromium_cmd()}")
     else:
         print("  skip node package checks because node is missing")
 

@@ -175,10 +175,31 @@ class MemorySearchTool(Tool):
         try:
             results = self._mgr.search(query)
             if not results:
-                return ToolResult(success=True, content=f"No matching memories found for '{query}'.")
+                return ToolResult(
+                    success=True,
+                    content=f"No matching memories found for '{query}'.",
+                    raw_output={
+                        "type": "memory_search",
+                        "query": query,
+                        "matched_memories": [],
+                    },
+                )
             return ToolResult(
                 success=True,
                 content=f"Found {len(results)} match(es) for '{query}':\n" + "\n".join(results),
+                raw_output={
+                    "type": "memory_search",
+                    "query": query,
+                    "matched_memories": [
+                        {
+                            "id": f"context:{index}",
+                            "source": "context",
+                            "category": "context",
+                            "text": line,
+                        }
+                        for index, line in enumerate(results, start=1)
+                    ],
+                },
             )
         except Exception as e:
             return ToolResult(success=False, content="", error=f"Failed to search memory: {e}")

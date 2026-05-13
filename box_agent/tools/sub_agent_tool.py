@@ -18,6 +18,7 @@ from ..events import (
     ArtifactEvent,
     DoneEvent,
     ErrorEvent,
+    LLMOutputEvent,
     StepStart,
     SubAgentEvent,
     ToolCallResult,
@@ -123,7 +124,15 @@ class SubAgentTool(EventEmittingTool):
         }
 
     # Event types worth surfacing to the parent.
-    _FORWARD_TYPES = (StepStart, ToolCallStart, ToolCallResult, WebSearchEvent, ArtifactEvent, ErrorEvent)
+    _FORWARD_TYPES = (
+        StepStart,
+        LLMOutputEvent,
+        ToolCallStart,
+        ToolCallResult,
+        WebSearchEvent,
+        ArtifactEvent,
+        ErrorEvent,
+    )
 
     async def execute(self, task: str) -> ToolResult:  # type: ignore[override]
         # Import here to avoid circular dependency (core → tools → core).

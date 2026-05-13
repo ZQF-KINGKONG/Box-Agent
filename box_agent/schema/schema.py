@@ -27,6 +27,7 @@ class StreamEvent(BaseModel):
     finish_reason: str | None = None
     usage: "TokenUsage | None" = None
     tool_calls: "list[ToolCall] | None" = None
+    provider_request_id: str | None = None
 
 
 class FunctionCall(BaseModel):

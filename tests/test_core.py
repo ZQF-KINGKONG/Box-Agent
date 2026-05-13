@@ -19,6 +19,7 @@ from box_agent.events import (
 )
 from box_agent.schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 
 
 # ── Helpers ─────────────────────────────────────────────────────
@@ -68,6 +69,48 @@ class EchoTool(Tool):
         return ToolResult(success=True, content=f"echo:{text}")
 
 
+class RawOutputTool(Tool):
+    @property
+    def name(self):
+        return "raw"
+
+    @property
+    def description(self):
+        return "Returns a structured raw_output payload"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {}}
+
+    async def execute(self):
+        return ToolResult(
+            success=True,
+            content="structured result",
+            raw_output={"type": "memory_search", "matched_memories": [{"text": "- remembered"}]},
+        )
+
+
+class ModelContextTool(Tool):
+    @property
+    def name(self):
+        return "model_context"
+
+    @property
+    def description(self):
+        return "Returns full content plus compact model context"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {}}
+
+    async def execute(self):
+        return ToolResult(
+            success=True,
+            content="FULL_VISIBLE_OUTPUT_SECRET",
+            model_context="COMPACT_MODEL_CONTEXT",
+        )
+
+
 class FailTool(Tool):
     @property
     def name(self):
@@ -94,6 +137,15 @@ def _msgs():
         Message(role="system", content="sys"),
         Message(role="user", content="hi"),
     ]
+
+
+class MemoryManagerStub:
+    def __init__(self, matches):
+        self.matches = matches
+
+    def auto_match_context(self, query: str):
+        self.query = query
+        return self.matches
 
 
 # ── Tests ───────────────────────────────────────────────────────
@@ -149,6 +201,279 @@ async def test_tool_call_cycle():
     assert len(results) == 1
     assert results[0].success is True
     assert "echo:ping" in results[0].content
+
+
+@pytest.mark.asyncio
+async def test_tool_result_preserves_raw_output_for_cli_and_hosts():
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="t1", type="function", function=FunctionCall(name="raw", arguments={}))],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    events = await collect(run_agent_loop(llm=llm, messages=_msgs(), tools={"raw": RawOutputTool()}, max_steps=5))
+
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert len(results) == 1
+    assert results[0].raw_output == {
+        "type": "memory_search",
+        "matched_memories": [{"text": "- remembered"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_tool_model_context_is_used_only_for_message_history():
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(name="model_context", arguments={}),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"model_context": ModelContextTool()},
+            max_steps=5,
+        )
+    )
+
+    result = next(e for e in events if isinstance(e, ToolCallResult))
+    assert result.content == "FULL_VISIBLE_OUTPUT_SECRET"
+
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    assert tool_msg.content == "COMPACT_MODEL_CONTEXT"
+
+
+@pytest.mark.asyncio
+async def test_read_file_artifact_keeps_full_event_but_compacts_model_history(tmp_path):
+    marker = "SHOULD_NOT_STAY_IN_MODEL_HISTORY"
+    deck = tmp_path / "deck.html"
+    deck.write_text(
+        "\n".join(["<html>", "<body>"] + [f"<section>slide {i}</section>" for i in range(70)] + [marker, "</body>", "</html>"]),
+        encoding="utf-8",
+    )
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(name="read_file", arguments={"path": "deck.html"}),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"read_file": ReadTool(workspace_dir=str(tmp_path))},
+            max_steps=5,
+            workspace_dir=str(tmp_path),
+        )
+    )
+
+    result = next(e for e in events if isinstance(e, ToolCallResult))
+    assert marker in result.content
+
+    tool_msg = next(m for m in msgs if m.role == "tool")
+    assert "[Full file content omitted from model history]" in tool_msg.content
+    assert "deck.html" in tool_msg.content
+    assert marker not in tool_msg.content
+
+
+@pytest.mark.asyncio
+async def test_write_file_large_artifact_arguments_are_compacted_in_model_history(tmp_path):
+    marker = "SHOULD_NOT_STAY_IN_ASSISTANT_TOOL_ARGS"
+    html = "\n".join(
+        ["<!doctype html>", "<html>", "<body>"]
+        + [f"<section class='slide'>slide {i}</section>" for i in range(80)]
+        + [marker, "</body>", "</html>"]
+    )
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(name="write_file", arguments={"path": "deck.html", "content": html}),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"write_file": WriteTool(workspace_dir=str(tmp_path))},
+            max_steps=5,
+            workspace_dir=str(tmp_path),
+        )
+    )
+
+    start = next(e for e in events if isinstance(e, ToolCallStart))
+    assert marker in start.arguments["content"]
+    assert (tmp_path / "deck.html").read_text(encoding="utf-8") == html
+
+    assistant_msg = next(m for m in msgs if m.role == "assistant" and m.tool_calls)
+    stored_args = assistant_msg.tool_calls[0].function.arguments
+    assert "[Full tool-call argument omitted from model history]" in stored_args["content"]
+    assert "deck.html" in stored_args["content"]
+    assert marker not in stored_args["content"]
+
+
+@pytest.mark.asyncio
+async def test_write_file_qa_json_arguments_are_compacted_even_when_small(tmp_path):
+    marker = "SHOULD_NOT_STAY_IN_QA_TOOL_ARGS"
+    content = f'{{"ok": false, "details": "{marker}"}}'
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(name="write_file", arguments={"path": "qa.json", "content": content}),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+
+    await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"write_file": WriteTool(workspace_dir=str(tmp_path))},
+            max_steps=5,
+            workspace_dir=str(tmp_path),
+        )
+    )
+
+    assert (tmp_path / "qa.json").read_text(encoding="utf-8") == content
+    assistant_msg = next(m for m in msgs if m.role == "assistant" and m.tool_calls)
+    stored_args = assistant_msg.tool_calls[0].function.arguments
+    assert "[Full tool-call argument omitted from model history]" in stored_args["content"]
+    assert "qa.json" in stored_args["content"]
+    assert marker not in stored_args["content"]
+
+
+@pytest.mark.asyncio
+async def test_edit_file_large_artifact_arguments_omit_previews_in_model_history(tmp_path):
+    old_marker = "OLD_HTML_SHOULD_NOT_STAY_IN_ASSISTANT_TOOL_ARGS"
+    new_marker = "NEW_HTML_SHOULD_NOT_STAY_IN_ASSISTANT_TOOL_ARGS"
+    original = "\n".join(
+        ["<!doctype html>", "<html>", "<body>"]
+        + [f"<section class='slide'>slide {i}</section>" for i in range(80)]
+        + [old_marker, "</body>", "</html>"]
+    )
+    updated = original.replace(old_marker, new_marker)
+    (tmp_path / "deck.html").write_text(original, encoding="utf-8")
+
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(
+                        name="edit_file",
+                        arguments={"path": "deck.html", "old_str": original, "new_str": updated},
+                    ),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"edit_file": EditTool(workspace_dir=str(tmp_path))},
+            max_steps=5,
+            workspace_dir=str(tmp_path),
+        )
+    )
+
+    start = next(e for e in events if isinstance(e, ToolCallStart))
+    assert old_marker in start.arguments["old_str"]
+    assert new_marker in start.arguments["new_str"]
+    assert (tmp_path / "deck.html").read_text(encoding="utf-8") == updated
+
+    assistant_msg = next(m for m in msgs if m.role == "assistant" and m.tool_calls)
+    stored_args = assistant_msg.tool_calls[0].function.arguments
+    assert "[Full tool-call argument omitted from model history]" in stored_args["old_str"]
+    assert "[Full tool-call argument omitted from model history]" in stored_args["new_str"]
+    assert old_marker not in stored_args["old_str"]
+    assert new_marker not in stored_args["new_str"]
+    assert "Preview first" not in stored_args["old_str"]
+    assert "Preview first" not in stored_args["new_str"]
+
+
+@pytest.mark.asyncio
+async def test_auto_memory_match_injects_weak_context_before_llm_call():
+    llm = MockLLM([LLMResponse(content="done", finish_reason="stop")])
+    messages = _msgs()
+    memory = MemoryManagerStub([
+        {
+            "id": "context:7",
+            "source": "context",
+            "category": "context",
+            "text": "- 科技公司入职培训 PPT 已生成预览。",
+        }
+    ])
+
+    events = await collect(
+        run_agent_loop(llm=llm, messages=messages, tools={}, max_steps=5, memory_manager=memory)
+    )
+
+    results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert len(results) == 1
+    assert results[0].tool_call_id == "memory-auto-match"
+    assert results[0].raw_output == {
+        "type": "memory_search",
+        "trigger": "auto",
+        "query": "hi",
+        "matched_memories": [
+            {
+                "id": "context:7",
+                "source": "context",
+                "category": "context",
+                "text": "- 科技公司入职培训 PPT 已生成预览。",
+            }
+        ],
+    }
+    user_message = next(msg for msg in messages if msg.role == "user")
+    assert "Possibly relevant memory" in user_message.content
+    assert "Use them only if they are clearly relevant" in user_message.content
+    assert "ignore them and do not assume continuity" in user_message.content
 
 
 @pytest.mark.asyncio

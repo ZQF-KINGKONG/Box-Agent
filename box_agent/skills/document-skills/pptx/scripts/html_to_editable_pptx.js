@@ -4,27 +4,42 @@ const Module = require("module");
 const path = require("path");
 const { execFileSync } = require("child_process");
 
-const managedNodeModules = path.join(
-  process.env.HOME || "",
-  "Library",
-  "Application Support",
-  "office-raccoon",
-  "node_modules"
-);
+function officeRaccoonPrefix() {
+  if (process.env.BOX_AGENT_NODE_PREFIX) return process.env.BOX_AGENT_NODE_PREFIX;
+  if (process.env.BOX_AGENT_RUNTIME_PREFIX) return process.env.BOX_AGENT_RUNTIME_PREFIX;
+  const home = process.env.HOME || "";
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "office-raccoon");
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || home, "office-raccoon");
+  }
+  return path.join(home, ".config", "office-raccoon");
+}
+
+const managedNodeModules = path.join(officeRaccoonPrefix(), "node_modules");
 process.env.NODE_PATH = process.env.NODE_PATH
   ? `${managedNodeModules}${path.delimiter}${process.env.NODE_PATH}`
   : managedNodeModules;
 Module._initPaths();
 
 function usage() {
-  console.error(
-    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width 1920] [--height 1080] [--svg-vector true|false] (default: false for pixel fidelity)"
+  console.log(
+    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width 1920] [--height 1080] [--svg-vector true|false] [--allow-self-check-issues] (default: false for pixel fidelity)"
   );
+}
+
+function failUsage() {
+  usage();
   process.exit(2);
 }
 
 function parseArgs(argv) {
-  if (argv.length < 2) usage();
+  if (argv.includes("--help") || argv.includes("-h")) {
+    usage();
+    process.exit(0);
+  }
+  if (argv.length < 2) failUsage();
   const opts = {
     html: argv[0],
     pptx: argv[1],
@@ -32,6 +47,7 @@ function parseArgs(argv) {
     width: 1920,
     height: 1080,
     svgVector: false,
+    allowSelfCheckIssues: false,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -48,11 +64,13 @@ function parseArgs(argv) {
     } else if (arg === "--svg-vector" && value) {
       opts.svgVector = value !== "false";
       i += 1;
+    } else if (arg === "--allow-self-check-issues") {
+      opts.allowSelfCheckIssues = true;
     } else {
-      usage();
+      failUsage();
     }
   }
-  if (!Number.isFinite(opts.width) || !Number.isFinite(opts.height)) usage();
+  if (!Number.isFinite(opts.width) || !Number.isFinite(opts.height)) failUsage();
   return opts;
 }
 
@@ -63,7 +81,7 @@ function requireModule(name, installHint) {
     if (error && error.code === "MODULE_NOT_FOUND") {
       console.error(`Missing dependency: ${name}`);
       console.error(installHint);
-      console.error("Without a browser host, keep deck.html as the deliverable and mark editable PPTX export as BLOCKED.");
+      console.error("Without a browser host, ask the user to choose HTML delivery or native PptxGenJS PPTX.");
       process.exit(1);
     }
     throw error;
@@ -71,9 +89,10 @@ function requireModule(name, installHint) {
 }
 
 function printBrowserInstallHint() {
+  const prefix = officeRaccoonPrefix();
   console.error("Playwright Chromium is not available.");
-  console.error('Install/download it with: "$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium');
-  console.error("Without a browser host, keep deck.html as the deliverable and mark editable PPTX export as BLOCKED.");
+  console.error(`Install/download it with: "${path.join(prefix, "node_modules", ".bin", "playwright")}" install chromium`);
+  console.error("Without a browser host, ask the user to choose HTML delivery or native PptxGenJS PPTX.");
 }
 
 function resolveBrowserBundle() {
@@ -86,26 +105,42 @@ function resolveBrowserBundle() {
   return bundlePath;
 }
 
-function runSelfCheck(htmlPath, width, height, reportPath) {
+function runSelfCheck(htmlPath, width, height, reportPath, allowIssues) {
   const checker = path.join(__dirname, "html_self_check.js");
-  execFileSync(
-    process.execPath,
-    [
-      checker,
-      htmlPath,
-      "--width",
-      String(width),
-      "--height",
-      String(height),
-      "--dom-to-pptx",
-      "--report",
-      reportPath,
-    ],
-    {
-      stdio: "inherit",
-      env: process.env,
+  try {
+    execFileSync(
+      process.execPath,
+      [
+        checker,
+        htmlPath,
+        "--width",
+        String(width),
+        "--height",
+        String(height),
+        "--dom-to-pptx",
+        "--report",
+        reportPath,
+      ],
+      {
+        stdio: "inherit",
+        env: process.env,
+      }
+    );
+  } catch (error) {
+    if (!allowIssues || !fs.existsSync(reportPath)) {
+      throw error;
     }
-  );
+    let report;
+    try {
+      report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
+    } catch {
+      throw error;
+    }
+    const issueCount = Array.isArray(report.issues) ? report.issues.length : 0;
+    console.error(
+      `HTML self-check still has ${issueCount} issue(s); continuing because --allow-self-check-issues was set.`
+    );
+  }
 }
 
 async function main() {
@@ -122,11 +157,11 @@ async function main() {
   }
 
   fs.mkdirSync(qaDir, { recursive: true });
-  runSelfCheck(htmlPath, opts.width, opts.height, selfCheckReport);
+  runSelfCheck(htmlPath, opts.width, opts.height, selfCheckReport, opts.allowSelfCheckIssues);
 
   const { chromium } = requireModule(
     "playwright",
-    'Install in Office Raccoon with: ${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" playwright; then download Chromium with "$HOME/Library/Application Support/office-raccoon/node_modules/.bin/playwright" install chromium'
+    `Install in Office Raccoon with: \${BOX_AGENT_NPM:-npm} install --prefix "${officeRaccoonPrefix()}" playwright; then download Chromium with "${path.join(officeRaccoonPrefix(), "node_modules", ".bin", "playwright")}" install chromium`
   );
   const bundlePath = resolveBrowserBundle();
 

@@ -1,5 +1,6 @@
 """OpenAI LLM client implementation."""
 
+import inspect
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -10,11 +11,14 @@ from openai import AsyncOpenAI
 from ..retry import RetryConfig, async_retry
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
+from .debug_logging import (
+    log_llm_error_meta,
+    log_llm_request,
+    log_llm_response_meta,
+    request_id_from_headers,
+)
 
 logger = logging.getLogger(__name__)
-
-# Hard-coded budget for extended thinking on Qwen-style endpoints.
-_THINKING_BUDGET = 8000
 
 # Fallback completion-token budget when no explicit value is supplied.
 # Many OpenAI-protocol relay/proxy gateways default to 4096, which silently
@@ -22,6 +26,13 @@ _THINKING_BUDGET = 8000
 # cutting JSON mid-string and triggering empty-arguments retry loops). Pin a
 # generous default; users can override via ``LLMConfig.max_output_tokens``.
 _DEFAULT_MAX_TOKENS = 64000
+
+
+async def _await_if_needed(value: Any) -> Any:
+    """Return awaitable SDK values and direct SDK values through one path."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class OpenAIClient(LLMClientBase):
@@ -75,9 +86,8 @@ class OpenAIClient(LLMClientBase):
         Args:
             api_messages: List of messages in OpenAI format
             tools: Optional list of tools
-            thinking_enabled: When True, inject Qwen-compatible
-                ``extra_body.enable_thinking``. Providers that don't
-                recognize the key typically ignore it.
+            thinking_enabled: Currently a no-op for OpenAI-compatible
+                endpoints to preserve broad third-party gateway compatibility.
 
         Returns:
             OpenAI ChatCompletion response (full response including usage)
@@ -92,17 +102,6 @@ class OpenAIClient(LLMClientBase):
         if self.model:
             params["model"] = self.model
 
-        if thinking_enabled:
-            # Belt-and-suspenders: OpenAI/Azure honor top-level ``reasoning_effort``
-            # (GPT-5, o1, o3); Qwen/DashScope honor ``extra_body.enable_thinking``
-            # + ``thinking_budget``. Unknown fields are silently ignored by every
-            # other OpenAI-protocol provider we've seen, so sending both is safe.
-            params["reasoning_effort"] = "medium"
-            params["extra_body"] = {
-                "enable_thinking": True,
-                "thinking_budget": _THINKING_BUDGET,
-            }
-
         if tools:
             params["tools"] = self._convert_tools(tools)
 
@@ -110,8 +109,28 @@ class OpenAIClient(LLMClientBase):
         if auth_headers:
             params["extra_headers"] = auth_headers
 
-        # Use OpenAI SDK's chat.completions.create
-        response = await self.client.chat.completions.create(**params)
+        log_llm_request(provider="openai", mode="completion", api_base=self.api_base, params=params)
+
+        try:
+            raw_response = await _await_if_needed(
+                self.client.chat.completions.with_raw_response.create(**params)
+            )
+            log_llm_response_meta(
+                provider="openai",
+                mode="completion",
+                request_id=getattr(raw_response, "request_id", None),
+                headers=getattr(raw_response, "headers", None),
+            )
+            response = await _await_if_needed(raw_response.parse())
+        except AttributeError:
+            # Test doubles and older SDK-compatible clients may not expose
+            # ``with_raw_response``. Keep the request log and fall back to the
+            # existing behavior, but request-id metadata will be unavailable.
+            response = await _await_if_needed(self.client.chat.completions.create(**params))
+        except Exception as exc:
+            log_llm_error_meta(provider="openai", mode="completion", exc=exc)
+            raise
+
         # Return full response to access usage info
         return response
 
@@ -308,7 +327,7 @@ class OpenAIClient(LLMClientBase):
         Args:
             messages: List of conversation messages
             tools: Optional list of available tools
-            thinking_enabled: Enable Qwen-style extended thinking.
+            thinking_enabled: Currently a no-op for OpenAI-compatible endpoints.
 
         Returns:
             LLMResponse containing the generated content
@@ -361,16 +380,12 @@ class OpenAIClient(LLMClientBase):
             params["model"] = self.model
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
-        if thinking_enabled:
-            params["reasoning_effort"] = "medium"
-            params["extra_body"] = {
-                "enable_thinking": True,
-                "thinking_budget": _THINKING_BUDGET,
-            }
 
         auth_headers = self._auth_headers()
         if auth_headers:
             params["extra_headers"] = auth_headers
+
+        log_llm_request(provider="openai", mode="stream", api_base=self.api_base, params=params)
 
         # Accumulators
         text_content = ""
@@ -380,8 +395,27 @@ class OpenAIClient(LLMClientBase):
 
         # Tool call accumulators: {index: {id, name, arguments_str}}
         tool_acc: dict[int, dict[str, str]] = {}
+        provider_request_id: str | None = None
 
-        response_stream = await self.client.chat.completions.create(**params)
+        try:
+            raw_response = await _await_if_needed(
+                self.client.chat.completions.with_raw_response.create(**params)
+            )
+            provider_request_id = getattr(raw_response, "request_id", None) or request_id_from_headers(
+                getattr(raw_response, "headers", None)
+            )
+            log_llm_response_meta(
+                provider="openai",
+                mode="stream",
+                request_id=provider_request_id,
+                headers=getattr(raw_response, "headers", None),
+            )
+            response_stream = await _await_if_needed(raw_response.parse())
+        except AttributeError:
+            response_stream = await _await_if_needed(self.client.chat.completions.create(**params))
+        except Exception as exc:
+            log_llm_error_meta(provider="openai", mode="stream", exc=exc)
+            raise
 
         async for chunk in response_stream:
             # Usage info (sent in the final chunk with choices=[])
@@ -476,4 +510,5 @@ class OpenAIClient(LLMClientBase):
             finish_reason=finish_reason,
             usage=usage,
             tool_calls=tool_calls if tool_calls else None,
+            provider_request_id=provider_request_id,
         )

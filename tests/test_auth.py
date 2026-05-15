@@ -108,6 +108,29 @@ def test_config_accepts_custom_auth_file(tmp_path: Path) -> None:
     assert config.llm.auth_file == str(auth_file)
 
 
+def test_config_accepts_image_generation_block(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'api_key: "provider-key"\n'
+        'api_base: "https://llm.example.com/v1"\n'
+        'model: "test-model"\n'
+        'provider: "openai"\n'
+        "image_generation:\n"
+        '  endpoint: "https://image.example.com/v1/images/generations"\n'
+        '  api_key: "image-token"\n'
+        '  model: "chatgpt-image-latest"\n'
+        "  timeout: 45\n",
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.image_generation.endpoint == "https://image.example.com/v1/images/generations"
+    assert config.image_generation.api_key == "image-token"
+    assert config.image_generation.model == "chatgpt-image-latest"
+    assert config.image_generation.timeout == 45.0
+    assert config.image_generation.auth_file == str(tmp_path / "auth.json")
+
+
 def test_hosted_gateway_allows_missing_api_key_and_model(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

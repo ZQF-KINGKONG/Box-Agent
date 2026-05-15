@@ -16,6 +16,7 @@ from box_agent.config import Config
 from box_agent.tools.base import Tool
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
+from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
@@ -41,8 +42,9 @@ SANDBOX_INFO_PROMPT = """
 
 Python 代码通过 `execute_code` 工具在**隔离的 Jupyter kernel**（沙箱）中运行，和 host Python 相互独立：
 
-- **运行位置**：沙箱 kernel 持有自己的 `sys.executable`。沙箱 cwd 已是 workspace，保存文件用相对路径（如 `plt.savefig("chart.png")`），禁止写 `/mnt/data/`、`sandbox:` 前缀。
-- **状态持久**：同一会话中变量、import、已加载数据保留到下一次 `execute_code` 调用；不要把长流程拆成互相割裂的片段。
+- **运行位置**：沙箱 kernel 持有自己的 `sys.executable`。沙箱 cwd 已是 `{workspace}/output/`，保存文件用相对路径（如 `plt.savefig("chart.png")`），禁止写 `/mnt/data/`、`sandbox:` 前缀；如需读取用户上传文件，用 `../<name>` 回到 workspace 根。
+- **状态持久**：同一会话中变量、import、已加载数据保留到下一次 `execute_code` 调用；
+- **分步执行**：保持清晰逻辑，一步一步执行以防止出错。
 - **预装包**：`pandas`、`numpy`、`matplotlib`、`seaborn`、`scikit-learn`、`openpyxl`、`xlrd`、`python-docx`、`pypdf`、`pdfplumber`、`reportlab`、`python-pptx`，以及标准库。
 - **安装额外包**：在 `execute_code` 里用 Jupyter magic，例如 `!pip install <pkg>`。**禁止**用 `bash` 跑 `pip install` / `uv pip install` 装包给沙箱——bash 命令走的是 host 解释器，装了沙箱也用不到。
 - **何时用 execute_code**：数据分析与可视化、读写 CSV/Excel/JSON/图片、处理 Word/PDF/PPT、多步计算、需要保留状态的脚本。
@@ -318,6 +320,25 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             )
         )
         _out(f"{Colors.GREEN}✅ Loaded vision review tool (vision_review){Colors.RESET}")
+
+    # Image generation tool — saves host-generated bitmap assets into the workspace
+    image_generation_config = getattr(config, "image_generation", None)
+    tools.append(
+        GenerateImageTool(
+            workspace_dir=str(workspace_dir),
+            allow_full_access=allow_full_access,
+            permission_engine=permission_engine,
+            endpoint=getattr(image_generation_config, "endpoint", "") or None,
+            api_key=getattr(image_generation_config, "api_key", "") or None,
+            model=getattr(image_generation_config, "model", "") or None,
+            auth_file=(
+                getattr(image_generation_config, "auth_file", "")
+                or getattr(getattr(config, "llm", None), "auth_file", "")
+            ),
+            timeout=getattr(image_generation_config, "timeout", None),
+        )
+    )
+    _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
 
     # Sub-agent tool — must be registered last so it can reference all other tools
     if config.tools.enable_sub_agent and llm is not None:

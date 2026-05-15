@@ -13,17 +13,16 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable. P
 - Treat `.pptx` as an Office Open XML zip package. Use libraries for normal creation, and inspect package XML only when templates, relationships, or corrupted files require it.
 - Preserve the user's template, branding, slide size, theme, master layouts, notes, and media unless asked to change them.
 - Do not hand-wave visual quality. Render slides to images or PDF and inspect the actual result for overflow, clipping, bad spacing, missing media, and placeholder leftovers.
-- Screenshot generation is not visual QA. After screenshots or rendered images exist, open or attach every slide image to an image-capable viewer/model and judge the visible pixels. File count, dimensions, package XML, and text extraction cannot prove visual quality.
 - Keep the deck source reproducible. When creating a new deck, put the generation script beside the output unless the user asked only for a one-off file.
 - Maintain basic deck hygiene: every non-cover slide should have a visible page number such as `02 / 08`, consistently placed, usually top-right or bottom-right. Closing/summary slides still need page numbers unless the user asks for a no-folio style.
-- For HTML-authored decks, use a fixed `1920px × 1080px` canvas for `.slide` by default. Treat `1280px × 720px` only as the minimum acceptable preview/render resolution or an explicit low-resolution override, not as the recommended authoring size.
+- For HTML-authored decks, set the slide canvas before writing content: every `.slide` must be fixed `width: 1920px; height: 1080px;`. Do not author at `1280px × 720px`, `1280px × 760px`, viewport-relative sizes, or scaled wrappers unless the user explicitly asks for a nonstandard output size.
+- Generate images only when they improve communication, not decoration. Prefer slide-specific visual assets over full-slide generated backgrounds; reserve generated backgrounds for covers, dividers, and poster-like slides with clear text-safe areas.
 - For short text with a background color, such as badges, pills, buttons, and tags, never use vertical padding (`padding-top`, `padding-bottom`, or `padding: Ypx Xpx`) to simulate vertical centering. Use a fixed-size background container with `display:flex; align-items:center; justify-content:center`, and keep the inner text unpadded.
-- Use host-provided parallel agents only for independent slide-level review or edits. Keep package-level operations, slide ordering, and final validation in one place.
+- Use host-provided parallel agents for independent HTML slide-fragment drafting, slide-level review, or isolated edits whenever the deck can be safely split. Keep global CSS, package-level operations, slide ordering, merging, export, and final validation in the main agent.
 - Do not install Homebrew, system packages, or global dependencies without explicit user approval. Installing npm or pip packages into the managed Office Raccoon Node/Python environment is allowed when needed for this PPTX workflow.
-- Do not silently downgrade the generator. For any newly created deck, default to HTML-first editable generation and export with the bundled `scripts/dom-to-pptx.bundle.js`. Use native editable PptxGenJS only when the user asks for native charts/tables, PowerPoint-native object behavior, template preservation, or explicitly chooses PPTX after the HTML export environment preflight reports missing Playwright/Chromium and no host renderer is available.
-- Before authoring a new HTML-first deck when final `.pptx` delivery is expected, run `scripts/check_html_export_env.js` or an equivalent host-renderer check. If Playwright/Chromium or a host renderer is missing, tell the user the missing browser export environment blocks HTML-to-editable-PPTX export and ask them to choose: `HTML` (deliver `deck.html` now; export later after dependency setup) or `PPTX` (switch to native PptxGenJS with different HTML/CSS fidelity tradeoffs).
-- Do not treat HTML self-check failures, text-slack warnings, Playwright errors after a route was chosen, or render drift as permission to switch to native PptxGenJS. Fix `deck.html` and rerun the HTML-first pipeline, or report the specific blocker. Native PptxGenJS for a new deck still requires explicit user confirmation unless the user supplied a template, required native charts/tables, or chose PPTX at the missing-browser preflight.
-- Do not bypass HTML self-check for HTML-first export. Never write a custom `export_skipcheck.js`, call `dom-to-pptx.bundle.js` directly to skip `scripts/html_self_check.js`, or patch the exporter to ignore failed checks. If `qa/html_self_check.json` has `"ok": false`, fix `deck.html` and rerun the official exporter. After at most 3 focused repair rounds, if only a small number of known, visually acceptable issues remain, continue only through the official exporter with `--allow-self-check-issues`, then report the unresolved issue count and complete render/visual QA. If blocking issues remain severe, report `Editable PPTX export: BLOCKED (HTML self-check failed)`.
+- Do not silently downgrade the generator. New decks use HTML-first editable export by default; native PptxGenJS is only for confirmed exceptions in the mode table below.
+- Run the browser export preflight before writing a full HTML deck when final `.pptx` delivery is expected. After a route is chosen, self-check failures, Playwright errors, or render drift are HTML fixes or blockers, not permission to switch generators.
+- Use only the official HTML-first exporter. Do not skip or patch around `scripts/html_self_check.js`; `--allow-self-check-issues` is allowed only after the bounded repair rule below.
 - Never use `python-pptx` or `from pptx import Presentation` to create a new deck after choosing HTML-first. Python is allowed for research, text extraction, package validation, and rendering helpers, but not as the final deck generator for new decks. If you are about to create a new `.pptx` with Python, stop and ask the user for confirmation with the reason.
 - Keep user-visible progress sparse. Report milestones and blockers only; do not narrate every planned command, file write, retry, or internal decision.
 
@@ -35,12 +34,9 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable. P
 | Inspect package health | `${BOX_AGENT_PYTHON:-python3} scripts/validate_pptx_package.py input.pptx` |
 | Visual overview | `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py input.pptx --out rendered` |
 | Create/generate a new deck | Use HTML-first editable by default; preflight browser export with `scripts/check_html_export_env.js`, then read `references/html-first.md` and `references/html-editable.md` |
+| Merge parallel HTML fragments | `${BOX_AGENT_NODE:-node} scripts/merge_html_fragments.js --css drafts/common.css --out deck.html drafts/slides_*.html` |
 | Export HTML deck to PPTX | Use `scripts/html_to_editable_pptx.js`; it loads `scripts/dom-to-pptx.bundle.js` |
-| Check HTML deck layout | `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --report qa/html_self_check.json` |
-| Compare HTML previews to PPTX render | `${BOX_AGENT_NODE:-node} scripts/compare_slide_images.js slides rendered --out qa/diff` |
-| Create vision-size slide images | `${BOX_AGENT_NODE:-node} scripts/make_vision_inputs.js slides --out qa/vision_inputs` |
-| Prepare visual review inputs | `${BOX_AGENT_NODE:-node} scripts/make_contact_sheet.js slides --out qa/vision-contact-sheet.png` |
-| Run visual review | Call `vision_review` with every compressed `qa/vision_inputs/slide-*.jpg`, batched 1-3 slides per request for decks with 10+ slides; write `qa/visual_review.md` |
+| Check HTML deck layout | `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` |
 | Create editable deck | Read `references/pptxgenjs.md` |
 | Edit a template deeply | Read `references/ooxml-editing.md` |
 | QA checklist | Read `references/qa.md` |
@@ -77,7 +73,7 @@ do not need this extra confirmation.
 Do not use the `execute_code` Python sandbox as a shortcut to create the final
 PPTX. In data-analysis-heavy requests, use Python only to collect, clean, or
 summarize data. The actual new deck creation still starts with `deck.html`, then
-HTML self-check, preview images, visual review, editable DOM-to-PPTX export, render, and drift inspection.
+HTML self-check, preview images, editable DOM-to-PPTX export, and render.
 
 Examples:
 
@@ -89,38 +85,73 @@ Examples:
 - "新建一份 PPT，文字和图表都要在 PowerPoint 里原生可编辑" -> ask confirmation before native editable PptxGenJS.
 - "编辑这个 PPT，把第 3 页改成..." -> native/template editing directly.
 
+## Parallel HTML Drafting
+
+For new HTML-first decks with 6 or more slides, dense source material, or any
+deck likely to produce a very large `deck.html`, write fragments before the final
+HTML file. Use parallel sub-agents for fragment drafting when the `sub_agent`
+tool is available and the user has not asked for serial work. Smaller decks may
+be authored directly only when the final HTML is unlikely to be truncated.
+
+The main agent must own the design system before delegation:
+
+1. Write or define `drafts/common.css` with the final shared palette, type scale,
+   spacing, component classes, page-number style, and the required
+   `.slide { width: 1920px; height: 1080px; }` canvas.
+2. Write or define `drafts/deck_plan.json` with slide numbers, titles, content
+   requirements, and which sub-agent owns each slide range.
+3. Pass each sub-agent the same CSS semantics and class whitelist. Sub-agents
+   must not invent new classes unless explicitly assigned a local class prefix.
+
+Sub-agents may write only assigned fragment files such as
+`drafts/slides_01_04.html`. They must output only complete slide sections:
+
+```html
+<section class="slide ..." data-slide="01" data-title="...">...</section>
+```
+
+Sub-agents must not write `<html>`, `<head>`, `<body>`, `<style>`, `<script>`,
+the final `deck.html`, PPTX files, QA reports, or shared CSS. They should return
+only the fragment path, slide range, assumptions, and any missing content.
+
+After sub-agents finish, the main agent must merge fragments deterministically
+instead of manually reading all fragment HTML into model context:
+
+```bash
+${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/merge_html_fragments.js" \
+  --css drafts/common.css \
+  --out deck.html \
+  --title "Deck title" \
+  drafts/slides_01_04.html drafts/slides_05_08.html drafts/slides_09_12.html
+```
+
+The merge step validates that fragments contain only slide sections, slide
+numbers are unique and continuous from `01`, and forbidden tags such as
+`<style>` or `<script>` did not leak from a sub-agent. If a fragment fails, fix
+or rerun only that slide range, then merge again.
+
 ## Office Raccoon Runtime Notes
 
 Office Raccoon may expose only this `SKILL.md` through `get_skill`, so keep critical generation constraints in this file, not only in references.
 
 - Use `$BOX_AGENT_NODE`, `$BOX_AGENT_NPM`, and `$BOX_AGENT_PYTHON` when they are available; otherwise use `node`, `npm`, and `python3`.
 - Check PptxGenJS with `${BOX_AGENT_NODE:-node} -e "require.resolve('pptxgenjs')"`. For HTML editable export, do not check npm `dom-to-pptx`; confirm the bundled converter exists at `scripts/dom-to-pptx.bundle.js`.
-- For HTML-first decks, use `scripts/html_to_editable_pptx.js` as the export entrypoint. It runs `scripts/html_self_check.js --dom-to-pptx`, creates preview PNGs for QA, loads `scripts/dom-to-pptx.bundle.js`, and writes the editable PPTX. The CLI defaults `--svg-vector false` for higher visual fidelity; use `--svg-vector true` only when editable vector SVGs are explicitly preferred.
-- Before exporting an HTML-first deck, run `scripts/html_self_check.js deck.html --dom-to-pptx --report qa/html_self_check.json` or rely on `scripts/html_to_editable_pptx.js`, which writes that report internally. Fix self-check failures before export.
-- If self-check returns an error, inspect `qa/html_self_check.json` or rerun with an explicit `--report` path and summarize the concrete failing selectors/slides. Do not say the error had no detail until the report file has been checked.
-- Do not create a local skip-check exporter or call the converter bundle directly after self-check fails. The official export path is `scripts/html_to_editable_pptx.js`; failing checks are design fixes or controlled acceptances, not warnings to bypass. Use `--allow-self-check-issues` only after up to 3 focused repair rounds and only when the remaining issues are acceptable after visual review.
+- For HTML-first decks, use `scripts/html_to_editable_pptx.js` as the export entrypoint. It runs `scripts/html_self_check.js --dom-to-pptx --allow-local-images`, creates preview PNGs for QA, temporarily inlines local `<img>` assets for export, loads `scripts/dom-to-pptx.bundle.js`, and writes the editable PPTX. The source `deck.html` may keep readable relative paths such as `assets/generated/slide-03-hero.png`; do not bloat it with large `data:` images unless the asset is tiny. The CLI defaults `--svg-vector false` for higher visual fidelity; use `--svg-vector true` only when editable vector SVGs are explicitly preferred.
+- If self-check returns an error, inspect `qa/html_self_check.json` or rerun with an explicit `--report` path and summarize the concrete failing selectors/slides. Do not say the error had no detail until the report file has been checked. Fix `deck.html` and rerun; after at most 3 focused repair rounds, use `--allow-self-check-issues` only for small known issues that visual QA accepts. If severe issues remain, report `Editable PPTX export: BLOCKED (HTML self-check failed)`.
 - If PptxGenJS is missing in Office Raccoon, install into the stable app support prefix, for example `${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" pptxgenjs` on macOS. Do not install npm `dom-to-pptx` for editable HTML export; use the bundled `scripts/dom-to-pptx.bundle.js`. Do not install into a per-session `mnt/<session-id>` directory unless the user only needs a temporary one-session dependency.
 - A browser host means a real renderer with DOM layout APIs such as `DOMParser`, `getComputedStyle()`, and `getBoundingClientRect()`. Electron renderer or an in-app import/export bridge can satisfy this; an Electron main process or agent child process by itself cannot.
-- The provided CLI exporter, `scripts/html_to_editable_pptx.js`, uses Playwright as its browser host. Before committing to an HTML-first deck, check export readiness with `${BOX_AGENT_NODE:-node} scripts/check_html_export_env.js` or a host renderer probe. If Playwright npm, Chromium, and host renderer are all missing, explain that the browser export environment is missing and ask the user to choose `HTML` or `PPTX` before continuing. If they choose HTML, deliver `deck.html` and report `Editable PPTX export: BLOCKED (missing browser host)`. If they choose PPTX, use native PptxGenJS. If they want setup instead, install Playwright into `OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-$HOME/Library/Application Support/office-raccoon}}"` with `${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" playwright`, then download Chromium with `"$OFFICE_RACCOON_NODE_PREFIX/node_modules/.bin/playwright" install chromium`.
+- The provided CLI exporter, `scripts/html_to_editable_pptx.js`, uses Playwright as its browser host. The creation workflow below owns the preflight and missing-browser route choice. If setup is requested, install Playwright into `OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-$HOME/Library/Application Support/office-raccoon}}"` with `${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" playwright`, then download Chromium with `"$OFFICE_RACCOON_NODE_PREFIX/node_modules/.bin/playwright" install chromium`.
 - Do not run `npm install` inside the deliverable project folder. Install reusable Node dependencies only into the managed Office Raccoon app support prefix, for example `${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" pptxgenjs`.
 - Do not create a new deck through `execute_code` with `python-pptx`, even if the session is classified as `data_analysis`. After data extraction, switch back to the HTML-first workflow for deck creation.
 - PDF to PNG rendering uses Poppler `pdftoppm` when available. If Poppler is missing, `scripts/render_pptx.py` falls back to Node pdf.js and may install `pdfjs-dist` plus `@napi-rs/canvas` into the same managed Office Raccoon Node prefix.
 - Avoid shell patterns commonly blocked by the permission engine: `rm -rf`, any shell redirect such as `> file`, redirects to `/dev/null`, redirects to absolute paths, and inline heredoc scripts when a normal script file will do.
 - In Office Raccoon, keep temporary logs, previews, generated images, and QA outputs inside the current workspace or the requested output folder. Do not write to `/tmp`, `/var/tmp`, or other absolute temp locations.
-- Never use shell redirect to save QA output, even to the workspace. Do not write commands like `tool output > /Users/.../qa.txt` or `tool output > qa/package_check.txt`. Prefer helper scripts that write files directly, or tools with explicit output arguments such as `--out qa/diff`, `--out rendered`, or `output_path: "qa/visual_review.md"`.
+- Never use shell redirect to save QA output, even to the workspace. Do not write commands like `tool output > /Users/.../qa.txt` or `tool output > qa/package_check.txt`. Prefer helper scripts that write files directly, or tools with explicit output arguments such as `--out rendered`.
 - Prefer writing a short `.js` or `.py` helper file with the file tool, then running it. Do not use inline heredocs such as `python - <<'PY'`. For package checks, prefer Python `zipfile` or Node `adm-zip` style reads over extracting a temp directory and deleting it.
 - In Node QA helpers, do not call `execFileSync()` with a full shell command string. Use `execFileSync("unzip", ["-l", pptxPath])`, `execFileSync("unzip", ["-p", pptxPath, partPath])`, or use `execSync()` only when shell syntax is truly required.
 - Prefer the provided Python QA helpers over ad-hoc `unzip` commands. If a Node helper is needed, validate PPTX package parts by invoking binaries with argument arrays or by using a zip library.
 - Do not use `sed` for directory listing, script discovery, or output truncation. macOS/BSD sed and GNU sed differ, and the permission parser can misread sed expressions that contain `/.../` as absolute paths. Use `find path -maxdepth 2 -type f | sort | head -n 100`, `ls -la path`, `rg --files path`, or a small Node/Python helper instead.
 - Do not manually probe Quick Look with commands such as `qlmanage -h >/dev/null`. Run `scripts/render_pptx.py`; it owns Quick Look discovery and fallback behavior.
-- For visual QA, do not stop at "preview images generated". Use the `vision_review` tool when it is available, pass actual PNG/JPG slide images as image inputs, and require a short per-slide verdict such as `slide-03: PASS` or `slide-03: ISSUE text clipped at footer`.
-- Before calling `vision_review`, create compressed review-size copies with `scripts/make_vision_inputs.js slides --out qa/vision_inputs` or the equivalent rendered-image directory. Pass `qa/vision_inputs/slide-*.jpg` to the vision tool by default. Keep original 1920px previews for comparison; the smaller copies are only for visual model review.
-- Review every individual `qa/vision_inputs/slide-*.jpg`. For decks with 10 or more slides, batch review-size images in groups of 1-3 slides by default to avoid request-size errors; merge the batch reports into `qa/visual_review.md`. A contact sheet may be included as an overview, but it is not a substitute for per-slide inputs when there are 20 or fewer slides.
-- If `vision_review` still fails with request-size errors, rerun `make_vision_inputs.js` with `--max-width 720 --quality 0.76` and keep the same 1-3 slide batch size. Do not fall back to contact-sheet-only PASS.
-- For visual QA, generate a contact sheet with `scripts/make_contact_sheet.js slides --out qa/vision-contact-sheet.png` as review material only. If `vision_review` is unavailable or fails, report `Visual inspection: BLOCKED` instead of claiming PASS.
-- To "look at images", call `vision_review` or another real image-capable tool with the image files. Passing local image paths as normal text, shell-only checks, dimensions, histograms, OCR/text extraction, and pixel diff do not count as looking at the image.
-- The contact sheet is not the verdict. After `vision_review`, write `qa/visual_review.md` in the deck output folder with `Reviewed:` image paths and per-slide PASS/ISSUE results. If `qa/visual_review.md` is missing, report `Visual inspection: BLOCKED`.
-- For HTML-first decks, if both source preview images and PPTX-rendered images exist, run `scripts/compare_slide_images.js slides rendered --out qa/diff`. This checks DOM-to-PPTX drift and is separate from human/vision visual inspection.
 - During execution, send at most one short status update per meaningful phase: source created, export attempted, QA running, fix applied, final handoff. Do not stream a running diary of planned next commands.
 - When several steps have already happened, format them as a checklist with one result per line. Do not join setup, generation, QA, rendering, and limitations into one paragraph.
 - If reporting several checks, use a compact checklist instead of a run-on paragraph.
@@ -130,29 +161,34 @@ Office Raccoon may expose only this `SKILL.md` through `get_skill`, so keep crit
 
 Use this path when there is no existing template or the user wants a fresh deck.
 
-1. Decide slide size, audience, visual tone, and data sources from the user request.
+1. Start HTML-first setup before content work: set the `.slide` canvas to
+   exactly `1920px × 1080px`; if final `.pptx` output is expected, run
+   `scripts/check_html_export_env.js` or an equivalent host-renderer check.
+   When Playwright/Chromium and host renderer are missing, stop route selection
+   and ask the user to choose `HTML` or `PPTX`.
+2. Decide audience, visual tone, and data sources from the user request.
    Read `references/outline.md` and decide whether a separate `outline.json` is
    actually needed. If the user's prompt already provides enough page-level
    structure or content, preserve it and do not invent a deeper storyline; use
    the prompt itself as the outline. If the prompt is broad, evidence-heavy, or
    structurally unclear, create `outline.json` and validate it with
    `scripts/validate_outline.js` before writing `deck.html`.
-2. Choose route:
+3. Choose route:
    - `HTML-first editable` is the default route for every new deck, including ordinary business decks, BP decks, reports, summaries, teaching decks, data stories, and "make/generate/create PPTX" requests.
    - It uses `dom-to-pptx` as the final exporter.
-   - If final `.pptx` output is expected, preflight the browser export environment with `scripts/check_html_export_env.js` or the host renderer. When Playwright/Chromium and host renderer are missing, stop route selection and ask the user to choose `HTML` or `PPTX`.
    - `Native editable` is an exception for new decks. Use it for new deck creation only after user confirmation; use it directly for editing existing `.pptx` files or preserving supplied templates.
    - If choosing `Native editable` for a new deck, confirm with the user first and state the reason, such as "PowerPoint-native editable charts are required", "you confirmed direct PPT generation over HTML-first editable", or "you chose PPTX after the browser export preflight was blocked".
    - HTML self-check or export difficulty is not a valid reason to choose native editable. Keep fixing HTML-first unless the user confirms a route change. Do not create a skip-check script or direct-bundle exporter to bypass self-check; use the official `--allow-self-check-issues` export flag only after the repair-round rule above.
    - `python-pptx` is not a creation mode for new decks. Treat it as a narrow editing/inspection fallback only.
-3. For HTML-first editable decks, read `references/html-first.md` and `references/html-editable.md`, create `deck.html`, run HTML self-check with `--dom-to-pptx`, keep `qa/html_self_check.json`, generate preview PNGs, make review-size copies under `qa/vision_inputs/`, call `vision_review` on every compressed review-size slide JPG in 1-3 slide batches for decks with 10+ slides, and fix visible issues.
-4. Export with `scripts/html_to_editable_pptx.js`; it must load the skill-local `scripts/dom-to-pptx.bundle.js`.
-5. Render the exported PPTX and inspect for DOM-to-PPTX drift.
-6. For native editable decks, read `references/pptxgenjs.md`, create a PptxGenJS script, and keep dimensions in inches.
-7. Build complete slides with real content, charts, images, alt text or notes where practical, and consistent spacing.
-8. Generate the `.pptx`.
-9. Run the required QA gate below. Do not mark QA complete after only checking file existence, slide count, or zip integrity.
-10. Inspect rendered slides and HTML-first preview slides, then fix visual issues before final delivery.
+4. Plan image assets before writing the final HTML. Create or update `assets/generated/manifest.json` with an `image_plan` entry for each slide that needs a visual decision. Each entry must say `generate`, `use_existing`, `draw_in_html`, or `skip`, with the reason, kind, placement, aspect ratio, prompt when generating, target size, and alt text. Generate images only for slides where the visual materially improves understanding or presentation quality. When generating, pass a supported preset `size` from `references/html-first.md` rather than arbitrary dimensions; for normal 16:9 slide heroes/backgrounds prefer `2848x1600`, and for square spot illustrations prefer `2048x2048`. Save generated images under `assets/generated/`; reference them from `deck.html` with relative paths. Keep all generated assets inside the workspace or requested output folder. If no image-generation tool is available, do not invent a generated file; either mark the item `blocked` in the manifest or use a non-generated design alternative.
+5. For HTML-first editable decks, read `references/html-first.md` and `references/html-editable.md`. For decks with 6+ slides, dense source material, or likely large HTML, create `drafts/common.css` and slide fragments first, then merge them with `scripts/merge_html_fragments.js` into `deck.html`. If direct authoring is safe, create `deck.html` with the same 1920x1080 canvas. Run HTML self-check with `--dom-to-pptx --allow-local-images`, keep `qa/html_self_check.json`, generate preview PNGs, and fix visible issues.
+6. Export with `scripts/html_to_editable_pptx.js`; it must load the skill-local `scripts/dom-to-pptx.bundle.js`.
+7. Render the exported PPTX for QA.
+8. For native editable decks, read `references/pptxgenjs.md`, create a PptxGenJS script, and keep dimensions in inches.
+9. Build complete slides with real content, charts, images, alt text or notes where practical, and consistent spacing.
+10. Generate the `.pptx`.
+11. Run the required QA gate below. Do not mark QA complete after only checking file existence, slide count, or zip integrity.
+12. Inspect rendered slides for visual issues and fix before final delivery.
 
 Read `references/html-first.md` and `references/html-editable.md` before writing
 any new HTML-first deck. Read
@@ -243,24 +279,19 @@ Before final response for any created or modified deck, read `references/qa.md` 
 
 Hard gates that must remain visible here:
 
-- Run package validation, text extraction, placeholder scan, render, and visual inspection.
+- Run package validation, text extraction, placeholder scan, and render.
 - Confirm slide count, slide order, and visible page numbers. Page numbers must match the actual order, for example `03 / 08` on slide 3 of an 8-slide deck. Cover slides may omit a number only if the rest start at `02 / NN`.
-- For HTML-first decks, run HTML self-check with `--dom-to-pptx` before export. Treat it as the first QA gate, but not as a substitute for visual inspection. A completed HTML-first deliverable should include `qa/html_self_check.json`; if that file is missing, report HTML self-check as `BLOCKED`, not passed.
-- For HTML-first decks, compare source preview images to PPTX-rendered images when rendering is available. Treat a non-empty PNG check as insufficient.
+- For HTML-first decks, run HTML self-check with `--dom-to-pptx --allow-local-images` before export. Treat it as the first QA gate. A completed HTML-first deliverable should include `qa/html_self_check.json`; if that file is missing, report HTML self-check as `BLOCKED`, not passed.
 - Render with `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py output.pptx --out rendered`; do not replace this with `command -v soffice`, `unzip -t`, slide count, or a single title extraction.
 - Do not pre-check `soffice` and skip rendering yourself. Always call `render_pptx.py`; that script owns renderer discovery, Quick Look fallback, and user-facing missing-LibreOffice guidance.
-- Do not pass `--format png` for visual-model inputs unless a PNG is explicitly required; the default JPG output is intentionally compressed to reduce request size.
+- Do not pass `--format png` unless a PNG is explicitly required; the default JPG output is intentionally compressed to reduce file size.
 - In Office Raccoon, call helper scripts through the active skill directory if needed, for example `PPTX_SKILL_DIR="${BOX_AGENT_PPTX_SKILL_DIR:-$HOME/.box-agent/skills/pptx}"` and then `${BOX_AGENT_PYTHON:-python3} "$PPTX_SKILL_DIR/scripts/render_pptx.py" output.pptx --out rendered`.
-- Treat OOXML checks as structural QA only. They cannot replace rendering or visual inspection.
-- Treat preview image existence as capture QA only. It cannot replace visual inspection of the image content.
-- Any source or deck change after QA invalidates earlier render, image comparison, and visual-review results. Rerun the affected checks, or mark those checks `STALE/BLOCKED` in the final report.
-- If the permission engine blocks rerendering after a fix, do not reuse pre-fix visual QA as proof for the final deck. Report the final visual QA as `BLOCKED after fix` and name the permission error.
-- For visual inspection, first create review-size images under `qa/vision_inputs/`, then call `vision_review` with every produced review-size slide image whenever the tool is available. Review blank/near-blank slides, low resolution, blurry text, clipped text, overlaps, bad crop, hidden content, poor contrast, missing images/charts, and broken layout.
-- Include the reviewed individual slide image paths in the QA report. A contact sheet path alone is acceptable only as an additional overview or when individual images are unavailable and the report clearly says what was blocked.
-- Require `qa/visual_review.md` for completed visual QA. A generated contact sheet alone is not evidence that the images were inspected.
-- Keep one final visual QA verdict at `qa/visual_review.md`. If you create batch reports such as `visual_review_01_03.md`, merge them into the final report and ensure no stale ISSUE/PASS report contradicts the final answer.
+- Treat OOXML checks as structural QA only. They cannot replace rendering.
+- Treat preview image existence as capture QA only. It does not prove layout correctness.
+- Any source or deck change after QA invalidates earlier render results. Rerun the affected checks, or mark those checks `STALE/BLOCKED` in the final report.
+- If the permission engine blocks rerendering after a fix, do not reuse pre-fix QA results as proof for the final deck. Report the final QA as `BLOCKED after fix` and name the permission error.
 - Do not leave empty QA artifacts. If an inspect/report file is 0 bytes or failed to generate, rerun the check or delete it and report the check as `BLOCKED`.
-- If no rendered slide images or preview images are produced, report visual QA as `BLOCKED` and name the missing renderer or conversion failure.
+- If no rendered slide images or preview images are produced, report rendering QA as `BLOCKED` and name the missing renderer or conversion failure.
 - If Quick Look is used because `soffice` is missing, report that LibreOffice is required for full rendering and include `https://www.libreoffice.org/download/download-libreoffice/`.
 - Keep QA as a separate todo item with visible sub-results.
 
@@ -275,7 +306,7 @@ Hard gates that must remain visible here:
 - Avoid generic placeholder silhouettes for named people. If a real or generated portrait is unavailable, use a deliberate non-portrait treatment such as jersey number, nameplate, career timeline, quote card, heatmap, or emblem.
 - Use consistent margins and alignment. Leave enough space around titles, footers, and citations.
 - Clean deliverable folders before final handoff: remove `.DS_Store`, failed scratch files, empty reports, and duplicate stale QA files unless they are explicitly referenced as intermediate evidence.
-- Do not create a ZIP package unless the user asks for a packaged archive. By default, deliver the `.pptx`, source file(s), speaker notes, and QA report as normal files and list their paths.
+- Do not create a ZIP package unless the user asks for a packaged archive. By default, deliver the `.pptx`, source file(s), and speaker notes as normal files and list their paths.
 
 ## OpenAI Tooling Notes
 
@@ -292,8 +323,8 @@ Use this structure:
 
 1. `Created`: the created or modified `.pptx` path.
 2. `Source`: any generation script or supporting files created.
-3. `QA`: one line each for package validation, text extraction, placeholder scan, rendering, image comparison, and visual inspection.
+3. `QA`: one line each for package validation, text extraction, placeholder scan, and rendering.
 4. `Fixes`: visual or technical issues found and corrected.
-5. `Limitations`: skipped visual QA, Quick Look-only rendering, missing fonts, unsupported embedded objects, unavailable dependencies, or any remaining risk.
+5. `Limitations`: skipped rendering, Quick Look-only rendering, missing fonts, unsupported embedded objects, unavailable dependencies, or any remaining risk.
 
 If any QA step is blocked, say `BLOCKED` for that step instead of folding it into a success sentence.

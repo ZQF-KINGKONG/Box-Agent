@@ -1093,15 +1093,17 @@ Output formats:
         return bool(re.search(r"\bPresentation\s*\(\s*\)", code))
 
     def _get_workspace(self, session_id: str) -> Path:
-        """Get workspace directory for a session.
+        """Get the directory the kernel chdirs into for a session.
 
-        Returns the workspace root directly so that uploaded files
-        (materialized by the client into workspace root) are accessible
-        via relative paths like ``pd.read_csv('data.csv')``.
+        Returns ``{workspace_dir}/output/`` so every artifact the user code
+        writes (``plt.savefig("chart.png")``, ``df.to_csv("out.csv")``) lands
+        in the canonical artifact location. The user can still reach the
+        workspace root via ``../`` if they need to read uploaded inputs.
         """
+        from box_agent.core import ensure_output_dir
         if self.workspace_dir:
-            return Path(self.workspace_dir)
-        return SANDBOX_BASE_DIR / "sessions" / session_id
+            return ensure_output_dir(self.workspace_dir)
+        return ensure_output_dir(SANDBOX_BASE_DIR / "sessions" / session_id)
 
     @staticmethod
     def _extract_missing_module(error: str) -> str | None:

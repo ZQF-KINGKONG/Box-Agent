@@ -23,7 +23,8 @@ process.env.NODE_PATH = process.env.NODE_PATH
 Module._initPaths();
 
 function usage() {
-  console.error("Usage: html_self_check.js deck.html [--width 1920] [--height 1080] [--dom-to-pptx] [--report qa/html_self_check.json] [--verbose]");
+  console.error("Usage: html_self_check.js deck.html [--width W] [--height H] [--dom-to-pptx] [--allow-local-images] [--report qa/html_self_check.json] [--verbose]");
+  console.error("  If --width/--height are omitted, the first .slide element's CSS size is auto-detected.");
   process.exit(2);
 }
 
@@ -31,9 +32,10 @@ function parseArgs(argv) {
   if (argv.length < 1) usage();
   const opts = {
     html: argv[0],
-    width: 1920,
-    height: 1080,
+    width: null,
+    height: null,
     domToPptx: false,
+    allowLocalImages: false,
     report: null,
     verbose: false,
   };
@@ -48,6 +50,8 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg === "--dom-to-pptx") {
       opts.domToPptx = true;
+    } else if (arg === "--allow-local-images") {
+      opts.allowLocalImages = true;
     } else if (arg === "--report" && value) {
       opts.report = value;
       i += 1;
@@ -57,7 +61,8 @@ function parseArgs(argv) {
       usage();
     }
   }
-  if (!Number.isFinite(opts.width) || !Number.isFinite(opts.height)) usage();
+  if (opts.width !== null && !Number.isFinite(opts.width)) usage();
+  if (opts.height !== null && !Number.isFinite(opts.height)) usage();
   return opts;
 }
 
@@ -82,9 +87,9 @@ function printBrowserInstallHint() {
   console.error("Without a browser host, ask the user to choose HTML delivery or native PptxGenJS PPTX.");
 }
 
-async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx = false) {
+async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx = false, allowLocalImages = false) {
   return page.evaluate(
-    ({ expectedWidth, expectedHeight, domToPptx }) => {
+    ({ expectedWidth, expectedHeight, domToPptx, allowLocalImages }) => {
       const issues = [];
       const warnings = [];
       const slideEls = Array.from(document.querySelectorAll(".slide"));
@@ -103,6 +108,27 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         { name: "transition", re: /(?:^|[;\s])transition(?:-\w+)?\s*:/i },
       ];
       const px = value => Number.parseFloat(String(value || "0")) || 0;
+      const ratioText = (width, height) => {
+        if (!width || !height) return "unknown ratio";
+        return (width / height).toFixed(4);
+      };
+      const sizeHint = (actualWidth, actualHeight) => {
+        const expectedRatio = expectedWidth / expectedHeight;
+        const actualRatio = actualWidth / actualHeight;
+        const ratioDelta = Math.abs(actualRatio - expectedRatio);
+        const roundedWidth = Math.round(actualWidth);
+        const roundedHeight = Math.round(actualHeight);
+        const parts = [
+          `HTML-first editable decks expect a fixed ${expectedWidth}x${expectedHeight} canvas.`,
+        ];
+        if (ratioDelta > 0.01) {
+          parts.push(
+            `The actual aspect ratio is ${ratioText(actualWidth, actualHeight)}, expected ${ratioText(expectedWidth, expectedHeight)}.`
+          );
+        }
+        parts.push(`Set .slide { width: ${expectedWidth}px; height: ${expectedHeight}px; } and remove scaling wrappers or viewport-sized slides.`);
+        return parts.join(" ");
+      };
       const isVisible = (el, style = getComputedStyle(el)) => {
         const rect = el.getBoundingClientRect();
         return (
@@ -128,6 +154,14 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         }
         return null;
       };
+      const isExportableImageSrc = src => {
+        if (/^(https?:\/\/|data:)/i.test(src)) return true;
+        if (!allowLocalImages) return false;
+        if (/^file:/i.test(src)) return true;
+        if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return false;
+        if (/^\/\//.test(src)) return false;
+        return src && !src.startsWith("/");
+      };
 
       if (!slideEls.length) {
         issues.push("No .slide elements found.");
@@ -150,7 +184,7 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         const slideName = `slide-${String(slideIndex + 1).padStart(2, "0")}`;
         if (Math.abs(slideRect.width - expectedWidth) > 2 || Math.abs(slideRect.height - expectedHeight) > 2) {
           issues.push(
-            `${slideName}: .slide size is ${Math.round(slideRect.width)}x${Math.round(slideRect.height)}, expected ${expectedWidth}x${expectedHeight}.`
+            `${slideName}: .slide size is ${Math.round(slideRect.width)}x${Math.round(slideRect.height)}, expected ${expectedWidth}x${expectedHeight}. ${sizeHint(slideRect.width, slideRect.height)}`
           );
         }
         if (slideStyle.position === "static") {
@@ -321,8 +355,8 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
           const name = labelFor(img, slideIndex);
           const src = img.getAttribute("src") || "";
           if (domToPptx) {
-            if (!/^(https:\/\/|data:)/i.test(src)) {
-              issues.push(`${name}: dom-to-pptx images must use https:// or data: URLs, not relative/file paths.`);
+            if (!isExportableImageSrc(src)) {
+              issues.push(`${name}: dom-to-pptx images must use http(s), data:, or exporter-supported local relative/file URLs.`);
             }
             if (img.getAttribute("loading") === "lazy") {
               issues.push(`${name}: remove loading="lazy"; it can race dom-to-pptx export.`);
@@ -341,7 +375,7 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         warnings,
       };
     },
-    { expectedWidth, expectedHeight, domToPptx }
+    { expectedWidth, expectedHeight, domToPptx, allowLocalImages }
   );
 }
 
@@ -365,14 +399,58 @@ async function main() {
     printBrowserInstallHint();
     throw error;
   }
-  const page = await browser.newPage({
-    viewport: { width: opts.width, height: opts.height },
-    deviceScaleFactor: 2,
+
+  const probeViewport = { width: opts.width || 1920, height: opts.height || 1080 };
+  let page = await browser.newPage({
+    viewport: probeViewport,
+    deviceScaleFactor: 1,
   });
   await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
   await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready);
-  const report = await runHtmlSelfCheck(page, opts.width, opts.height, opts.domToPptx);
+
+  let detectedWidth = opts.width;
+  let detectedHeight = opts.height;
+
+  if (detectedWidth === null || detectedHeight === null) {
+    const detected = await page.evaluate(() => {
+      const s = document.querySelector(".slide");
+      if (!s) return null;
+      const cs = getComputedStyle(s);
+      return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
+    });
+    if (detected && detected.w > 0 && detected.h > 0) {
+      detectedWidth = detected.w;
+      detectedHeight = detected.h;
+    } else {
+      detectedWidth = 1920;
+      detectedHeight = 1080;
+    }
+  }
+
+  const needsResize =
+    Math.abs(probeViewport.width - detectedWidth) > 2 ||
+    Math.abs(probeViewport.height - detectedHeight) > 2;
+  if (needsResize) {
+    await page.close();
+    page = await browser.newPage({
+      viewport: { width: detectedWidth, height: detectedHeight },
+      deviceScaleFactor: 2,
+    });
+    await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+    await page.evaluate(() => document.fonts && document.fonts.ready);
+  } else {
+    await page.setViewportSize({ width: detectedWidth, height: detectedHeight });
+  }
+
+  const report = await runHtmlSelfCheck(
+    page,
+    detectedWidth,
+    detectedHeight,
+    opts.domToPptx,
+    opts.allowLocalImages
+  );
   await browser.close();
 
   const reportText = JSON.stringify(report, null, 2);

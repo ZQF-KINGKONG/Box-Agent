@@ -10,26 +10,26 @@ evidence explicit before visual layout starts without overriding user intent.
 
 ## Decision Gate
 
-Create a separate `outline.json` when one or more of these are true:
+Create `outline.json` by default for any new deck request. The bar for
+skipping the outline is high: only skip when the user's prompt already
+contains a page-by-page breakdown with titles, content, and order that can
+be mapped directly to `deck.html` without structural judgment.
+
+Typical cases that benefit from an outline:
 
 - The user gives only a broad topic, goal, or document type.
-- The deck is narrative-heavy, such as BP, strategy, consulting, research,
-  investment, product launch, annual review, or data-story work.
+- The user provides partial structure (some titles, some content) that needs
+  gap-filling, reordering, or evidence-to-slide mapping.
+- The deck is narrative-heavy (BP, strategy, consulting, research,
+  investment, product launch, annual review, data-story, etc.).
 - Page count, slide order, audience, evidence, or key claims are unclear.
-- The request contains raw material that needs grouping, prioritization, or
-  evidence-to-slide mapping.
 - The prompt asks for "帮我规划", "大纲", "结构", "storyline", or equivalent.
 
-Do not create a separate deep outline when:
+Only skip the outline when **all** of these are true:
 
-- The user already specifies each page or a sufficiently detailed structure.
-- The task is a narrow edit to an existing deck.
-- The user asks for fast direct generation and the content is already clear.
-- Adding a storyline would require inventing facts, data, claims, or strategy.
-
-In those cases, preserve the user's structure. If useful, keep only a minimal
-internal or file-local mapping from user-provided slides to `deck.html`; do not
-expand, reorder, or add claims unless the user asked for that.
+- The user already specifies every page with title, content, and order.
+- The structure is complete enough to write `deck.html` directly.
+- No grouping, prioritization, or narrative arc decisions are needed.
 
 ## Required Output
 
@@ -47,6 +47,11 @@ beside the future `deck.html`:
       "page": 1,
       "title": "Slide title",
       "message": "One core claim this slide proves",
+      "bullets": [
+        "3-5 concise points that support the message",
+        "Each point should be a fact, argument, or data highlight",
+        "Keep bullets parallel in structure and length"
+      ],
       "layout": "cover | section | comparison | dashboard | timeline | matrix | chart | cards | closing",
       "visual": "Main chart/card/composition to build",
       "evidence": ["Data source, user-provided fact, assumption, or empty array for non-evidence slides"],
@@ -87,6 +92,8 @@ details into `outline.json`.
 - Titles should be short and presentation-ready.
 - `message` should be a claim, not a topic label. Prefer "AI cuts manual QC
   scheduling from hours to minutes" over "Product overview".
+- `bullets` should have 2-5 items; each supports `message` and maps to
+  distinct content on the slide. Avoid restating the title.
 - Avoid repetitive slides with the same title, message, layout, or visual.
 - Use a section-divider slide only when it helps pacing.
 - Put source assumptions in `evidence` or `notes`; do not hide missing data.

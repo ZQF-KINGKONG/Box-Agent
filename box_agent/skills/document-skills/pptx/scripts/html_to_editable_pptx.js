@@ -3,6 +3,7 @@ const fs = require("fs");
 const Module = require("module");
 const path = require("path");
 const { execFileSync } = require("child_process");
+const { fileURLToPath, pathToFileURL } = require("url");
 
 function officeRaccoonPrefix() {
   if (process.env.BOX_AGENT_NODE_PREFIX) return process.env.BOX_AGENT_NODE_PREFIX;
@@ -25,8 +26,85 @@ Module._initPaths();
 
 function usage() {
   console.log(
-    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width 1920] [--height 1080] [--svg-vector true|false] [--allow-self-check-issues] (default: false for pixel fidelity)"
+    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width W] [--height H] [--svg-vector true|false] [--allow-self-check-issues] (default: false for pixel fidelity)"
   );
+  console.log("  If --width/--height are omitted, the first .slide element's CSS size is auto-detected.");
+}
+
+function imageMimeType(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".svg") return "image/svg+xml";
+  if (ext === ".avif") return "image/avif";
+  return "application/octet-stream";
+}
+
+function localImagePathFromSrc(src, htmlPath) {
+  const value = String(src || "").trim();
+  if (!value || /^(https?:\/\/|data:|blob:)/i.test(value) || /^\/\//.test(value)) {
+    return null;
+  }
+  try {
+    if (/^file:/i.test(value)) {
+      return fileURLToPath(value);
+    }
+    if (/^[a-z][a-z0-9+.-]*:/i.test(value)) {
+      return null;
+    }
+    const base = pathToFileURL(`${path.dirname(htmlPath)}${path.sep}`);
+    return fileURLToPath(new URL(value, base));
+  } catch {
+    return null;
+  }
+}
+
+function readLocalImageAsDataUrl(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Local image not found: ${filePath}`);
+  }
+  const bytes = fs.readFileSync(filePath);
+  return `data:${imageMimeType(filePath)};base64,${bytes.toString("base64")}`;
+}
+
+async function inlineLocalImagesForExport(page, htmlPath) {
+  const images = await page.evaluate(() =>
+    Array.from(document.querySelectorAll("img")).map((img, index) => ({
+      index,
+      src: img.getAttribute("src") || "",
+    }))
+  );
+  const replacements = images
+    .map(image => {
+      const filePath = localImagePathFromSrc(image.src, htmlPath);
+      if (!filePath) return null;
+      return {
+        index: image.index,
+        src: image.src,
+        filePath,
+        dataUrl: readLocalImageAsDataUrl(filePath),
+      };
+    })
+    .filter(Boolean);
+  if (!replacements.length) return [];
+
+  await page.evaluate(items => {
+    const imgs = Array.from(document.querySelectorAll("img"));
+    items.forEach(item => {
+      const img = imgs[item.index];
+      if (!img) return;
+      img.setAttribute("data-original-src", item.src);
+      img.setAttribute("src", item.dataUrl);
+      img.removeAttribute("srcset");
+      img.removeAttribute("loading");
+    });
+  }, replacements);
+  await page.waitForFunction(() =>
+    Array.from(document.querySelectorAll("img")).every(img => img.complete && img.naturalWidth > 0)
+  );
+  return replacements.map(({ src, filePath }) => ({ src, filePath }));
 }
 
 function failUsage() {
@@ -44,8 +122,8 @@ function parseArgs(argv) {
     html: argv[0],
     pptx: argv[1],
     out: "slides",
-    width: 1920,
-    height: 1080,
+    width: null,
+    height: null,
     svgVector: false,
     allowSelfCheckIssues: false,
   };
@@ -70,7 +148,8 @@ function parseArgs(argv) {
       failUsage();
     }
   }
-  if (!Number.isFinite(opts.width) || !Number.isFinite(opts.height)) failUsage();
+  if (opts.width !== null && !Number.isFinite(opts.width)) failUsage();
+  if (opts.height !== null && !Number.isFinite(opts.height)) failUsage();
   return opts;
 }
 
@@ -118,6 +197,7 @@ function runSelfCheck(htmlPath, width, height, reportPath, allowIssues) {
         "--height",
         String(height),
         "--dom-to-pptx",
+        "--allow-local-images",
         "--report",
         reportPath,
       ],
@@ -157,7 +237,6 @@ async function main() {
   }
 
   fs.mkdirSync(qaDir, { recursive: true });
-  runSelfCheck(htmlPath, opts.width, opts.height, selfCheckReport, opts.allowSelfCheckIssues);
 
   const { chromium } = requireModule(
     "playwright",
@@ -175,18 +254,66 @@ async function main() {
     printBrowserInstallHint();
     throw error;
   }
-  const page = await browser.newPage({
-    viewport: { width: opts.width, height: opts.height },
-    deviceScaleFactor: 2,
-  });
 
-  await page.exposeFunction("__writePptxBase64", base64 => {
-    fs.writeFileSync(pptxPath, Buffer.from(base64, "base64"));
+  const probeViewport = { width: opts.width || 1920, height: opts.height || 1080 };
+  let page = await browser.newPage({
+    viewport: probeViewport,
+    deviceScaleFactor: 1,
   });
 
   await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
   await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready);
+
+  let detectedWidth = opts.width;
+  let detectedHeight = opts.height;
+
+  if (detectedWidth === null || detectedHeight === null) {
+    const detected = await page.evaluate(() => {
+      const s = document.querySelector(".slide");
+      if (!s) return null;
+      const cs = getComputedStyle(s);
+      return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
+    });
+    if (detected && detected.w > 0 && detected.h > 0) {
+      detectedWidth = detected.w;
+      detectedHeight = detected.h;
+    } else {
+      detectedWidth = 1920;
+      detectedHeight = 1080;
+    }
+    console.log(`Auto-detected slide size: ${detectedWidth}x${detectedHeight}`);
+  }
+
+  const needsResize =
+    Math.abs(probeViewport.width - detectedWidth) > 2 ||
+    Math.abs(probeViewport.height - detectedHeight) > 2;
+  if (needsResize) {
+    await page.close();
+    page = await browser.newPage({
+      viewport: { width: detectedWidth, height: detectedHeight },
+      deviceScaleFactor: 2,
+    });
+    await page.exposeFunction("__writePptxBase64", base64 => {
+      fs.writeFileSync(pptxPath, Buffer.from(base64, "base64"));
+    });
+    await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
+    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
+    await page.evaluate(() => document.fonts && document.fonts.ready);
+  } else {
+    await page.setViewportSize({ width: detectedWidth, height: detectedHeight });
+    await page.exposeFunction("__writePptxBase64", base64 => {
+      fs.writeFileSync(pptxPath, Buffer.from(base64, "base64"));
+    });
+  }
+
+  runSelfCheck(htmlPath, detectedWidth, detectedHeight, selfCheckReport, opts.allowSelfCheckIssues);
+
+  const inlinedImages = await inlineLocalImagesForExport(page, htmlPath);
+  if (inlinedImages.length) {
+    console.log(`Inlined ${inlinedImages.length} local image(s) for PPTX export.`);
+  }
+
   await page.addScriptTag({ path: bundlePath });
 
   const slides = await page.locator(".slide").elementHandles();
@@ -245,6 +372,7 @@ async function main() {
         previews,
         htmlSelfCheck: selfCheckReport,
         editableExport: "dom-to-pptx",
+        localImagesInlinedForExport: inlinedImages,
       },
       null,
       2

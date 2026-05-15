@@ -176,7 +176,7 @@ def test_data_analysis_prompt_includes_plot_contract_and_general_prompt_does_not
     analysis_prompt = agent._build_session_prompt("data_analysis", workspace=tmp_path)
 
     assert "文件交付规则" in general_prompt
-    assert "zip -r output.zip" in general_prompt
+    assert "zip -r bundle.zip" in general_prompt
     assert "Interactive Chart Data Output" not in general_prompt
     assert "<!--PLOT_DATA:" not in general_prompt
 

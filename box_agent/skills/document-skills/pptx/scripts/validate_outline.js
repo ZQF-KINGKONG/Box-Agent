@@ -128,6 +128,14 @@ function validate(outline, opts) {
       if (!text(slide[field])) issues.push(`${label}: missing ${field}`);
     }
 
+    if (!Array.isArray(slide.bullets)) {
+      warnings.push(`${label}: bullets missing, consider adding 2-5 supporting points`);
+    } else if (slide.bullets.length < 2) {
+      warnings.push(`${label}: bullets has fewer than 2 items; add more substance`);
+    } else if (slide.bullets.length > 5) {
+      warnings.push(`${label}: bullets has ${slide.bullets.length} items; trim to 5 or fewer`);
+    }
+
     if (!Array.isArray(slide.evidence)) {
       issues.push(`${label}: evidence must be an array, use [] for non-evidence slides`);
     }

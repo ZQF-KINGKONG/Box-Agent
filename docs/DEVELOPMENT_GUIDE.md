@@ -76,6 +76,7 @@ This project comes with pre-configured MCP (Model Context Protocol) tools that e
 **Configuration**: No API Key required, works out of the box
 
 **Capabilities**:
+
 - Store and retrieve information across sessions
 - Build knowledge graphs from conversations
 - Semantic search through stored memories
@@ -85,6 +86,7 @@ This project comes with pre-configured MCP (Model Context Protocol) tools that e
 #### Web Search - Web Search and Browse
 
 **Function**: Provides three powerful tools:
+
 - `search` - Web search capability
 - `parallel_search` - Execute multiple searches simultaneously
 - `browse` - Intelligent web browsing and content extraction
@@ -130,12 +132,12 @@ class MyTool(Tool):
     def name(self) -> str:
         """A unique name for the tool."""
         return "my_tool"
-    
+
     @property
     def description(self) -> str:
         """A description for the LLM to understand the tool's purpose."""
         return "My custom tool for doing something useful"
-    
+
     @property
     def parameters(self) -> Dict[str, Any]:
         """Parameter schema in JSON Schema format."""
@@ -154,22 +156,22 @@ class MyTool(Tool):
             },
             "required": ["param1"]
         }
-    
+
     async def execute(self, param1: str, param2: int = 10) -> ToolResult:
         """
         The main logic of the tool.
-        
+
         Args:
             param1: The first parameter.
             param2: The second parameter, with a default value.
-        
+
         Returns:
             A ToolResult object.
         """
         try:
             # Implement your logic here
             result = f"Processed {param1} with param2={param2}"
-            
+
             return ToolResult(
                 success=True,
                 content=result
@@ -193,7 +195,7 @@ tools = [
 agent = Agent(
     llm=llm,
     tools=tools,
-    max_steps=50
+    max_steps=100
 )
 ```
 

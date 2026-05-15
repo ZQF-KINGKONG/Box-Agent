@@ -145,26 +145,41 @@ class ConfirmationRequired:
 
 @dataclass(frozen=True)
 class ArtifactEvent:
-    """A file or image produced by tool execution (e.g. sandbox plot).
+    """A file produced by tool execution and landed under ``{workspace}/output/``.
 
-    Consumers use this to present rich previews instead of plain-text
-    placeholders like ``[foo.png]``.
+    All artifact-producing pathways (sandbox plots, write_file, sub-agent
+    drafts, PPT exports) emit this same structure so hosts have a single,
+    stable display contract.
 
     Attributes:
         tool_call_id: The tool call that produced this artifact.
-        artifact_type: One of ``"image"``, ``"file"``, ``"plot"``.
-        filename: Original filename (e.g. ``"chart.png"``).
-        path: Absolute path inside the sandbox workspace.
-        mime_type: MIME type if known (e.g. ``"image/png"``).
-        size_bytes: File size in bytes, or -1 if unknown.
+        kind: Coarse category derived from MIME — ``"image"``, ``"document"``,
+            ``"spreadsheet"``, ``"presentation"``, ``"data"``, ``"code"``,
+            ``"archive"``, or ``"file"`` (catch-all).
+        filename: Bare filename (e.g. ``"chart.png"``).
+        rel_path: Path relative to the workspace, forward-slash separated
+            (e.g. ``"output/chart.png"``). Hosts should prefer this over abs_path.
+        abs_path: Absolute filesystem path. Empty when the consumer cannot
+            access the local filesystem.
+        uri: ``file://`` URI for the artifact.
+        mime: MIME type (e.g. ``"image/png"``); falls back to
+            ``"application/octet-stream"`` when unknown.
+        size: File size in bytes, or ``-1`` if unavailable.
+        sha256: First 16 hex chars of the SHA-256 digest, used as a stable
+            cache/dedup key. Empty if the file could not be hashed.
+        produced_at: ISO 8601 timestamp of detection (with tz offset).
     """
 
     tool_call_id: str
-    artifact_type: str  # "image" | "file" | "plot"
+    kind: str
     filename: str
-    path: str
-    mime_type: str = "application/octet-stream"
-    size_bytes: int = -1
+    rel_path: str
+    abs_path: str
+    uri: str
+    mime: str = "application/octet-stream"
+    size: int = -1
+    sha256: str = ""
+    produced_at: str = ""
 
 
 # ── Summarization ───────────────────────────────────────────────

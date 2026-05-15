@@ -80,6 +80,31 @@ tools:
     execute_timeout: 60.0 # Tool execution timeout in seconds (default: 60)
     sse_read_timeout: 120.0 # SSE read timeout in seconds (default: 120)
 
+# ===== Image Generation Service =====
+# The built-in generate_image tool reads this block the same way LLM requests
+# read api_base/api_key/auth_file. If api_key is empty and the endpoint is a
+# hosted officev3 domain, Box-Agent reuses auth.json / BOX_AGENT_AUTH_TOKEN.
+image_generation:
+  endpoint: "http://10.158.136.99:9000/api/web/llm/v2/images/gen" # e.g. "https://your-service/v1/images/generations"
+  api_key: "" # optional dedicated bearer token; leave empty to reuse hosted auth
+  model: "gpt-image-1"
+  timeout: 300.0
+  # auth_file defaults to the top-level auth_file / auth.json next to config.yaml.
+  # auth_file: "/path/to/auth.json"
+#
+# Environment variables remain supported for host/runtime overrides:
+# BOX_AGENT_IMAGE_GENERATION_ENDPOINT, BOX_AGENT_IMAGE_GENERATION_API_KEY,
+# BOX_AGENT_IMAGE_GENERATION_TIMEOUT, BOX_AGENT_IMAGE_GEN_ENDPOINT,
+# BOX_AGENT_IMAGE_GEN_API_KEY.
+# For this image backend, prefer exact `size` values from the supported presets:
+# 1:1 2048x2048 / 3072x3072 / 4096x4096
+# 16:9 2848x1600 / 4096x2304 / 5504x3040
+# 9:16 1600x2848 / 2304x4096 / 3040x5504
+# 4:3 2304x1728 / 3456x2592 / 4704x3520
+# 3:4 1728x2304 / 2592x3456 / 3520x4704
+# 3:2 2496x1664 / 3744x2496 / 4992x3328
+# 2:3 1664x2496 / 2496x3744 / 3328x4992
+# 21:9 3136x1344 / 4704x2016 / 6240x2656
 
 # ===== officev3 Permission Settings =====
 # Optional. Only honored when this whole block is present in the loaded

@@ -18,21 +18,8 @@ HTML-to-editable-PPTX export and ask them to choose:
 - `PPTX`: switch to native PptxGenJS and create a directly editable PPTX, with
   different HTML/CSS fidelity tradeoffs.
 
-HTML self-check failures, text-slack warnings, Playwright errors, and render
-drift are not reasons to switch to PptxGenJS. Fix the HTML source and rerun this
-workflow, or report the specific blocker. Use native PptxGenJS for a new deck
-only after explicit user confirmation or when the user supplied a template /
-required native PowerPoint charts or tables.
-
-Do not bypass the HTML self-check. Never write a custom `export_skipcheck.js`,
-call `dom-to-pptx.bundle.js` directly to skip `scripts/html_self_check.js`, or
-patch the exporter to ignore a failed report. If `qa/html_self_check.json` has
-`"ok": false`, fix `deck.html` and rerun `scripts/html_to_editable_pptx.js`.
-Run at most 3 focused self-check repair rounds. After that, if only a small
-number of known, visually acceptable issues remain, continue only through the
-official exporter with `--allow-self-check-issues`, then report the unresolved
-issue count and complete render/visual QA. If severe blocking issues remain,
-report `Editable PPTX export: BLOCKED (HTML self-check failed)`.
+Route-change and self-check bypass rules live in `SKILL.md`. This reference adds
+HTML authoring details; do not use it to weaken the top-level workflow.
 
 Do not use `python-pptx` or `from pptx import Presentation` to create the final
 PPTX for a new deck. Python may be used for data preparation and QA helpers, but
@@ -41,7 +28,8 @@ DOM-to-PPTX exporter.
 
 ## Contract
 
-- Build a fixed-size HTML slide deck first.
+- Build a fixed-size HTML slide deck first. Before adding slide content, set
+  every `.slide` to exactly `width: 1920px; height: 1080px;`.
 - If the requested deliverable is final `.pptx`, preflight the browser export
   environment before writing the full HTML deck.
 - Before writing HTML, decide whether `references/outline.md` calls for a
@@ -49,7 +37,9 @@ DOM-to-PPTX exporter.
   skip it when the user's prompt is already a sufficient page-level outline.
   Never invent extra claims, data, or strategy just to make an outline look
   deeper.
-- Use one `.slide` element per page.
+- Use one `.slide` element per page. Do not author at `1280px × 720px`,
+  `1280px × 760px`, viewport-relative sizes, or scaled wrappers unless the user
+  explicitly requested a nonstandard output size.
 - Run the stricter HTML self-check profile with `--dom-to-pptx`.
 - Export with `scripts/html_to_editable_pptx.js`.
 - Keep the source HTML and generated preview images beside the output deck for
@@ -69,12 +59,15 @@ Create these files beside the output deck:
 
 ```text
 deck.html
+assets/
+  generated/
+    manifest.json
+    slide-03-hero.png
 slides/
   slide-01.png
   slide-02.png
 qa/
   html_self_check.json
-  visual_review.md
 output.pptx
 ```
 
@@ -104,6 +97,208 @@ Use one `.slide` element per page:
 </html>
 ```
 
+## Fragment Drafting
+
+For decks with 6 or more slides, dense source material, or likely large HTML,
+follow the fragment rules in `SKILL.md` before writing the final `deck.html`.
+The merge command is:
+
+```bash
+${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/merge_html_fragments.js" \
+  --css drafts/common.css \
+  --out deck.html \
+  --title "Deck title" \
+  drafts/slides_01_04.html drafts/slides_05_08.html drafts/slides_09_12.html
+```
+
+## Generated Images
+
+Plan generated images after the outline and before writing final slide HTML.
+Use image generation for visuals that should be bitmap assets, such as hero
+illustrations, product mockups, scene images, textures, photo-like backgrounds,
+and people-heavy visuals that should not be built from PowerPoint shapes.
+
+Do not generate images just to make a slide look busy, but do not be overly
+conservative either. Every slide must get an explicit image decision in
+`assets/generated/manifest.json`; use `generate` when a bitmap visual would
+make the message faster to understand or more memorable than typography,
+charts, icons, or HTML/CSS alone.
+
+### Image Decision Rules
+
+For each slide, choose exactly one primary visual lane:
+
+- `generate`: bitmap visual asset from `generate_image`
+- `use_existing`: supplied, licensed, screenshot, brand, product, person, or
+  source-backed image
+- `draw_in_html`: editable chart, diagram, timeline, icon cluster, map-like
+  schematic, or shape composition
+- `skip`: no image because text/data/editable composition is stronger
+
+Generate an image when two or more of these are true:
+
+- the user explicitly asks for an illustration, scene, poster, visual metaphor,
+  generated background, or image-rich style
+- a cover or divider needs a strong hero visual or atmospheric scene
+- an abstract concept needs a visual anchor, such as AI workflow, future city,
+  product experience, or system metaphor
+- a realistic or semi-realistic object, product mockup, environment, or texture
+  would be costly or awkward to build from shapes
+- people-heavy or portrait-like content would look poor if built from
+  PowerPoint/HTML primitives
+- consistent style matters more than showing a real-world source image
+- the slide is a single-message emotional, campaign, launch, vision, brand, or
+  closing slide where visual memorability matters
+- the visual can be placed as a side hero, framed card image, spot
+  illustration, or controlled background without making the main text
+  unreadable
+
+Do not generate an image when:
+
+- the slide is primarily data, table, KPI, roadmap, architecture, or process
+  content that should stay editable and information-dense
+- the image would be decorative filler and deleting it would not change the
+  message
+- a real product, real company, real location, real chart, screenshot, or named
+  person must be accurate
+- a native editable chart/table/diagram is the actual deliverable
+- the generated visual would sit behind body text and reduce readability
+- the slide can be stronger with typography, charts, icons, or simple vector
+  composition
+
+Use this practical scoring rule when unsure:
+
+- `+2`: cover, divider, closing, poster, launch, campaign, or vision slide
+- `+2`: user requested image-rich, illustration, poster, scene, visual metaphor,
+  or generated background
+- `+1`: abstract concept needs a metaphor or atmospheric anchor
+- `+1`: realistic object, mockup, environment, texture, or people scene
+- `+1`: bitmap can sit in a clear frame/hero area without covering body text
+- `-2`: primary value is editable data, table, KPI, roadmap, architecture,
+  timeline, process, or matrix
+- `-2`: accuracy requires a real product, screenshot, chart, person, company,
+  logo, or location
+- `-1`: deleting the image would not weaken the message
+
+Choose `generate` at score `2` or higher unless a negative accuracy/editability
+rule applies. Choose `draw_in_html` for editable analytical visuals. Choose
+`use_existing` for real/source-backed visuals. Choose `skip` only when the score
+is low and the slide is stronger without a bitmap.
+
+### Background vs Local Visual
+
+Prefer local visual assets over full-slide backgrounds. A local visual asset can
+be a right-side hero illustration, a card image, a scene crop, a mockup, a
+texture tile, or a small conceptual image placed inside the layout.
+
+Use a generated full-slide background only for:
+
+- cover slides
+- section dividers
+- poster-like single-message slides
+- event or campaign pages where the image is the primary message carrier
+
+When using a generated background, reserve a text-safe area before writing the
+prompt. The background must leave enough low-detail space for the title and key
+copy, and the HTML should add a controlled overlay when needed. Do not use
+complex generated backgrounds behind dense body text, data labels, charts, or
+tables.
+
+For content slides, prefer:
+
+- no generated image
+- a small or medium generated visual in a fixed frame
+- an HTML/CSS diagram, chart, icon cluster, or timeline
+- a subtle hand-authored texture or gradient rather than a generated background
+
+### Image Plan Manifest
+
+Before generating images, create or update `assets/generated/manifest.json`.
+Use this shape:
+
+```json
+{
+  "image_plan": [
+    {
+      "slide": "03",
+      "decision": "generate",
+      "kind": "hero_illustration",
+      "reason": "abstract AI workflow concept needs a visual anchor",
+      "placement": "right-side visual",
+      "aspect_ratio": "16:9",
+      "target_size": "2848x1600",
+      "prompt": "Editorial business illustration of ...",
+      "avoid": "text inside image, realistic named people, busy background",
+      "output_path": "assets/generated/slide-03-hero.png",
+      "alt_text": "Abstract AI workflow illustration"
+    },
+    {
+      "slide": "05",
+      "decision": "skip",
+      "reason": "data chart should remain the primary visual"
+    }
+  ]
+}
+```
+
+Allowed decisions:
+
+- `generate`: call the available `generate_image` tool and save the result.
+- `use_existing`: use a supplied, licensed, or source-backed image.
+- `draw_in_html`: build the visual as editable HTML/CSS/SVG/chart elements.
+- `skip`: no image is needed.
+- `blocked`: image generation would be appropriate, but no image-generation
+  tool or required input is available.
+
+When calling `generate_image`, use `output_path` under `assets/generated/`, pass
+the `size` parameter from the supported preset list below, and include
+slide/purpose/kind metadata. Do not request arbitrary dimensions such as
+`1600x1024`; choose the closest supported ratio and resolution, then crop or fit
+the image in HTML/CSS when placing it on the 1920x1080 slide.
+
+Supported generated-image sizes:
+
+- 1:1 — `2048x2048`, `3072x3072`, `4096x4096`
+- 3:4 — `1728x2304`, `2592x3456`, `3520x4704`
+- 4:3 — `2304x1728`, `3456x2592`, `4704x3520`
+- 16:9 — `2848x1600`, `4096x2304`, `5504x3040`
+- 9:16 — `1600x2848`, `2304x4096`, `3040x5504`
+- 3:2 — `2496x1664`, `3744x2496`, `4992x3328`
+- 2:3 — `1664x2496`, `2496x3744`, `3328x4992`
+- 21:9 — `3136x1344`, `4704x2016`, `6240x2656`
+
+For a normal 16:9 slide hero or background, prefer `2848x1600` unless the user
+explicitly needs a higher-resolution asset. For square spot illustrations,
+prefer `2048x2048`. If the environment does not expose an image-generation
+tool, do not pretend an image was generated. Mark the relevant item `blocked` or
+use `draw_in_html` / `skip`, then continue with a layout that still works
+without generated assets.
+
+Keep generated assets as normal files:
+
+```text
+assets/generated/manifest.json
+assets/generated/slide-03-hero.png
+assets/generated/slide-07-process-bg.png
+```
+
+The manifest should record the target slide, purpose, aspect ratio, prompt,
+source model/provider when known, file path, and alt text. Reference generated
+images from `deck.html` with relative paths, for example:
+
+```html
+<img src="assets/generated/slide-03-hero.png" alt="..." />
+```
+
+Do not inline large `data:image/...` strings into `deck.html` just to satisfy
+the PPTX exporter. The HTML deliverable should stay readable and should open
+directly in a browser. The official exporter resolves local relative `<img>`
+paths and temporarily converts them to data URLs inside the browser DOM before
+calling `dom-to-pptx`, without rewriting the source HTML. For generated bitmap
+assets that must survive PPTX export, prefer real `<img>` elements; avoid hiding
+local generated files only in CSS `background-image` unless that URL is already
+remote/CORS-safe or a small data URL.
+
 ## Export
 
 When commands need the skill directory, use the active installed skill path
@@ -115,32 +310,27 @@ PPTX_SKILL_DIR="${BOX_AGENT_PPTX_SKILL_DIR:-$HOME/.box-agent/skills/pptx}"
 OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-$HOME/Library/Application Support/office-raccoon}}"
 ```
 
-Before writing the full deck, check whether CLI HTML-to-editable-PPTX export can
-run:
+The top-level workflow runs this preflight before writing the full deck. If you
+need to re-check whether CLI HTML-to-editable-PPTX export can run:
 
 ```bash
 ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/check_html_export_env.js"
 ```
 
 If this reports missing Playwright/Chromium and no host renderer is available,
-do not keep going silently. Ask the user to choose `HTML` or `PPTX` using the
-tradeoff above. Continue with this HTML-first workflow only if the preflight
-passes or the user chooses `HTML`.
+follow the route choice in `SKILL.md` before authoring a full deck.
 
 Before export, run the HTML structural self-check with the editable compatibility
 profile:
 
 ```bash
-${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_self_check.js" deck.html --dom-to-pptx --report qa/html_self_check.json
+${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_self_check.js" deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json
 ```
 
 If the command exits non-zero, inspect `qa/html_self_check.json` before deciding
 what failed. Summarize concrete failing slides/selectors and fix `deck.html`.
-Do not move to another generator because the report contains text slack,
-overflow, or compatibility failures.
-Do not bypass the report by writing a custom exporter. If the deck still has a
-small number of accepted issues after 3 repair rounds, use the official export
-flag instead:
+If the deck still has a small number of accepted issues after the bounded repair
+rule in `SKILL.md`, use the official export flag instead:
 
 ```bash
 ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_to_editable_pptx.js" deck.html output.pptx --out slides --allow-self-check-issues
@@ -153,8 +343,10 @@ ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_to_editable_pptx.js" deck.
 ```
 
 The export script runs self-check again, writes `qa/html_self_check.json`,
-creates `slides/slide-*.png` preview images for visual QA, loads
-`scripts/dom-to-pptx.bundle.js`, and writes `output.pptx`.
+creates `slides/slide-*.png` preview images for visual QA, temporarily inlines
+local `<img>` paths in the browser DOM for export, loads
+`scripts/dom-to-pptx.bundle.js`, and writes `output.pptx`. It does not rewrite
+`deck.html`.
 
 Do not install the npm `dom-to-pptx` package for this workflow. The editable
 export must use this skill's bundled `scripts/dom-to-pptx.bundle.js`, which may
@@ -174,42 +366,14 @@ If the host app exposes an Electron renderer conversion/import path, use that
 host route instead of installing Playwright. Do not assume Electron main or a
 Node child process has DOM layout APIs.
 
-## Visual QA
+## QA
 
-HTML self-check is not a replacement for visual QA. It is the first gate. Keep
-`qa/html_self_check.json` with the delivery artifacts. If that report is missing
-or `"ok"` is not `true`, do not claim HTML self-check passed.
-
-Inspect the generated `slides/slide-*.png` source previews before final PPTX
-delivery. First create compressed review-size inputs:
-
-```bash
-${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/make_vision_inputs.js" slides --out qa/vision_inputs
-```
-
-When `vision_review` is available, call it with every individual
-`qa/vision_inputs/slide-*.jpg` file and set `output_path` to the deck folder's
-`qa/visual_review.md`. For decks with 10 or more slides, split the calls into
-1-3 slide batches by default, then merge the batch verdicts into the final
-`qa/visual_review.md`. A contact sheet may be added as overview material, but
-it is not proof that review happened.
-
-For decks with 20 or fewer slides, visual QA must inspect every slide image. If
-only representative slides were reviewed, label the result as a partial visual
-spot check, not a full visual QA pass.
+HTML self-check is the first QA gate. Keep `qa/html_self_check.json` with the
+delivery artifacts. If that report is missing or `"ok"` is not `true`, do not
+claim HTML self-check passed.
 
 After the PPTX is created, run package validation, text extraction, placeholder
-scan, render, and compare rendered PPTX images against source previews when
-possible:
-
-```bash
-${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/compare_slide_images.js" slides rendered --out qa/diff
-```
-
-This comparison checks DOM-to-PPTX drift: missing slides, wrong order, scaling
-changes, crop, text reflow, missing gradients, changed SVGs, wrong z-order, or
-image mask differences. It is not the same as visual quality judgment; still
-inspect the source previews and rendered PPTX images with an image-capable tool.
+scan, and render.
 
 ## When Not To Use
 

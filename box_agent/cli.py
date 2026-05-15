@@ -1402,6 +1402,9 @@ def main():
 
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
+    # Ensure the canonical artifact directory exists before any tool can write to it.
+    from box_agent.core import ensure_output_dir
+    ensure_output_dir(workspace_dir)
 
     # Run the agent (config always loaded from package directory)
     try:

@@ -639,43 +639,72 @@ async def test_messages_mutated_in_place():
 # ── Artifact detection tests ─────────────────────────────────
 
 
-def test_artifact_detect_workspace_root(tmp_path):
-    """File at workspace root is found."""
-    (tmp_path / "chart.png").write_bytes(b"\x89PNG")
+def test_artifact_detect_in_output_dir(tmp_path):
+    """File under {workspace}/output/ is found via regex."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "chart.png").write_bytes(b"\x89PNG")
     arts = _detect_artifacts("t1", "jupyter", "Here is the result [chart.png]", str(tmp_path))
     assert len(arts) == 1
-    assert arts[0].filename == "chart.png"
-    assert arts[0].artifact_type == "image"
-    assert arts[0].mime_type == "image/png"
-    assert arts[0].size_bytes == 4
+    a = arts[0]
+    assert a.filename == "chart.png"
+    assert a.kind == "image"
+    assert a.mime == "image/png"
+    assert a.size == 4
+    assert a.rel_path == "output/chart.png"
+    assert a.abs_path.endswith("output/chart.png")
+    assert a.uri.startswith("file://")
+    assert a.sha256 != ""
+    assert a.produced_at != ""
 
 
-def test_artifact_detect_sandbox_session_subdir(tmp_path):
-    """File at workspace/sandbox/<session_id>/ is found (Jupyter's actual path)."""
-    session_dir = tmp_path / "sandbox" / "abc123"
-    session_dir.mkdir(parents=True)
-    (session_dir / "output.csv").write_text("a,b\n1,2")
-    arts = _detect_artifacts("t2", "jupyter", "Saved to [output.csv]", str(tmp_path))
+def test_artifact_detect_data_kind(tmp_path):
+    """CSV under output/ is classified as data."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "results.csv").write_text("a,b\n1,2")
+    arts = _detect_artifacts("t2", "jupyter", "Saved to [results.csv]", str(tmp_path))
     assert len(arts) == 1
-    assert arts[0].filename == "output.csv"
-    assert arts[0].artifact_type == "file"
-    assert "csv" in arts[0].mime_type
+    assert arts[0].kind == "data"
+    assert "csv" in arts[0].mime
+    assert arts[0].rel_path == "output/results.csv"
+
+
+def test_artifact_detect_ignores_workspace_root(tmp_path):
+    """Files at workspace root (user-supplied inputs) are NOT picked up."""
+    (tmp_path / "user-upload.png").write_bytes(b"\x89PNG")
+    arts = _detect_artifacts("t3", "jupyter", "See [user-upload.png]", str(tmp_path))
+    assert arts == []
 
 
 def test_artifact_detect_no_match(tmp_path):
     """No artifact when file doesn't exist."""
-    arts = _detect_artifacts("t3", "jupyter", "See [missing.png]", str(tmp_path))
+    (tmp_path / "output").mkdir()
+    arts = _detect_artifacts("t4", "jupyter", "See [missing.png]", str(tmp_path))
     assert arts == []
 
 
 def test_artifact_detect_multiple(tmp_path):
     """Multiple file references in one output."""
-    (tmp_path / "a.png").write_bytes(b"\x89PNG")
-    (tmp_path / "b.pdf").write_bytes(b"%PDF")
-    arts = _detect_artifacts("t4", "jupyter", "Results: [a.png] and [b.pdf]", str(tmp_path))
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "a.png").write_bytes(b"\x89PNG")
+    (out / "b.pdf").write_bytes(b"%PDF")
+    arts = _detect_artifacts("t5", "jupyter", "Results: [a.png] and [b.pdf]", str(tmp_path))
     assert len(arts) == 2
     names = {a.filename for a in arts}
     assert names == {"a.png", "b.pdf"}
+    kinds = {a.kind for a in arts}
+    assert kinds == {"image", "document"}
+
+
+def test_artifact_detect_path_traversal_blocked(tmp_path):
+    """Filenames with traversal that resolve outside output/ are rejected."""
+    out = tmp_path / "output"
+    out.mkdir()
+    (tmp_path / "secret.txt").write_text("nope")
+    arts = _detect_artifacts("t6", "jupyter", "See [../secret.txt]", str(tmp_path))
+    assert arts == []
 
 
 # ── Micro-compact tests ──────────────────────────────────────────
@@ -775,3 +804,49 @@ def test_micro_compact_first_line_hint():
     ]
     _micro_compact(msgs)
     assert "Revenue: $1.2M" in msgs[1].content
+
+
+# ── Artifact envelope / helpers ──────────────────────────────
+
+
+def test_safe_output_name_kebab_lowercase():
+    from box_agent.core import safe_output_name
+    assert safe_output_name("My Chart Final.PNG") == "my-chart-final.png"
+    assert safe_output_name("结果.csv", default_ext=".bin") == "结果.csv" or safe_output_name("结果.csv").endswith(".csv")
+    assert safe_output_name("", default_ext="md") == "artifact.md"
+
+
+def test_avoid_collision(tmp_path):
+    from box_agent.core import avoid_collision
+    (tmp_path / "chart.png").write_bytes(b"x")
+    p = avoid_collision(tmp_path, "chart.png")
+    assert p.name == "chart-2.png"
+    p.write_bytes(b"x")
+    assert avoid_collision(tmp_path, "chart.png").name == "chart-3.png"
+
+
+def test_artifact_envelope_shape(tmp_path):
+    from box_agent.acp import _artifact_envelope
+    from box_agent.core import ensure_output_dir, _make_artifact
+    out = ensure_output_dir(tmp_path)
+    f = out / "report.xlsx"
+    f.write_bytes(b"PK\x03\x04")
+    art = _make_artifact("tc-1", f, tmp_path)
+    env = _artifact_envelope(art, str(out))
+    assert env["type"] == "artifact"
+    assert env["kind"] == "spreadsheet"
+    assert env["filename"] == "report.xlsx"
+    assert env["rel_path"] == "output/report.xlsx"
+    assert env["abs_path"].endswith("output/report.xlsx")
+    assert env["uri"].startswith("file://")
+    assert env["size"] == 4
+    assert env["sha256"]
+    assert env["produced_at"]
+    assert env["tool_call_id"] == "tc-1"
+    assert env["output_dir"] == str(out)
+    # canonical schema only — no legacy aliases
+    assert "artifact_type" not in env
+    assert "path" not in env
+    assert "mime_type" not in env
+    assert "size_bytes" not in env
+    assert "sandbox_workspace" not in env

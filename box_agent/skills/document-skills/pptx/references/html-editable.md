@@ -13,12 +13,16 @@ ask them to choose `HTML` or `PPTX`: `HTML` means deliver `deck.html` now and
 export later after setup; `PPTX` means switch to native PptxGenJS with different
 HTML/CSS fidelity tradeoffs.
 
+Route-change and self-check bypass rules live in `SKILL.md`. This reference adds
+editable-export details; do not use it to weaken the top-level workflow.
+
 ## Authoring Profile
 
 Before export, create `deck.html` with one `.slide` element per page. Prefer this
 `dom-to-pptx` authoring profile:
 
-- Use `1920px × 1080px` slides with fixed pixel dimensions.
+- Before adding slide content, set every `.slide` to exactly fixed
+  `width: 1920px; height: 1080px;`.
 - Put `.slide` directly under `<body>` or a plain non-transformed wrapper.
 - Set every `.slide` to `position: relative; overflow: hidden`.
 - Prefer inline styles for slide content; keep `<style>` for page chrome only.
@@ -28,8 +32,14 @@ Before export, create `deck.html` with one `.slide` element per page. Prefer thi
 - Use `linear-gradient`; avoid radial/conic gradients.
 - Do not use `backdrop-filter`, `clip-path`, `mix-blend-mode`, animations,
   transitions, or text-shadow on slide content.
-- Images must be `https://...` with CORS or `data:image/...`; avoid relative
-  paths, `file://`, `srcset`, and `loading="lazy"`.
+- Images may use readable local relative paths such as
+  `assets/generated/slide-03-hero.png`, `https?://...` with CORS, or
+  `data:image/...`. Prefer local relative paths for generated or packaged assets
+  so `deck.html` stays readable and opens normally; the official exporter
+  temporarily converts local `<img>` assets to data URLs before calling
+  `dom-to-pptx`. Generated bitmap assets that must survive PPTX export should
+  be real `<img>` elements, not only local CSS `background-image` URLs. Avoid
+  `srcset` and `loading="lazy"`.
 - Google Fonts links must include `crossorigin="anonymous"` and should have a
   web-safe fallback such as `Arial, sans-serif`.
 - Leave text safety slack. Browser text that fits by only 1-2px may wrap in
@@ -40,9 +50,8 @@ Before export, create `deck.html` with one `.slide` element per page. Prefer thi
   never use vertical padding (`padding-top`, `padding-bottom`, or
   `padding: Ypx Xpx`) to simulate vertical centering. This commonly shifts or
   clips text after dom-to-pptx conversion. Use a fixed `width`/`height` outer
-  container with the background, radius, and `display:flex; align-items:center;
-  justify-content:center`; put the label in an inner text element with
-  `margin:0; padding:0; line-height:1`.
+  container with the background, radius, and display:flex; align-items:center;
+  justify-content:center; and use `<div>`children — `<span>`.
 - For Chinese text, prefer fonts that exist or embed reliably across Office
   environments, for example `Microsoft YaHei`, `Noto Sans CJK SC`, then
   `Arial, sans-serif`. If a web font is used, ensure it embeds; fallback fonts
@@ -62,7 +71,9 @@ Recommended badge pattern:
     justify-content: center;
   "
 >
-  <span style="margin: 0; padding: 0; line-height: 1; font-size: 18px; color: #ffffff;">
+  <span
+    style="margin: 0; padding: 0; line-height: 1; font-size: 18px; color: #ffffff;"
+  >
     进行中
   </span>
 </div>
@@ -83,28 +94,20 @@ renderer is available, ask the user to choose before authoring or exporting:
 `HTML` keeps `deck.html` as the deliverable; `PPTX` switches to native
 PptxGenJS.
 
-The script runs HTML self-check with `--dom-to-pptx`, creates
+The script runs HTML self-check with `--dom-to-pptx --allow-local-images`, creates
 `slides/slide-*.png` preview images for visual QA, loads the skill-local
-`scripts/dom-to-pptx.bundle.js`, writes `qa/html_self_check.json`, and writes
-`output.pptx`. It passes `autoEmbedFonts: true` and defaults `svgAsVector: false` so SVGs are rasterized for pixel fidelity, closer to the in-browser button export path. Pass `--svg-vector true` only when PowerPoint vector editability is more important than visual fidelity. If `qa/html_self_check.json` is missing, do not say HTML
+`scripts/dom-to-pptx.bundle.js`, temporarily inlines local `<img>` paths in the
+browser DOM for export, writes `qa/html_self_check.json`, and writes
+`output.pptx`. It does not rewrite `deck.html`. It passes `autoEmbedFonts: true`
+and defaults `svgAsVector: false` so SVGs are rasterized for pixel fidelity,
+closer to the in-browser button export path. Pass `--svg-vector true` only when
+PowerPoint vector editability is more important than visual fidelity. If
+`qa/html_self_check.json` is missing, do not say HTML
 self-check passed.
 
 If self-check or export fails after the route has been chosen, read the
-generated report and fix the HTML source. Do not switch to native PptxGenJS
-because of text slack, overflow, Playwright, or DOM-to-PPTX compatibility errors.
-Route changes for a new deck require explicit user confirmation unless the user
-supplied a template, required native PowerPoint charts/tables, or chose `PPTX`
-at the missing-browser preflight.
-
-Do not bypass the self-check. Never write a custom `export_skipcheck.js`, call
-`dom-to-pptx.bundle.js` directly to skip `scripts/html_self_check.js`, or patch
-the exporter to ignore a failed `qa/html_self_check.json`. If the report has
-`"ok": false`, fix `deck.html` and rerun the official exporter. Run at most 3
-focused repair rounds. After that, if only a small number of known, visually
-acceptable issues remain, continue only with the official
-`--allow-self-check-issues` flag, then report unresolved issues and complete
-render/visual QA. If severe blocking issues remain, report
-`Editable PPTX export: BLOCKED (HTML self-check failed)`.
+generated report and fix the HTML source. Follow the route-change, bounded
+repair, and official `--allow-self-check-issues` rules in `SKILL.md`.
 
 Do not install the npm `dom-to-pptx` package for this workflow. The editable
 export must use this skill's bundled `scripts/dom-to-pptx.bundle.js`, which may
@@ -126,7 +129,7 @@ has DOM layout APIs.
 
 ## QA Requirements
 
-Run the same package/text/render/visual QA as other PPTX outputs.
+Run the same package/text/render QA as other PPTX outputs.
 
 Additional editable-export checks:
 
@@ -134,16 +137,10 @@ Additional editable-export checks:
 - Treat text slack failures as real blockers. They usually predict the exact
   issue where HTML text looks fine but the editable PPTX wraps one word or one
   CJK character onto a new line.
-- Create compressed `qa/vision_inputs/slide-*.jpg` from `slides/slide-*.png`, then inspect those review-size JPGs with `vision_review`.
-- For decks with 10 or more slides, inspect every individual slide image in 1-3 slide batches by default, then merge batch reports into `qa/visual_review.md`.
-- For decks with 20 or fewer slides, inspect every individual slide image. If
-  only representative slides are reviewed, call it a partial visual spot check,
-  not a full QA pass.
-- Render the exported PPTX and compare it to the source previews when possible.
+- Render the exported PPTX for QA.
 - Check especially for text reflow, missing gradients, missing images,
   incorrect SVG conversion, wrong z-order, and shifted card/chart positions.
-- If render comparison or visual review shows drift, fix `deck.html` and rerun
+- If render shows issues, fix `deck.html` and rerun
   `html_to_editable_pptx.js`.
 
-Do not claim full fidelity from `dom-to-pptx` without render QA. It is the
-standard editable export path, not a replacement for visual inspection. Keep the default SVG rasterization unless the user explicitly wants editable vector SVGs.
+Do not claim full fidelity from `dom-to-pptx` without render QA. Keep the default SVG rasterization unless the user explicitly wants editable vector SVGs.

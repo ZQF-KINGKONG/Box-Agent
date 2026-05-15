@@ -37,19 +37,20 @@ box-agent --task "Analyze sales.csv — show top 10 products by revenue with a b
 
 Most agent frameworks are either too simple (no sandbox, no tools) or too complex (massive dependencies, rigid architecture). Box Agent hits the sweet spot:
 
-| Feature | Box Agent | Open Interpreter | Aider |
-|---------|-----------|-----------------|-------|
-| Sandboxed code execution | Jupyter kernel in isolated venv | Runs in host Python | N/A |
-| Sub-agent parallelism | Multiple sub-agents run concurrently | No | No |
-| Multi-provider LLM | Anthropic, OpenAI, DeepSeek, SiliconFlow, any API | OpenAI + a few others | OpenAI + Anthropic |
-| MCP tool integration | Native | No | No |
-| ACP protocol (embed in apps) | Full support | No | No |
-| Standalone binary | PyInstaller runtime, no Python needed | No | No |
-| Context compression | 2-layer automatic (micro-compact + LLM summary) | Manual | Git-based |
+| Feature                      | Box Agent                                         | Open Interpreter      | Aider              |
+| ---------------------------- | ------------------------------------------------- | --------------------- | ------------------ |
+| Sandboxed code execution     | Jupyter kernel in isolated venv                   | Runs in host Python   | N/A                |
+| Sub-agent parallelism        | Multiple sub-agents run concurrently              | No                    | No                 |
+| Multi-provider LLM           | Anthropic, OpenAI, DeepSeek, SiliconFlow, any API | OpenAI + a few others | OpenAI + Anthropic |
+| MCP tool integration         | Native                                            | No                    | No                 |
+| ACP protocol (embed in apps) | Full support                                      | No                    | No                 |
+| Standalone binary            | PyInstaller runtime, no Python needed             | No                    | No                 |
+| Context compression          | 2-layer automatic (micro-compact + LLM summary)   | Manual                | Git-based          |
 
 ## Key Features
 
 ### Sub-Agent Parallelism
+
 Delegate tasks to isolated sub-agents that run concurrently. Each sub-agent has its own context — only the summary comes back. Perfect for multi-file analysis.
 
 ```
@@ -69,9 +70,11 @@ You: "Analyze data1.csv, data2.csv, and data3.csv separately, then give me a com
 ```
 
 ### Sandboxed Code Execution
+
 Python runs in an isolated Jupyter kernel with pre-installed data science packages (`pandas`, `numpy`, `matplotlib`, `scikit-learn`, `openpyxl`, `xlrd`). Generated files (charts, CSVs, PDFs) are automatically detected and surfaced as structured artifacts.
 
 ### Multi-Provider LLM
+
 One config, any provider:
 
 ```yaml
@@ -92,10 +95,12 @@ model: "your-model"
 ```
 
 ### 2-Layer Context Compression
+
 - **Layer 1 — Micro-compact**: Every step, old tool results (3+ turns back) are replaced with short placeholders. Zero cost, no LLM call.
 - **Layer 2 — Auto-summary**: When tokens exceed the threshold (default 80k), an LLM call summarizes the conversation. Original data is preserved in logs.
 
 ### More
+
 - **MCP Tools**: Connect to any [MCP server](https://github.com/modelcontextprotocol/servers) — web search, knowledge graphs, databases
 - **Claude Skills**: 11 built-in skills for documents (DOCX, PDF, PPTX, XLSX), canvas design, web app testing, and more
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio
@@ -107,17 +112,20 @@ model: "your-model"
 ## Demos
 
 ### Task Execution
-*The agent creates a webpage and opens it in the browser.*
+
+_The agent creates a webpage and opens it in the browser._
 
 ![Demo: Task Execution](docs/assets/demo1-task-execution.gif)
 
 ### Claude Skill — PDF Generation
-*The agent uses a skill to create a professional document.*
+
+_The agent uses a skill to create a professional document._
 
 ![Demo: Claude Skill](docs/assets/demo2-claude-skill.gif)
 
 ### Web Search via MCP
-*The agent searches the web and summarizes results.*
+
+_The agent searches the web and summarizes results._
 
 ![Demo: Web Search](docs/assets/demo3-web-search.gif)
 
@@ -170,8 +178,8 @@ After running `box-agent setup`, your config lives at `~/.box-agent/config/confi
 api_key: "your-api-key"
 api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
-provider: "anthropic"           # "anthropic" or "openai"
-max_steps: 50
+provider: "anthropic" # "anthropic" or "openai"
+max_steps: 100
 ```
 
 ```bash
@@ -218,6 +226,7 @@ In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/exit`
 Box Agent supports the [Agent Communication Protocol](https://github.com/nichochar/agent-client-protocol) for embedding in editors and apps.
 
 **Zed Editor** — add to `settings.json`:
+
 ```json
 {
   "agent_servers": {
@@ -229,6 +238,7 @@ Box Agent supports the [Agent Communication Protocol](https://github.com/nichoch
 ```
 
 **Standalone Runtime** — for Electron apps and other hosts:
+
 ```bash
 # Download pre-built binary
 gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"

@@ -69,6 +69,17 @@ class Colors:
     BRIGHT_WHITE = "\033[97m"
 
 
+def _format_size(n: int) -> str:
+    """Render a byte count as a short human label (``12.4KB``)."""
+    if n < 0:
+        return "?"
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
+        n /= 1024  # type: ignore[assignment]
+    return f"{n}B"
+
+
 class Agent:
     """Single agent with basic tools and MCP support."""
 
@@ -77,7 +88,7 @@ class Agent:
         llm_client: LLMClient,
         system_prompt: str,
         tools: list[Tool],
-        max_steps: int = 50,
+        max_steps: int = 100,
         workspace_dir: str = "./workspace",
         token_limit: int = 113400,
         hooks: list | None = None,
@@ -255,8 +266,9 @@ class Agent:
                 else:
                     print(f"{Colors.BRIGHT_RED}✗ Error:{Colors.RESET} {Colors.RED}{err}{Colors.RESET}")
 
-            case ArtifactEvent(artifact_type=atype, filename=fname, path=fpath):
-                print(f"{Colors.BRIGHT_CYAN}📎 Artifact ({atype}):{Colors.RESET} {fname} → {fpath}")
+            case ArtifactEvent(kind=kind, filename=fname, rel_path=rel, size=sz):
+                size_label = _format_size(sz)
+                print(f"{Colors.BRIGHT_CYAN}📎 {kind}{Colors.RESET} {fname} · {size_label} · {Colors.DIM}{rel}{Colors.RESET}")
 
             case SubAgentEvent(task_preview=preview, event=inner, sub_agent_id=_):
                 label = preview[:40] + "..." if len(preview) > 40 else preview

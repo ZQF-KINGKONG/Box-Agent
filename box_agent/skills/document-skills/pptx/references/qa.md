@@ -1,10 +1,6 @@
 # PPTX QA Reference
 
-Use this checklist after creating or editing a `.pptx`. Do not claim visual QA
-is complete unless rendered slide images or preview images were produced and
-reviewed by `vision_review` or another real image-capable tool. Producing
-screenshots is not enough; visual QA means sending the visible pixels as image
-input and recording a per-slide verdict.
+Use this checklist after creating or editing a `.pptx`.
 
 ## Required Checks
 
@@ -18,13 +14,12 @@ output. Editable export can reflow text, shift layers, or lose CSS effects, so
 source previews alone are not enough.
 
 0. HTML self-check for HTML-first decks:
-   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --report qa/html_self_check.json` before export, or rely on `scripts/html_to_editable_pptx.js` which writes the same check internally.
+   - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` before export, or rely on `scripts/html_to_editable_pptx.js` which writes the same check internally.
    - Always use the stricter `--dom-to-pptx` compatibility profile for new HTML-first decks.
+   - Confirm every `.slide` reports exactly `1920x1080` unless the user explicitly requested a nonstandard output size.
    - Confirm `qa/html_self_check.json` exists, is non-empty, and has `"ok": true`. If it is missing, report HTML self-check as `BLOCKED`.
    - Fix failures before export. This catches DOM/CSS layout bugs such as progress `.fill` elements left as `display:inline`, zero-size bars/charts, text overflow, missing images, and content outside the slide.
-   - If the command exits non-zero, inspect the report file before concluding the error has no detail. Summarize concrete failures and fix the HTML; do not switch to a different generator because self-check failed.
-   - Run at most 3 focused repair rounds. After that, if only a small number of known, visually acceptable issues remain, use the official exporter with `--allow-self-check-issues`, report the unresolved issue count, and continue to render/visual QA. If severe blocking issues remain, say `Editable PPTX export: BLOCKED (HTML self-check failed)`.
-   - Do not create a local skip-check exporter, patch `html_to_editable_pptx.js`, or call `dom-to-pptx.bundle.js` directly to bypass a failed report.
+   - If the command exits non-zero, inspect the report file before concluding the error has no detail. Summarize concrete failures and fix the HTML; route-change and bypass rules live in `SKILL.md`.
    - This is a preflight gate, not visual QA. Passing it does not mean the slide looks good.
 
 1. Package validation:
@@ -47,136 +42,12 @@ source previews alone are not enough.
 
 4. Render:
    - Run `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py output.pptx --out rendered`.
-   - For HTML-first decks, this PPTX render is used for source-preview-vs-output image comparison. If LibreOffice is missing, report PPTX render comparison as `BLOCKED` but do not discard the HTML preview QA.
    - Do not pre-check `soffice` and skip this command. The render script owns renderer discovery, Quick Look fallback, and missing-LibreOffice messaging.
-   - If rendering is blocked by permissions or missing runtime after the deck changed, previous render images are stale. Do not use old renders or old visual review as final proof for the new deck.
-   - Do not pass `--format png` for visual-model inputs unless a PNG is explicitly required; the default JPG output is intentionally compressed to reduce request size.
+   - If rendering is blocked by permissions or missing runtime after the deck changed, previous render images are stale. Do not use old renders as final proof for the new deck.
+   - Do not pass `--format png` unless a PNG is explicitly required; the default JPG output is intentionally compressed to reduce file size.
    - The preferred path is `soffice` PPTX-to-PDF plus `pdftoppm` PDF-to-PNG.
    - If Poppler is unavailable, the script may use Node pdf.js with `pdfjs-dist` and `@napi-rs/canvas`.
    - On macOS, Quick Look is only a lightweight fallback.
-
-5. Image comparison for HTML-first decks:
-   - When both source preview images and PPTX-rendered slide images exist, compare them with `${BOX_AGENT_NODE:-node} scripts/compare_slide_images.js slides rendered --out qa/diff`.
-   - This checks whether DOM-to-PPTX export/rendering changed the slide image: missing slides, wrong order, scaling changes, cropping, text wrapping, gradients, SVGs, shadows, z-order, or image masks.
-   - Treat non-empty image checks as insufficient. A PNG can be non-empty while the chart, bar, or image is missing.
-   - If PPTX-rendered images are blocked, report `Image comparison: BLOCKED` and name the renderer limitation.
-   - Pixel comparison only proves fidelity to the source previews. It does not judge whether the original slide is well-designed or semantically correct.
-
-6. Visual inspection:
-   - Use `vision_review` when it is available. Pass actual image files, not only their paths in normal chat text.
-   - Before calling `vision_review`, create compressed review-size copies of the slide images: `${BOX_AGENT_NODE:-node} scripts/make_vision_inputs.js slides --out qa/vision_inputs`. Use `rendered` instead of `slides` when reviewing rendered PPTX images. Keep original full-size images for export and image comparison; `qa/vision_inputs` is only for vision-model review.
-   - For HTML-first decks, prefer every generated `qa/vision_inputs/slide-*.jpg` derived from `html_to_editable_pptx.js` source previews.
-   - For rendered PPTX decks, prefer every generated review-size copy of `rendered/slide-*.png` or preview image, emitted as compressed JPG by default.
-   - For decks with 20 or fewer slides, pass every individual `qa/vision_inputs/slide-*.jpg` image to `vision_review`. For decks with 10 or more slides, batch those individual images in groups of 1-3 slides by default, then merge the batch reports into `qa/visual_review.md`. For larger decks, pass every changed, title, section, data-heavy, and image-heavy slide, and say which range was sampled. If only representative slides were reviewed, call it a partial visual spot check, not a full visual QA pass.
-   - Generate a contact sheet for overview, for example `${BOX_AGENT_NODE:-node} scripts/make_contact_sheet.js slides --out qa/vision-contact-sheet.png`. Include it as an additional image if useful, but do not use it as the only input when individual compressed slide images are available.
-   - Treat the contact sheet as review material, not as the review result. The script also writes `qa/vision-review-prompt.txt`; use that prompt in the `vision_review` instructions.
-   - Use an image-viewing or vision-capable tool. Do not count file existence, image dimensions, package XML, text extraction, OCR, histogram checks, or pixel diff as visual inspection.
-   - Check blank or near-blank slides, clipped text, blurry or unreadable text, overlap, bad spacing, missing media, wrong slide order, low contrast, bad crop/scaling, missing charts, and low-quality shape-built people.
-   - Record a short per-slide verdict before final delivery, for example `slide-01: PASS`, `slide-02: ISSUE title overlaps chart`, or `slide-03: BLOCKED image could not be opened`.
-   - Write the verdict to the deck output folder's `qa/visual_review.md`. If the deck lives in `future_weather_deck/`, the report should be `future_weather_deck/qa/visual_review.md`, not workspace-root `qa/visual_review.md`.
-   - If only OOXML checks were possible, do not call visual inspection complete.
-   - If `vision_review` is unavailable, fails, or no image-capable review was performed, report `Visual inspection: BLOCKED`, even if HTML self-check, image comparison, and non-empty PNG checks passed.
-
-## How To Perform Vision Review
-
-Use `vision_review` as the preferred image-capable path. The required input is
-the individual compressed review-size `qa/vision_inputs/slide-*.jpg` files whenever they
-exist; the contact sheet is an overview image, not the primary evidence.
-
-- If the `vision_review` tool is available, call it with all individual
-  review-size slide JPG/PNG paths and `output_path` set to the deck folder's `qa/visual_review.md`.
-  For decks with 10 or more slides, use small batches of 1-3 slides by default.
-  Include `qa/vision-contact-sheet.png` only as an additional overview image.
-- If the individual review-size image batches still exceed the model request
-  limit, rerun `make_vision_inputs.js` with `--max-width 720 --quality 0.76`.
-  Merge the batch reports into the final `qa/visual_review.md`. Never downgrade
-  to a contact-sheet-only PASS because of a request-size error.
-- If another agent host provides a vision/image tool, call that tool with the
-  individual slide images first. Then use the contact sheet for cross-slide
-  consistency and order.
-- If the host supports multimodal messages, attach the contact sheet image in a
-  message to the vision-capable model only as a fallback; inspect individual
-  individual compressed slide images if the sheet is too small to judge text, charts, or bars.
-- If running in Codex with local image viewing, use the local image viewer for
-  `qa/vision-contact-sheet.png`, then inspect individual slide files as needed.
-- If only shell, text extraction, image dimensions, histogram, pixel diff, or
-  non-empty checks are available, vision review has not happened. Report
-  `Visual inspection: BLOCKED`.
-
-Suggested `vision_review` call:
-
-```json
-{
-  "image_paths": [
-    "qa/vision_inputs/slide-01.jpg",
-    "qa/vision_inputs/slide-02.jpg",
-    "qa/vision_inputs/slide-03.jpg"
-  ],
-  "output_path": "qa/visual_review.md",
-  "instructions": "Review every slide image for blank output, clipped or overlapping text, unreadable small text, missing charts/bars/images, low contrast, bad crop/scaling, wrong order, and poor shape-built people. Return per-slide PASS/ISSUE with concrete fixes."
-}
-```
-
-Use this review prompt in `instructions`:
-
-```text
-Review these slide images for a PPT QA pass. For each slide, return PASS or
-ISSUE. Check whether charts/bars are visible, text is readable, no content is
-clipped or overlapping, images are present, contrast is acceptable, crop/scaling
-is correct, and the slide is not blank. Mention the slide number for each issue.
-```
-
-The QA report must say which image was reviewed, for example:
-
-```text
-Visual inspection: PASS
-Reviewed: qa/vision_inputs/slide-01.jpg; qa/vision_inputs/slide-02.jpg; qa/vision_inputs/slide-03.jpg
-Verdict: slide-01 PASS; slide-02 PASS; slide-03 ISSUE probability bars missing
-```
-
-Write this same information to `qa/visual_review.md`. If this file is missing,
-the final report must not say visual inspection passed.
-
-If batch reports are created, the final `qa/visual_review.md` must summarize all
-batches and include the final overall verdict. Do not leave contradictory files
-such as one `visual_review.md` with ISSUE and another `visual_review_final.md`
-with PASS unless the final report explicitly explains what was fixed and which
-report is authoritative.
-
-## Visual Quality Gate
-
-The visual quality gate passes only when all produced slide images have been
-opened or attached to an image-capable review tool and each slide has a verdict.
-The report must include the contact sheet path or the individual image paths
-that were reviewed by vision.
-For decks with 20 or fewer slides, inspect every slide. For larger decks, inspect
-every changed slide plus title, section, data-heavy, and image-heavy slides; say
-which slide range was sampled.
-
-Fail and iterate when any slide has:
-
-- blank or mostly blank output
-- resolution below 1280x720 for a 16:9 deck, or obvious blur at normal viewing size
-- text clipped by the slide edge, footer, image, chart, or card container
-- overlapping labels, charts, legends, or icons
-- unreadable contrast or tiny dense paragraphs
-- important content cropped off, hidden outside the slide, or covered by another layer
-- missing expected images, charts, logos, maps, screenshots, or icons
-- generated/shape-built people that look visibly poor
-- generic placeholder silhouettes used for named people when a more deliberate
-  non-portrait design would be better
-- missing, inconsistent, or wrong page numbers on non-cover slides
-
-If no image-viewing or vision-capable tool is available, report:
-
-```text
-Visual inspection: BLOCKED
-Reason: slide images were generated, but no image-capable review tool was available
-```
-
-After any layout, text, source HTML, or PPTX generation-script change, rerun the
-affected render and visual-inspection steps. If rerun is blocked, mark the final
-visual QA `BLOCKED after fix`; do not carry forward the old PASS.
 
 ## Blocked Rendering
 
@@ -206,8 +77,7 @@ The permission engine may block common shell habits. Avoid them.
 - Do not use shell redirects for QA output. The permission engine can block
   redirects before it proves whether the path is safe, especially for absolute
   paths. Instead, run helpers that write files directly or pass explicit output
-  arguments such as `--out rendered`, `--out qa/diff`, or
-  `output_path: "qa/visual_review.md"`.
+  arguments such as `--out rendered`.
 - Do not use inline heredocs such as `python3 - <<'PY'`.
 - Do not chain a long command that mixes `unzip`, `cat`, `tail`, and inline Python.
 - Do not call Node `execFileSync()` with a full shell command string such as
@@ -232,13 +102,9 @@ Before final handoff, inspect the output folder.
   and unreferenced intermediate files.
 - Remove or replace empty QA artifacts such as 0-byte `.json`, `.txt`, or `.md`
   files.
-- Keep the final deck, source file(s), rendered previews, and final QA reports.
-  Intermediate batch visual reports are okay only when the final
-  `qa/visual_review.md` references them and no contradiction remains.
-- If README or final answer says `PASS`, make sure the latest authoritative QA
-  file also says `PASS` and names the images actually reviewed.
+- Keep the final deck, source file(s), and rendered previews.
 - Do not create a ZIP archive unless the user asked for one. Normal delivery
-  should list the `.pptx`, source file(s), speaker notes, and QA report paths.
+  should list the `.pptx`, source file(s), and speaker notes paths.
 
 ## Reporting Format
 
@@ -247,6 +113,6 @@ between progress blocks; do not concatenate all QA steps into one paragraph.
 
 1. `Created`: output `.pptx` path.
 2. `Source`: generator script and asset paths.
-3. `QA`: package validation, text extraction, placeholder scan, rendering, visual inspection.
+3. `QA`: package validation, text extraction, placeholder scan, rendering.
 4. `Fixes`: issues found and corrected.
-5. `Limitations`: blocked renderers, blocked image comparison, Quick Look-only checks, missing fonts, or unsupported objects.
+5. `Limitations`: blocked renderers, Quick Look-only checks, missing fonts, or unsupported objects.

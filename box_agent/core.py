@@ -11,14 +11,16 @@ to the consumer through the event stream.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import mimetypes
 import re
 import traceback
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable
+from typing import Any, Callable, Final
 
 import tiktoken
 
@@ -54,11 +56,174 @@ from .tools.base import EventEmittingTool, Tool, ToolResult
 # when the execution should be cancelled.
 CancelChecker = Callable[[], bool]
 
-# Regex to match sandbox file references like [foo.png] or [PNG Image]
+# Regex to match file references like [foo.png] in tool output.
 _ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
 
-# Image extensions for artifact_type classification
-_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg"}
+# Coarse classification by MIME type — exposed to hosts via ArtifactEvent.kind.
+# Order matters: the first matching prefix/value wins.
+_MIME_KIND_PREFIX = (
+    ("image/", "image"),
+    ("video/", "video"),
+    ("audio/", "audio"),
+    ("text/csv", "data"),
+    ("text/tab-separated-values", "data"),
+    ("application/json", "data"),
+    ("application/x-ndjson", "data"),
+    ("application/xml", "data"),
+    ("text/x-python", "code"),
+    ("text/x-", "code"),
+    ("application/javascript", "code"),
+    ("application/typescript", "code"),
+    ("text/markdown", "document"),
+    ("text/html", "document"),
+    ("application/pdf", "document"),
+    ("application/msword", "document"),
+    ("application/vnd.openxmlformats-officedocument.wordprocessingml", "document"),
+    ("application/vnd.ms-excel", "spreadsheet"),
+    ("application/vnd.openxmlformats-officedocument.spreadsheetml", "spreadsheet"),
+    ("application/vnd.ms-powerpoint", "presentation"),
+    ("application/vnd.openxmlformats-officedocument.presentationml", "presentation"),
+    ("application/zip", "archive"),
+    ("application/x-tar", "archive"),
+    ("application/gzip", "archive"),
+    ("application/x-7z-compressed", "archive"),
+    ("text/", "document"),
+)
+
+# Extension fallback when MIME guess returns None.
+_EXT_KIND = {
+    ".csv": "data", ".tsv": "data", ".json": "data", ".jsonl": "data",
+    ".ndjson": "data", ".parquet": "data", ".xml": "data", ".yaml": "data", ".yml": "data",
+    ".py": "code", ".js": "code", ".ts": "code", ".jsx": "code", ".tsx": "code",
+    ".rs": "code", ".go": "code", ".java": "code", ".c": "code", ".cpp": "code",
+    ".rb": "code", ".sh": "code",
+    ".md": "document", ".rst": "document", ".html": "document", ".htm": "document",
+    ".pdf": "document", ".doc": "document", ".docx": "document", ".txt": "document",
+    ".xlsx": "spreadsheet", ".xls": "spreadsheet", ".ods": "spreadsheet",
+    ".pptx": "presentation", ".ppt": "presentation", ".key": "presentation",
+    ".zip": "archive", ".tar": "archive", ".gz": "archive", ".7z": "archive", ".rar": "archive",
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".gif": "image",
+    ".svg": "image", ".webp": "image", ".bmp": "image", ".tiff": "image",
+    ".mp4": "video", ".webm": "video", ".mov": "video",
+    ".mp3": "audio", ".wav": "audio", ".ogg": "audio", ".flac": "audio",
+}
+
+
+def _classify_kind(filename: str, mime: str | None) -> str:
+    """Map (filename, mime) → coarse artifact kind."""
+    m = (mime or "").lower()
+    for prefix, kind in _MIME_KIND_PREFIX:
+        if m.startswith(prefix) or m == prefix:
+            return kind
+    ext = Path(filename).suffix.lower()
+    return _EXT_KIND.get(ext, "file")
+
+
+# ── Artifact directory contract ─────────────────────────────────
+#
+# Every artifact lands under ``{workspace}/output/``.  This is the only
+# location hosts and the artifact pipeline trust; sandbox sessions, write
+# tools, sub-agents and PPT exports all chdir or resolve into this path.
+
+OUTPUT_SUBDIR: Final[str] = "output"
+
+
+def ensure_output_dir(workspace_dir: str | Path) -> Path:
+    """Return ``{workspace}/output/``, creating it if needed."""
+    out = Path(workspace_dir).expanduser().resolve() / OUTPUT_SUBDIR
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+_SAFE_NAME_RE = re.compile(r"[^a-z0-9._-]+")
+
+
+def safe_output_name(name: str, *, default_ext: str = "") -> str:
+    """Normalize a proposed artifact name: lowercase, ascii, kebab-safe."""
+    stem = name.strip()
+    if not stem:
+        stem = "artifact"
+    suffix = Path(stem).suffix.lower()
+    base = Path(stem).stem.lower()
+    base = _SAFE_NAME_RE.sub("-", base).strip("-._") or "artifact"
+    if not suffix and default_ext:
+        suffix = default_ext if default_ext.startswith(".") else f".{default_ext}"
+    return f"{base}{suffix}"
+
+
+def avoid_collision(directory: Path, filename: str) -> Path:
+    """Return a non-existing path inside ``directory`` by appending ``-N``."""
+    candidate = directory / filename
+    if not candidate.exists():
+        return candidate
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    n = 2
+    while True:
+        candidate = directory / f"{stem}-{n}{suffix}"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+# Filled in below from _EXT_KIND. Adds explicit MIME for extensions that
+# Python's mimetypes module doesn't always know (e.g. .md, .jsonl).
+_EXT_MIME_OVERRIDES = {
+    ".md": "text/markdown",
+    ".rst": "text/x-rst",
+    ".jsonl": "application/x-ndjson",
+    ".ndjson": "application/x-ndjson",
+    ".parquet": "application/vnd.apache.parquet",
+    ".tsv": "text/tab-separated-values",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".webp": "image/webp",
+    ".key": "application/vnd.apple.keynote",
+}
+
+
+def _make_artifact(tool_call_id: str, abs_file: Path, workspace_root: Path) -> ArtifactEvent:
+    """Build an ArtifactEvent from a real on-disk file."""
+    abs_resolved = abs_file.resolve()
+    try:
+        rel = abs_resolved.relative_to(workspace_root.resolve())
+        rel_str = rel.as_posix()
+    except ValueError:
+        rel_str = abs_resolved.name
+
+    mime, _ = mimetypes.guess_type(str(abs_resolved))
+    if not mime:
+        mime = _EXT_MIME_OVERRIDES.get(abs_resolved.suffix.lower())
+    mime = mime or "application/octet-stream"
+    kind = _classify_kind(abs_resolved.name, mime)
+    try:
+        size = abs_resolved.stat().st_size
+    except OSError:
+        size = -1
+
+    digest = ""
+    try:
+        if 0 <= size <= 64 * 1024 * 1024:
+            h = hashlib.sha256()
+            with abs_resolved.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    h.update(chunk)
+            digest = h.hexdigest()[:16]
+    except OSError:
+        digest = ""
+
+    return ArtifactEvent(
+        tool_call_id=tool_call_id,
+        kind=kind,
+        filename=abs_resolved.name,
+        rel_path=rel_str,
+        abs_path=str(abs_resolved),
+        uri=abs_resolved.as_uri(),
+        mime=mime,
+        size=size,
+        sha256=digest,
+        produced_at=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+    )
 
 # Pattern to match <!--PLOT_DATA:...--> markers embedded by code execution.
 # These carry interactive chart payloads already sent to the frontend via SSE;
@@ -334,74 +499,60 @@ def _detect_artifacts(
     content: str,
     workspace_dir: str | None,
 ) -> list[ArtifactEvent]:
-    """Scan tool output for file references and emit ArtifactEvents."""
+    """Scan tool output for ``[filename.ext]`` references that resolve under
+    ``{workspace}/output/``."""
     if not workspace_dir or not content:
         return []
 
-    from pathlib import Path
+    ws = Path(workspace_dir).resolve()
+    out = ws / OUTPUT_SUBDIR
+    if not out.is_dir():
+        return []
 
-    ws = Path(workspace_dir)
     artifacts: list[ArtifactEvent] = []
-
+    seen_paths: set[Path] = set()
     for match in _ARTIFACT_REF_RE.finditer(content):
         filename = match.group(1)
-        # Build candidate paths — Jupyter writes to workspace/sandbox/<session_id>/<file>,
-        # so we also glob workspace/sandbox/*/<file> to cover all sandbox sessions.
-        candidates = [ws / filename, ws / "sandbox" / filename]
-        # Add all sandbox session subdirectories
-        sandbox_dir = ws / "sandbox"
-        if sandbox_dir.is_dir():
-            for session_subdir in sandbox_dir.iterdir():
-                if session_subdir.is_dir():
-                    candidates.append(session_subdir / filename)
-
-        for candidate in candidates:
-            if candidate.exists() and candidate.is_file():
-                ext = candidate.suffix.lower()
-                art_type = "image" if ext in _IMAGE_EXTS else "file"
-                mime, _ = mimetypes.guess_type(str(candidate))
-                artifacts.append(ArtifactEvent(
-                    tool_call_id=tool_call_id,
-                    artifact_type=art_type,
-                    filename=filename,
-                    path=str(candidate),
-                    mime_type=mime or "application/octet-stream",
-                    size_bytes=candidate.stat().st_size,
-                ))
-                break  # found, no need to check other candidates
+        candidate = (out / filename).resolve()
+        try:
+            candidate.relative_to(out)
+        except ValueError:
+            continue
+        if candidate in seen_paths or not candidate.is_file():
+            continue
+        seen_paths.add(candidate)
+        artifacts.append(_make_artifact(tool_call_id, candidate, ws))
 
     return artifacts
 
 
 # ── Workspace diff-based artifact detection ─────────────────────
 
-# Directories to skip when scanning the workspace
+# Directories under output/ to skip when snapshotting.
 _IGNORE_DIRS = {".git", "__pycache__", ".venv", "node_modules", ".ipynb_checkpoints"}
 
 
 def _snapshot_workspace(workspace_dir: str) -> set[Path]:
-    """Snapshot files in workspace root (1 level) + sandbox/ subtree.
+    """Snapshot files under ``{workspace}/output/`` (recursive).
 
-    Skips directories in ``_IGNORE_DIRS`` to avoid expensive traversal.
+    Only the canonical output directory is scanned — files the user keeps in
+    the workspace root are intentionally ignored so they are never re-emitted
+    as new artifacts.
     """
     ws = Path(workspace_dir)
-    if not ws.is_dir():
+    out = ws / OUTPUT_SUBDIR
+    if not out.is_dir():
         return set()
 
     files: set[Path] = set()
-
-    # Workspace root — 1 level only (non-recursive)
-    for entry in ws.iterdir():
-        if entry.is_file():
-            files.add(entry)
-
-    # sandbox/ subtree — recursive
-    sandbox = ws / "sandbox"
-    if sandbox.is_dir():
-        for entry in sandbox.rglob("*"):
-            if entry.is_file() and not any(p in entry.parts for p in _IGNORE_DIRS):
-                files.add(entry)
-
+    for entry in out.rglob("*"):
+        if not entry.is_file():
+            continue
+        if any(p in entry.parts for p in _IGNORE_DIRS):
+            continue
+        if entry.name.startswith(".") or entry.suffix == ".tmp":
+            continue
+        files.add(entry)
     return files
 
 
@@ -417,26 +568,14 @@ def _detect_new_files(
     if not new_files:
         return []
 
+    ws = Path(workspace_dir).resolve()
     artifacts: list[ArtifactEvent] = []
     for fpath in sorted(new_files):
-        # Skip dotfiles and temp files
         if fpath.name.startswith(".") or fpath.name.startswith("~") or fpath.suffix == ".tmp":
             continue
-        # Skip if already emitted by regex detection
-        if str(fpath) in already_emitted:
+        if str(fpath.resolve()) in already_emitted:
             continue
-
-        ext = fpath.suffix.lower()
-        art_type = "image" if ext in _IMAGE_EXTS else "file"
-        mime, _ = mimetypes.guess_type(str(fpath))
-        artifacts.append(ArtifactEvent(
-            tool_call_id=tool_call_id,
-            artifact_type=art_type,
-            filename=fpath.name,
-            path=str(fpath),
-            mime_type=mime or "application/octet-stream",
-            size_bytes=fpath.stat().st_size,
-        ))
+        artifacts.append(_make_artifact(tool_call_id, fpath, ws))
 
     return artifacts
 
@@ -642,7 +781,7 @@ async def run_agent_loop(
     llm,
     messages: list[Message],
     tools: dict[str, Tool],
-    max_steps: int = 50,
+    max_steps: int = 100,
     token_limit: int = 113400,
     is_cancelled: CancelChecker | None = None,
     logger: AgentLogger | None = None,

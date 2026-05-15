@@ -1,6 +1,5 @@
 # 开发指南
 
-
 ## 目录
 
 - [开发指南](#开发指南)
@@ -77,6 +76,7 @@ box-agent/
 **配置**：无需 API Key，开箱即用
 
 **能力**：
+
 - 跨会话存储并检索信息
 - 根据对话内容构建知识图谱
 - 对已存储的记忆进行语义搜索
@@ -86,6 +86,7 @@ box-agent/
 #### Web Search - 网页搜索与浏览
 
 **功能**：提供三大强大工具：
+
 - `search` - 网页搜索
 - `parallel_search` - 并行执行多个搜索任务
 - `browse` - 智能网页浏览与内容提取
@@ -131,12 +132,12 @@ class MyTool(Tool):
     def name(self) -> str:
         """工具的唯一名称，需保持独一无二。"""
         return "my_tool"
-    
+
     @property
     def description(self) -> str:
         """工具用途的详细描述，帮助 LLM 理解其功能。"""
         return "我的自定义工具，用于完成特定任务"
-    
+
     @property
     def parameters(self) -> Dict[str, Any]:
         """参数模式（JSON Schema 格式）。"""
@@ -155,22 +156,22 @@ class MyTool(Tool):
             },
             "required": ["param1"]
         }
-    
+
     async def execute(self, param1: str, param2: int = 10) -> ToolResult:
         """
         工具执行的核心逻辑。
-        
+
         Args:
             param1: 参数一。
             param2: 参数二，包含默认值。
-        
+
         Returns:
             返回一个 ToolResult 对象。
         """
         try:
             # 在此实现你的逻辑
             result = f"处理了 {param1}，param2={param2}"
-            
+
             return ToolResult(
                 success=True,
                 content=result
@@ -194,7 +195,7 @@ tools = [
 agent = Agent(
     llm=llm,
     tools=tools,
-    max_steps=50
+    max_steps=100
 )
 ```
 
@@ -374,4 +375,3 @@ logger.debug(f"工具调用: {tool_call.name}")
 logger.debug(f"工具参数: {tool_call.arguments}")
 logger.debug(f"工具结果: {result.content[:200]}")
 ```
-

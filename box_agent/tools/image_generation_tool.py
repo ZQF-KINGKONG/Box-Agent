@@ -1,0 +1,427 @@
+"""Image generation tool backed by a host-provided HTTP service."""
+
+from __future__ import annotations
+
+import base64
+import json
+import mimetypes
+import os
+import re
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import httpx
+
+from box_agent.auth import request_auth_headers
+from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.safety import validate_path_in_workspace
+
+if TYPE_CHECKING:
+    from box_agent.tools.permissions import PermissionEngine
+
+
+_ENDPOINT_ENV = ("BOX_AGENT_IMAGE_GENERATION_ENDPOINT", "BOX_AGENT_IMAGE_GEN_ENDPOINT")
+_API_KEY_ENV = ("BOX_AGENT_IMAGE_GENERATION_API_KEY", "BOX_AGENT_IMAGE_GEN_API_KEY")
+_TIMEOUT_ENV = "BOX_AGENT_IMAGE_GENERATION_TIMEOUT"
+_DEFAULT_TIMEOUT = 120.0
+_MIN_IMAGE_DIMENSION = 1024
+_SEEDREAM_PRESETS: dict[tuple[int, int], list[tuple[int, int]]] = {
+    (1, 1): [(2048, 2048), (3072, 3072), (4096, 4096)],
+    (3, 4): [(1728, 2304), (2592, 3456), (3520, 4704)],
+    (4, 3): [(2304, 1728), (3456, 2592), (4704, 3520)],
+    (16, 9): [(2848, 1600), (4096, 2304), (5504, 3040)],
+    (9, 16): [(1600, 2848), (2304, 4096), (3040, 5504)],
+    (3, 2): [(2496, 1664), (3744, 2496), (4992, 3328)],
+    (2, 3): [(1664, 2496), (2496, 3744), (3328, 4992)],
+    (21, 9): [(3136, 1344), (4704, 2016), (6240, 2656)],
+}
+_DEFAULT_LARGE_IMAGE_SIZE = "2048x2048"
+_SIZE_RE = re.compile(r"^\s*(\d+)\s*x\s*(\d+)\s*$", re.IGNORECASE)
+_OPENAI_IMAGE_SIZES = {
+    "1024x1024": (1024, 1024),
+    "1536x1024": (1536, 1024),
+    "1024x1536": (1024, 1536),
+}
+_DEFAULT_MODEL = "gpt-image-1"
+_DEFAULT_MIME_TYPE = "image/png"
+_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+}
+
+
+def _is_large_image_service(endpoint: str | None, model: str | None) -> bool:
+    needle = f"{endpoint or ''} {model or ''}".lower()
+    return (
+        "doubao" in needle
+        or "seedream" in needle
+        or "/api/web/llm/v2/images/gen" in needle
+    )
+
+
+def _seedream_size_for_ratio(width: int, height: int) -> tuple[str, int, int]:
+    if width <= 0 or height <= 0:
+        target_ratio = (1, 1)
+    else:
+        best_ratio: tuple[int, int] = (1, 1)
+        best_error = float("inf")
+        for ratio_w, ratio_h in _SEEDREAM_PRESETS:
+            ratio_error = abs(width * ratio_h - height * ratio_w) / float((width * ratio_h) or 1)
+            if ratio_error < best_error:
+                best_error = ratio_error
+                best_ratio = (ratio_w, ratio_h)
+        target_ratio = best_ratio
+    candidates = _SEEDREAM_PRESETS[target_ratio]
+    if width <= 0 or height <= 0:
+        fallback = candidates[0]
+        return f"{fallback[0]}x{fallback[1]}", fallback[0], fallback[1]
+
+    for candidate_w, candidate_h in candidates:
+        if candidate_w >= width and candidate_h >= height:
+            return f"{candidate_w}x{candidate_h}", candidate_w, candidate_h
+    fallback = candidates[-1]
+    return f"{fallback[0]}x{fallback[1]}", fallback[0], fallback[1]
+
+
+def _first_env(names: tuple[str, ...]) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _guess_mime_from_data_url(data_url: str) -> str:
+    if data_url.startswith("data:") and ";base64," in data_url:
+        return data_url[5 : data_url.index(";base64,")] or _DEFAULT_MIME_TYPE
+    return _DEFAULT_MIME_TYPE
+
+
+def _decode_base64_image(value: str) -> tuple[bytes, str]:
+    text = value.strip()
+    mime_type = _DEFAULT_MIME_TYPE
+    if text.startswith("data:") and ";base64," in text:
+        mime_type = _guess_mime_from_data_url(text)
+        text = text.split(";base64,", 1)[1]
+    return base64.b64decode(text), mime_type
+
+
+def _find_first_image_payload(data: Any) -> tuple[str, str] | None:
+    """Return ("base64"|"url", value) from common image API JSON shapes."""
+    if not isinstance(data, dict):
+        return None
+
+    for key in ("b64_json", "base64", "image_base64"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return "base64", value
+
+    for key in ("url", "image_url"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return "url", value
+
+    nested = data.get("data") or data.get("images") or data.get("output")
+    if isinstance(nested, list):
+        for item in nested:
+            found = _find_first_image_payload(item)
+            if found:
+                return found
+    elif isinstance(nested, dict):
+        return _find_first_image_payload(nested)
+
+    return None
+
+
+def _openai_image_size(width: int, height: int) -> tuple[str, int, int]:
+    """Map requested dimensions to a supported OpenAI Images API size."""
+    width = max(int(width), _MIN_IMAGE_DIMENSION)
+    height = max(int(height), _MIN_IMAGE_DIMENSION)
+
+    if width > height * 1.2:
+        size = "1536x1024"
+    elif height > width * 1.2:
+        size = "1024x1536"
+    else:
+        size = "1024x1024"
+
+    normalized_width, normalized_height = _OPENAI_IMAGE_SIZES[size]
+    return size, normalized_width, normalized_height
+
+
+def _normalize_explicit_size(size: str) -> tuple[str, int, int]:
+    match = _SIZE_RE.match(size)
+    if not match:
+        raise ValueError("Invalid image size format. Use WIDTHxHEIGHT, e.g. 2048x2048")
+
+    width = int(match.group(1))
+    height = int(match.group(2))
+    if width <= 0 or height <= 0:
+        raise ValueError("Image size width/height must be positive integers")
+    return f"{width}x{height}", width, height
+
+
+def _compose_openai_prompt(prompt: str, style: str | None, negative_prompt: str | None) -> str:
+    parts = [prompt.strip()]
+    if style:
+        parts.append(f"Style: {style.strip()}")
+    if negative_prompt:
+        parts.append(f"Avoid: {negative_prompt.strip()}")
+    return "\n\n".join(part for part in parts if part)
+
+
+class GenerateImageTool(Tool):
+    """Generate an image through a configured HTTP service and save it locally."""
+
+    def __init__(
+        self,
+        workspace_dir: str = ".",
+        allow_full_access: bool = True,
+        permission_engine: PermissionEngine | None = None,
+        endpoint: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        auth_file: str | None = None,
+        timeout: float | None = None,
+    ) -> None:
+        self.workspace_dir = Path(workspace_dir).absolute()
+        self.allow_full_access = allow_full_access
+        self._perm = permission_engine
+        self.endpoint = endpoint or _first_env(_ENDPOINT_ENV)
+        self.api_key = api_key if api_key is not None else _first_env(_API_KEY_ENV)
+        self.model = model or _DEFAULT_MODEL
+        self.auth_file = auth_file or ""
+        self.timeout = timeout
+
+    @property
+    def name(self) -> str:
+        return "generate_image"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Generate a bitmap image with the host-configured image service, save it inside the workspace, "
+            "and return a local path for use in HTML/PPTX assets. Use for PPT image_plan items marked "
+            "`generate`. If the service is not configured, report the blocked image generation instead of "
+            "pretending an asset exists. Configuration: image_generation.endpoint in config.yaml; optional "
+            "image_generation.api_key for a dedicated bearer token. Environment overrides are also supported."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed image prompt. Do not ask the service to render text inside the image unless explicitly required.",
+                },
+                "output_path": {
+                    "type": "string",
+                    "description": "Workspace-relative image path, for example assets/generated/slide-03-hero.png.",
+                },
+                "size": {
+                    "type": "string",
+                    "description": "Pixel size to request, e.g. 2048x2048.",
+                    "default": _DEFAULT_LARGE_IMAGE_SIZE,
+                },
+                "width": {
+                    "type": "integer",
+                    "description": "Legacy requested width. Seedream/Doubao will map this to a supported size.",
+                },
+                "height": {
+                    "type": "integer",
+                    "description": "Legacy requested height. Seedream/Doubao will map this to a supported size.",
+                },
+                "style": {
+                    "type": "string",
+                    "description": "Optional visual style hint.",
+                },
+                "alt_text": {
+                    "type": "string",
+                    "description": "Optional accessibility text for the generated asset.",
+                },
+                "negative_prompt": {
+                    "type": "string",
+                    "description": "Optional things to avoid.",
+                },
+                "metadata": {
+                    "type": "object",
+                    "description": "Optional metadata such as slide, purpose, placement, kind, or aspect ratio.",
+                    "additionalProperties": True,
+                },
+            },
+            "required": ["prompt", "output_path"],
+        }
+
+    async def execute(
+        self,
+        prompt: str,
+        output_path: str,
+        width: int = 1600,
+        height: int = 1024,
+        size: str | None = None,
+        style: str | None = None,
+        negative_prompt: str | None = None,
+        alt_text: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ToolResult:
+        if not self.endpoint:
+            return ToolResult(
+                success=False,
+                error=(
+                    "Image generation service is not configured. Set image_generation.endpoint in "
+                    "config.yaml, or provide BOX_AGENT_IMAGE_GENERATION_ENDPOINT / BOX_AGENT_IMAGE_GEN_ENDPOINT."
+                ),
+            )
+
+        try:
+            requested_width = width
+            requested_height = height
+            if size and size.strip():
+                size, width, height = _normalize_explicit_size(size)
+            if _is_large_image_service(self.endpoint, self.model):
+                size, width, height = _seedream_size_for_ratio(width, height)
+            else:
+                if not size or not size.strip():
+                    size, width, height = _openai_image_size(width, height)
+
+            target = self._resolve_output_path(output_path)
+            permission_error = self._check_write_permission(target)
+            if permission_error:
+                return permission_error
+
+            image_bytes, mime_type = await self._request_image(
+                prompt=prompt,
+                size=size,
+                style=style,
+                negative_prompt=negative_prompt,
+            )
+
+            target = self._ensure_extension(target, mime_type)
+            permission_error = self._check_write_permission(target)
+            if permission_error:
+                return permission_error
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(image_bytes)
+
+            rel_path = self._display_path(target)
+            info = {
+                "path": rel_path,
+                "absolute_path": str(target),
+                "mime_type": mime_type,
+                "bytes": len(image_bytes),
+                "width": width,
+                "height": height,
+                "size": size,
+                "requested_width": requested_width,
+                "requested_height": requested_height,
+                "alt_text": alt_text or "",
+                "metadata": metadata or {},
+            }
+            return ToolResult(
+                success=True,
+                content=(
+                    f"Generated image saved to [{rel_path}]\n"
+                    f"mime_type: {mime_type}\n"
+                    f"bytes: {len(image_bytes)}"
+                ),
+                raw_output=info,
+                model_context=json.dumps(info, ensure_ascii=False),
+            )
+        except Exception as exc:
+            return ToolResult(success=False, error=f"Image generation failed: {exc}")
+
+    def _resolve_output_path(self, output_path: str) -> Path:
+        path = Path(output_path).expanduser()
+        if not path.is_absolute():
+            path = self.workspace_dir / path
+        return path
+
+    def _check_write_permission(self, target: Path) -> ToolResult | None:
+        if self._perm:
+            decision = self._perm.check(
+                capability="filesystem.write",
+                resource={"path": str(target)},
+                tool_name=self.name,
+            )
+            if not decision.allowed:
+                return ToolResult(
+                    success=False,
+                    error=decision.reason,
+                    permission_request=decision.permission_request,
+                )
+        elif not self.allow_full_access:
+            error = validate_path_in_workspace(target, self.workspace_dir)
+            if error:
+                return ToolResult(success=False, error=error)
+        return None
+
+    async def _request_image(
+        self,
+        *,
+        prompt: str,
+        size: str,
+        style: str | None,
+        negative_prompt: str | None,
+    ) -> tuple[bytes, str]:
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": _compose_openai_prompt(prompt, style, negative_prompt),
+            "size": size,
+        }
+
+        headers = {"Accept": "application/json, image/*"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        else:
+            headers = request_auth_headers(auth_file=self.auth_file, existing=headers, url=self.endpoint)
+
+        timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.post(self.endpoint, json=payload, headers=headers)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                body = response.text.strip()
+                if len(body) > 1000:
+                    body = f"{body[:1000]}..."
+                detail = f"{exc}"
+                if body:
+                    detail = f"{detail}; response body: {body}"
+                raise ValueError(detail) from exc
+
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type.startswith("image/"):
+                return response.content, content_type
+
+            data = response.json()
+            found = _find_first_image_payload(data)
+            if not found:
+                raise ValueError("service response did not contain image bytes, b64_json, base64, url, or image_url")
+            kind, value = found
+            if kind == "base64":
+                return _decode_base64_image(value)
+
+            download = await client.get(value)
+            download.raise_for_status()
+            download_type = download.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if not download_type.startswith("image/"):
+                download_type = mimetypes.guess_type(value)[0] or _DEFAULT_MIME_TYPE
+            return download.content, download_type
+
+    def _ensure_extension(self, target: Path, mime_type: str) -> Path:
+        if target.suffix:
+            return target
+        return target.with_suffix(_MIME_EXTENSIONS.get(mime_type, ".png"))
+
+    def _display_path(self, target: Path) -> str:
+        try:
+            return str(target.relative_to(self.workspace_dir))
+        except ValueError:
+            return str(target)

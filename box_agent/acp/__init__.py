@@ -133,11 +133,35 @@ except Exception:  # pragma: no cover - defensive
     logger.debug("ACP schema patch skipped")
 
 
+def _artifact_envelope(art: ArtifactEvent, output_dir: str | None) -> dict[str, Any]:
+    """Serialize an ArtifactEvent to the wire envelope hosts dispatch on.
+
+    The ``type: "artifact"`` discriminator is stable; downstream consumers
+    branch on ``kind`` for category-specific rendering.
+    """
+    payload: dict[str, Any] = {
+        "type": "artifact",
+        "kind": art.kind,
+        "filename": art.filename,
+        "rel_path": art.rel_path,
+        "abs_path": art.abs_path,
+        "uri": art.uri,
+        "mime": art.mime,
+        "size": art.size,
+        "sha256": art.sha256,
+        "produced_at": art.produced_at,
+        "tool_call_id": art.tool_call_id,
+    }
+    if output_dir:
+        payload["output_dir"] = output_dir
+    return payload
+
+
 @dataclass
 class SessionState:
     agent: Agent
     cancelled: bool = False
-    sandbox_workspace: str | None = None  # stable sandbox workspace path for this session
+    output_dir: str | None = None  # ``{workspace}/output/`` — the canonical artifact root
     session_mode: str | None = None  # e.g. "data_analysis" for /analysis pages
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None  # in-band permission grants
@@ -359,8 +383,10 @@ class BoxACPAgent:
             }
             ppt_tool = ppt_tool_map[session_mode]()
             agent.tools[ppt_tool.name] = ppt_tool
-        # Sandbox workspace is a stable subdirectory under the workspace
-        sandbox_ws = str(workspace / "sandbox")
+        # Canonical artifact directory (created eagerly so write tools and the
+        # sandbox kernel can chdir into it without race conditions).
+        from box_agent.core import ensure_output_dir
+        output_dir = str(ensure_output_dir(workspace))
 
         # Per-session MemoryExtractor to avoid cross-session state leaks
         session_extractor = None
@@ -374,7 +400,7 @@ class BoxACPAgent:
             )
 
         self._sessions[session_id] = SessionState(
-            agent=agent, sandbox_workspace=sandbox_ws, session_mode=session_mode,
+            agent=agent, output_dir=output_dir, session_mode=session_mode,
             permission_engine=perm_engine, grant_store=grant_store,
             memory_extractor=session_extractor,
             auto_classify_pending=(session_mode is None),
@@ -784,28 +810,28 @@ class BoxACPAgent:
                             update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output),
                         )
 
-                    case ArtifactEvent(tool_call_id=tid, artifact_type=atype, filename=fname, path=fpath, mime_type=mime, size_bytes=sz):
-                        log.info("artifact", session_id=session_id, tool_call_id=tid, artifact_type=atype, artifact_path=fpath, filename=fname, mime_type=mime, size_bytes=sz)
-                        # ACP SessionUpdate is a strict union — no "artifact" variant exists.
-                        # Send artifact metadata as a tool_call_update with rawOutput carrying
-                        # the structured artifact info, so officev3 can pick it up from there.
-                        artifact_meta = {
-                            "type": "artifact",
-                            "artifact_type": atype,
-                            "filename": fname,
-                            "path": fpath,
-                            "mime_type": mime,
-                            "size_bytes": sz,
-                            "sandbox_workspace": state.sandbox_workspace,
-                        }
-                        log.debug("artifact/payload", session_id=session_id, tool_call_id=tid, payload=artifact_meta)
+                    case ArtifactEvent() as art:
+                        log.info(
+                            "artifact",
+                            session_id=session_id,
+                            tool_call_id=art.tool_call_id,
+                            kind=art.kind,
+                            rel_path=art.rel_path,
+                            size=art.size,
+                            sha256=art.sha256,
+                        )
+                        # ACP SessionUpdate has no native "artifact" variant —
+                        # we ride on tool_call_update.rawOutput, with a stable
+                        # ``type: "artifact"`` discriminator the host dispatches on.
+                        artifact_meta = _artifact_envelope(art, state.output_dir)
+                        log.debug("artifact/payload", session_id=session_id, tool_call_id=art.tool_call_id, payload=artifact_meta)
                         try:
                             await self._send(
                                 session_id,
-                                update_tool_call(tid, raw_output=artifact_meta),
+                                update_tool_call(art.tool_call_id, raw_output=artifact_meta),
                             )
                         except Exception as exc:
-                            log.exception("artifact/send_error", exc, session_id=session_id, tool_call_id=tid, payload=artifact_meta)
+                            log.exception("artifact/send_error", exc, session_id=session_id, tool_call_id=art.tool_call_id, payload=artifact_meta)
 
                     case WebSearchEvent(tool_call_id=tid, payload=payload):
                         web_search_payload = {**payload, "type": "web_search"}
@@ -855,15 +881,9 @@ class BoxACPAgent:
                                 progress["event"] = "tool_result"
                                 progress["tool_name"] = name
                                 progress["success"] = ok
-                            case ArtifactEvent(artifact_type=atype, filename=fname, path=fpath, mime_type=mime, size_bytes=sz):
+                            case ArtifactEvent() as art:
                                 progress["event"] = "artifact"
-                                progress["artifact_type"] = atype
-                                progress["filename"] = fname
-                                progress["path"] = fpath
-                                progress["mime_type"] = mime
-                                progress["size_bytes"] = sz
-                                if state.sandbox_workspace:
-                                    progress["sandbox_workspace"] = state.sandbox_workspace
+                                progress["artifact"] = _artifact_envelope(art, state.output_dir)
                             case ErrorEvent(message=msg):
                                 progress["event"] = "error"
                                 progress["message"] = msg

@@ -49,10 +49,20 @@ class LLMConfig(BaseModel):
         return int((self.context_window - self.max_output_tokens) * 0.9)
 
 
+class ImageGenerationConfig(BaseModel):
+    """Image generation service configuration."""
+
+    endpoint: str = ""
+    api_key: str = ""
+    model: str = "gpt-image-1"
+    timeout: float = 120.0
+    auth_file: str = ""
+
+
 class AgentConfig(BaseModel):
     """Agent configuration"""
 
-    max_steps: int = 50
+    max_steps: int = 100
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
@@ -155,6 +165,7 @@ class Config(BaseModel):
     """Main configuration class"""
 
     llm: LLMConfig
+    image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
     agent: AgentConfig
     tools: ToolsConfig
     officev3: Officev3Config = Field(default_factory=Officev3Config)
@@ -236,9 +247,23 @@ class Config(BaseModel):
             retry=retry_config,
         )
 
+        # Parse image generation configuration. This mirrors LLM auth behavior:
+        # by default it reads auth.json next to config.yaml before each hosted
+        # request, while still allowing a dedicated service token when needed.
+        image_generation_data = data.get("image_generation", {})
+        if not isinstance(image_generation_data, dict):
+            image_generation_data = {}
+        image_generation_config = ImageGenerationConfig(
+            endpoint=str(image_generation_data.get("endpoint", "") or "").strip(),
+            api_key=str(image_generation_data.get("api_key", "") or "").strip(),
+            model=str(image_generation_data.get("model", "gpt-image-1") or "").strip(),
+            timeout=float(image_generation_data.get("timeout", 120.0) or 120.0),
+            auth_file=image_generation_data.get("auth_file") or llm_config.auth_file,
+        )
+
         # Parse Agent configuration
         agent_config = AgentConfig(
-            max_steps=data.get("max_steps", 50),
+            max_steps=data.get("max_steps", 100),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             enable_memory=data.get("enable_memory", True),
@@ -317,6 +342,7 @@ class Config(BaseModel):
 
         return cls(
             llm=llm_config,
+            image_generation=image_generation_config,
             agent=agent_config,
             tools=tools_config,
             officev3=officev3_config,

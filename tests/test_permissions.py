@@ -378,6 +378,67 @@ class TestExtractAbsolutePaths:
             "cp x /usr/local/bin/foo"
         )
 
+    def test_sed_substitution_not_extracted(self):
+        """The regex bodies of `sed 's/.../.../g'` must not yield fake paths."""
+        cmd = r"sed 's/(\w+)/<strong>$1<\/strong>/g' /tmp/page.html"
+        result = extract_absolute_paths(cmd)
+        # The real file argument is kept; the substitution body is stripped.
+        assert "/tmp/page.html" in result
+        for fake in result:
+            assert "<" not in fake and ">" not in fake and "$" not in fake
+
+    def test_sed_alt_delimiter_not_extracted(self):
+        """`sed 's|a|b|g'` with `|` delimiter also gets stripped."""
+        cmd = "sed 's|/old/path|/new/path|g' /tmp/in.txt"
+        result = extract_absolute_paths(cmd)
+        assert result == ["/tmp/in.txt"]
+
+    def test_sed_hash_delimiter_not_extracted(self):
+        """`sed 's#a#b#'` with `#` delimiter — bodies stripped, file kept."""
+        cmd = "sed 's#/a/b#/c/d#' /tmp/in.txt"
+        result = extract_absolute_paths(cmd)
+        assert result == ["/tmp/in.txt"]
+
+    def test_path_with_html_brackets_rejected(self):
+        """An ad-hoc fragment like `/<strong>...</strong>/g` is not a path."""
+        result = extract_absolute_paths("echo /<strong>$1</strong>/g")
+        assert result == []
+
+    def test_word_prefix_s_not_treated_as_sed(self):
+        """A token ending in `s/` like `ls/foo` must not trigger the sed strip."""
+        # `users/` is not a sed substitution; the real path must survive.
+        result = extract_absolute_paths("ls /Users/alice/projects")
+        assert result == ["/Users/alice/projects"]
+
+    def test_quoted_variable_glob_not_extracted_as_path(self):
+        """`"$SRC"/slide-*.png` must not yield a phantom `/slide-*.png` path.
+
+        The closing `"` of a `"$VAR"` (or `"${VAR}"`) is followed by `/`, but
+        the slash belongs to the expanded variable — it is not a fresh
+        absolute path."""
+        cmd = (
+            'SRC="/Users/me/data"; '
+            'cp "$SRC"/slide-*.png /tmp/out/'
+        )
+        result = extract_absolute_paths(cmd)
+        assert "/slide-*.png" not in result
+        # The legit absolute paths are still extracted.
+        assert "/Users/me/data" in result
+        assert "/tmp/out/" in result
+
+    def test_quoted_braced_variable_glob_not_extracted(self):
+        """Same fix must cover `"${SRC}"/file.png`."""
+        cmd = 'cp "${SRC}"/slide-*.png /tmp/out/'
+        result = extract_absolute_paths(cmd)
+        assert "/slide-*.png" not in result
+        assert "/tmp/out/" in result
+
+    def test_opening_quote_path_still_extracted(self):
+        """An *opening* quote in front of an absolute path must still work."""
+        result = extract_absolute_paths('cp "/Users/me/file.txt" /tmp/')
+        assert "/Users/me/file.txt" in result
+        assert "/tmp/" in result
+
 
 # ── CapabilityPolicy.with_filesystem_overrides ───────────────
 

@@ -60186,19 +60186,7 @@
   const    DICTID = 16189;    /* i: waiting for dictionary check value */
   const    DICT = 16190;      /* waiting for inflateSetDictionary() call */
   const        TYPE = 16191;      /* i: waiting for type bits, including last-flag bit */
-  /*
-   * Vendor provenance / hook-audit rationale:
-   * Compatibility: this Browser bundle embeds pako's upstream zlib inflate
-   * state machine because JSZip/font decoding needs DEFLATE support in the
-   * browser page where editable PPTX export runs.
-   * Fail-safe: this is not Box-Agent product-level error suppression; corrupt
-   * compressed data still exits through CHECK, LENGTH, BAD, or Z_DATA_ERROR.
-   * Tested: tests/test_pptx_dom_to_pptx_bundle.py locks this provenance note
-   * and the domToPptx browser API export.
-   * Issue: keep this note adjacent to pako's TYPEDO line so audit hooks do not
-   * mistake generated compression internals for application error handling.
-   */
-  const        TYPEDO = 16192;    /* i: TYPE continuation mode used when entering a new deflate block */
+  const        TYPEDO = 16192;    /* i: same, but skip check to exit inflate on new block */
   const        STORED = 16193;    /* i: waiting for stored size (length and complement) */
   const        COPY_ = 16194;     /* i/o: same as COPY below, but only first time in */
   const        COPY = 16195;      /* i/o: waiting for input or output to copy stored block */
@@ -60558,13 +60546,7 @@
     }
 
     state = strm.state;
-    /*
-     * Compatibility: intentional pako/zlib TYPE -> TYPEDO continuation; see
-     * the provenance note above.
-     * Fail-safe: stream validation errors are still surfaced by pako.
-     * Tested: covered by tests/test_pptx_dom_to_pptx_bundle.py.
-     */
-    if (state.mode === TYPE) { state.mode = TYPEDO; }    /* continue TYPE state */
+    if (state.mode === TYPE) { state.mode = TYPEDO; }    /* skip check */
 
 
     //--- LOAD() ---
@@ -62544,14 +62526,14 @@
         // D. Padding (Margins in PPTX)
         // CSS Padding px -> PPTX Margin pt
         const padding = getPadding(style, scale);
-        // getPadding returns [top, right, bottom, left] in inches relative to scale
-        // PptxGenJS expects points (pt) for margin: [t, r, b, l]
-        // or discrete properties. Let's use discrete for clarity.
+        // getPadding returns [left, right, bottom, top] (for text box compat).
+        // Table cells use TRBL order: [top, right, bottom, left].
+        // Remap: padding[3]=top, padding[1]=right, padding[2]=bottom, padding[0]=left.
         const margin = [
-          padding[0] * 72 + vSpacePt / 2, // top
-          padding[1] * 72 + hSpacePt / 2, // right
-          padding[2] * 72 + vSpacePt / 2, // bottom
-          padding[3] * 72 + hSpacePt / 2, // left
+          padding[3] + vSpacePt / 2, // top
+          padding[1] + hSpacePt / 2, // right
+          padding[2] + vSpacePt / 2, // bottom
+          padding[0] + hSpacePt / 2, // left
         ];
 
         // E. Borders
@@ -62757,6 +62739,20 @@
   function generateCustomShapeSVG(w, h, color, opacity, radii) {
     let { tl, tr, br, bl } = radii;
 
+    // If all radii are equal and form a complete circle (square with r = side/2),
+    // return null to let caller use ellipse shape instead of SVG
+    const EPSILON = 0.5;
+    const minSide = Math.min(w, h);
+    if (
+      Math.abs(tl - tr) < EPSILON &&
+      Math.abs(tl - br) < EPSILON &&
+      Math.abs(tl - bl) < EPSILON &&
+      Math.abs(w - h) < EPSILON &&
+      tl >= minSide / 2 - EPSILON
+    ) {
+      return null;
+    }
+
     // Clamp radii using CSS spec logic (avoid overlap)
     const factor = Math.min(
       w / (tl + tr) || Infinity,
@@ -62855,12 +62851,16 @@
   }
 
   function getPadding(style, scale) {
-    const pxToInch = 1 / 96;
+    // PptxGenJS `margin` expects points (pt). CSS px to pt: 1px = 0.75pt.
+    // IMPORTANT: Despite docs claiming TRBL order, PptxGenJS source (gen-xml.ts)
+    // actually maps: margin[0]→lIns, [1]→rIns, [2]→bIns, [3]→tIns.
+    // So the correct order is [left, right, bottom, top].
+    const pxToPt = 0.75;
     return [
-      (parseFloat(style.paddingTop) || 0) * pxToInch * scale,
-      (parseFloat(style.paddingRight) || 0) * pxToInch * scale,
-      (parseFloat(style.paddingBottom) || 0) * pxToInch * scale,
-      (parseFloat(style.paddingLeft) || 0) * pxToInch * scale,
+      (parseFloat(style.paddingLeft) || 0) * pxToPt * scale,
+      (parseFloat(style.paddingRight) || 0) * pxToPt * scale,
+      (parseFloat(style.paddingBottom) || 0) * pxToPt * scale,
+      (parseFloat(style.paddingTop) || 0) * pxToPt * scale,
     ];
   }
 
@@ -62945,6 +62945,15 @@
     const children = Array.from(node.children);
     if (children.length === 0) return true;
 
+    // Flex containers rely on the flex engine for child layout (gap, direction,
+    // justify-content, align-items). These spatial relationships cannot be
+    // expressed inside a single PPTX text box. Let children render independently
+    // so each gets its own bounding rect and shape.
+    if (children.length > 0) {
+      const display = window.getComputedStyle(node).display;
+      if (display === 'flex' || display === 'inline-flex') return false;
+    }
+
     const isSafeInline = (el) => {
       // 1. Reject Web Components / Custom Elements
       if (el.tagName.includes('-')) return false;
@@ -62976,6 +62985,12 @@
         el.tagName
       );
       const isInlineDisplay = display.includes('inline');
+
+      // If display is explicitly block-level (block, flex, grid, etc.), the element
+      // is not inline regardless of its tag name. It will occupy its own line/box.
+      const isBlockDisplay = display === 'block' || display === 'flex' || display === 'inline-flex'
+        || display === 'grid' || display === 'inline-grid' || display === 'table';
+      if (isBlockDisplay) return false;
 
       if (!isInlineTag && !isInlineDisplay) return false;
 
@@ -64575,10 +64590,12 @@
     const borderTopLeftRadius = parseFloat(style.borderTopLeftRadius) || 0;
     const borderTopRightRadius = parseFloat(style.borderTopRightRadius) || 0;
 
+    // Use epsilon comparison to avoid floating point precision issues
+    const EPSILON = 0.5;
     const hasPartialBorderRadius =
-      borderTopLeftRadius !== borderTopRightRadius ||
-      borderTopLeftRadius !== borderBottomRightRadius ||
-      borderTopLeftRadius !== borderBottomLeftRadius;
+      Math.abs(borderTopLeftRadius - borderTopRightRadius) > EPSILON ||
+      Math.abs(borderTopLeftRadius - borderBottomRightRadius) > EPSILON ||
+      Math.abs(borderTopLeftRadius - borderBottomLeftRadius) > EPSILON;
 
     // --- PRIORITY SVG: Solid Fill with Partial Border Radius (Vector Cone/Tab) ---
     // Fix for "missing cone": Prioritize SVG vector generation over Raster Canvas for simple shapes with partial radii.
@@ -64598,17 +64615,21 @@
         bl: parseFloat(style.borderBottomLeftRadius) || 0,
       });
 
-      return {
-        items: [
-          {
-            type: 'image',
-            zIndex,
-            domOrder,
-            options: { data: shapeSvg, x, y, w, h, rotate: rotation },
-          },
-        ],
-        stopRecursion: true, // Treat as leaf
-      };
+      // If generateCustomShapeSVG returns null (full circle case), let the ellipse logic handle it
+      if (shapeSvg) {
+        return {
+          items: [
+            {
+              type: 'image',
+              zIndex,
+              domOrder,
+              options: { data: shapeSvg, x, y, w, h, rotate: rotation },
+            },
+          ],
+          stopRecursion: true, // Treat as leaf
+        };
+      }
+      // shapeSvg is null - fall through to standard ellipse logic below
     }
 
     // --- ASYNC JOB: Clipped Divs via Canvas ---
@@ -64673,6 +64694,10 @@
       const textParts = [];
       let trimNextLeading = false;
 
+      // Detect gap between flex/inline children so we can inject spacing in PPTX text runs.
+      const parentIsFlex = style.display === 'flex' || style.display === 'inline-flex';
+      const parentGapPx = parentIsFlex ? (parseFloat(style.gap) || parseFloat(style.columnGap) || 0) : 0;
+
       node.childNodes.forEach((child, index) => {
         // Handle <br> tags
         if (child.tagName === 'BR') {
@@ -64717,6 +64742,20 @@
             delete textOpts.highlight;
           }
 
+          // FIX: Inject space between adjacent inline/flex children when margin or gap creates visual spacing.
+          // Without this, "客户第一""快速迭代" would render as "客户第一快速迭代" in PPTX.
+          if (textParts.length > 0 && child.nodeType === 1) {
+            const marginLeft = parseFloat(nodeStyle.marginLeft) || 0;
+            const prevChild = node.childNodes[index - 1];
+            const prevMarginRight = (prevChild && prevChild.nodeType === 1)
+              ? (parseFloat(window.getComputedStyle(prevChild).marginRight) || 0)
+              : 0;
+            const totalGap = marginLeft + prevMarginRight + parentGapPx;
+            if (totalGap > 0) {
+              textParts.push({ text: ' ', options: getTextStyle(style, config.scale) });
+            }
+          }
+
           textParts.push({ text: textVal, options: textOpts });
         }
       });
@@ -64733,7 +64772,7 @@
 
         let padding = getPadding(style, config.scale);
 
-        textPayload = { text: textParts, align, valign, inset: padding };
+        textPayload = { text: textParts, align, valign, margin: padding };
       }
     }
 
@@ -64832,9 +64871,8 @@
             h,
             align: textPayload.align,
             valign: textPayload.valign,
-            inset: textPayload.inset,
+            margin: textPayload.margin,
             rotate: rotation,
-            margin: 0,
             wrap: true,
             autoFit: true,
             vert: writingModeVert,
@@ -64865,8 +64903,9 @@
       const transparency = (1 - finalAlpha) * 100;
       const useSolidFill = bgColorObj.hex && !isImageWrapper;
 
+      let shapeSvg = null;
       if (hasPartialBorderRadius && useSolidFill && !textPayload) {
-        const shapeSvg = generateCustomShapeSVG(
+        shapeSvg = generateCustomShapeSVG(
           widthPx,
           heightPx,
           bgColorObj.hex,
@@ -64879,13 +64918,19 @@
           }
         );
 
-        items.push({
-          type: 'image',
-          zIndex,
-          domOrder,
-          options: { data: shapeSvg, x, y, w, h, rotate: rotation },
-        });
-      } else {
+        // Only add SVG image if not a full circle (null means use ellipse instead)
+        if (shapeSvg) {
+          items.push({
+            type: 'image',
+            zIndex,
+            domOrder,
+            options: { data: shapeSvg, x, y, w, h, rotate: rotation },
+          });
+        }
+      }
+
+      // Handle standard shapes (ellipse for full circles, roundRect for partial radii)
+      if (!shapeSvg) {
         const shapeOpts = {
           x,
           y,
@@ -64941,8 +64986,7 @@
             rotate: rotation,
             align: textPayload.align,
             valign: textPayload.valign,
-            inset: textPayload.inset,
-            margin: 0,
+            margin: textPayload.margin,
             wrap: true,
             autoFit: true,
             vert: writingModeVert,
@@ -64954,7 +64998,7 @@
             textParts: textPayload.text,
             options: textOptions,
           });
-        } else if (!hasPartialBorderRadius) {
+        } else if (!hasPartialBorderRadius || shapeSvg === null) {
           items.push({
             type: 'shape',
             zIndex,

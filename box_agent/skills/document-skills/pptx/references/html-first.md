@@ -214,23 +214,39 @@ For content slides, prefer:
 ### Image Plan Manifest
 
 Before generating images, create or update `assets/generated/manifest.json`.
-Use this shape:
+The manifest has a top-level `style_anchor` reused by every `generate` entry,
+plus an `image_plan` array. Use this shape:
 
 ```json
 {
+  "style_anchor": {
+    "name": "editorial-vector-soft",
+    "style": "Editorial vector illustration, clean linework, soft gradient fills, subtle grain texture",
+    "palette": "Deep indigo #1E2A5E base, electric cyan #22D3EE accents, warm amber #F59E0B highlights, off-white #F8FAFC background",
+    "lighting": "Soft directional light from upper-left, gentle rim light, no harsh shadows",
+    "rendering": "High detail, crisp edges, 4K poster quality, magazine-grade finish"
+  },
   "image_plan": [
     {
       "slide": "03",
       "decision": "generate",
       "kind": "hero_illustration",
       "reason": "abstract AI workflow concept needs a visual anchor",
-      "placement": "right-side visual",
+      "placement": "right-side hero, ~720x1080 area, title overlays the left third",
       "aspect_ratio": "16:9",
       "target_size": "2848x1600",
-      "prompt": "Editorial business illustration of ...",
-      "avoid": "text inside image, realistic named people, busy background",
+      "prompt": {
+        "subject": "Three abstract data streams converging into a central neural core, floating geometric nodes orbit the core, translucent flow lines connect them",
+        "composition": "Off-center hero on the right two-thirds, generous negative space on the left for the title overlay, eye-level perspective, balanced rule-of-thirds framing",
+        "style": "Editorial vector illustration, clean linework, soft gradient fills, subtle grain texture",
+        "palette": "Deep indigo #1E2A5E base, electric cyan #22D3EE accents, warm amber #F59E0B highlights, off-white #F8FAFC background",
+        "lighting": "Soft directional light from upper-left, gentle rim light on focal node, no harsh shadows",
+        "mood": "Optimistic, technical, forward-looking",
+        "quality": "High detail, crisp edges, 4K poster quality, magazine-grade finish"
+      },
+      "avoid": "embedded text, captions, watermarks, signatures, logos, realistic named people, recognizable celebrities, busy background where copy lands, generic stock-illustration look, photo-bashed collage, low-resolution, blurry, jpeg artifacts",
       "output_path": "assets/generated/slide-03-hero.png",
-      "alt_text": "Abstract AI workflow illustration"
+      "alt_text": "Abstract AI workflow illustration with converging data streams"
     },
     {
       "slide": "05",
@@ -240,6 +256,114 @@ Use this shape:
   ]
 }
 ```
+
+The `prompt` field may be either a structured object (preferred) or a single
+string. If `generate_image` only accepts a string, flatten the object by
+joining fields in this exact order with `. `: `subject`, `composition`,
+`style`, `palette`, `lighting`, `mood`, `quality`. Keep the structured form
+in the manifest for auditability even when the call site flattens it.
+
+### Prompt Template
+
+Write every `generate` prompt with structured fields, not a free-form sentence.
+Vague prompts like "modern illustration of AI, blue, professional" are the main
+reason image quality looks generic. Use the seven-field template; keep order
+consistent so the model weights subject before style.
+
+Required fields, in order:
+
+1. **subject** — what the image is *of*. Concrete nouns, objects, action, environment. No style words here.
+2. **composition** — framing, focal point, layout, where text-safe space lives, perspective.
+3. **style** — exactly the `style` clause from the deck `style_anchor`. Do not invent per-slide styles.
+4. **palette** — exactly the `palette` clause from the deck `style_anchor`, or the brand palette when supplied. Use hex codes.
+5. **lighting** — direction, softness, contrast, time of day for scenes; reuse the anchor unless the slide needs a deliberate variation.
+6. **mood** — one or two adjectives tied to the slide message (calm, energetic, optimistic, technical, urgent, premium).
+7. **quality** — rendering descriptors that raise fidelity. Reuse the anchor `rendering` clause plus optional per-kind boosters.
+
+Negatives go in the separate `avoid` field, never inside `prompt`.
+
+### Style Anchor
+
+Pick exactly one style anchor for the whole deck and reuse its `style`,
+`palette`, `lighting`, and `rendering` clauses across every generated image.
+Inconsistent styles look amateur even when individual images are technically
+good. Recommended named anchors (pick one, do not mix within a deck):
+
+- **`editorial-vector-soft`** — clean linework, soft gradients, light grain. B2B, finance, strategy, AI/tech, consulting, policy decks.
+- **`isometric-tech`** — isometric 3D, vibrant brand colors, subtle ambient occlusion, crisp edges. Product, system, infrastructure, dev-tools decks.
+- **`photoreal-product`** — studio-lit photoreal product mockup, shallow depth of field, realistic materials. Launches, marketing, hardware decks.
+- **`cinematic-scene`** — cinematic key-art, volumetric light, atmospheric haze, filmic color grade. Vision, brand, campaign, divider covers.
+- **`flat-minimal`** — flat geometric shapes, two- or three-tone palette, no gradients, generous whitespace. Analytical, academic, government, scientific decks.
+- **`3d-soft-render`** — soft clay-render 3D, pastel palette, rounded forms, gentle ambient light. Consumer, education, healthtech, kid-friendly decks.
+- **`abstract-texture`** — abstract gradient mesh, light particles, no figurative content. Dividers, backgrounds, atmosphere-only slides.
+
+If the user supplied brand guidelines, override `palette`, `style`, and
+`lighting` with the brand language; keep the named anchor only for kind-level
+hints.
+
+### Quality Boosters
+
+Use 3-5 of these in the `quality` field; stacking more makes prompts noisy and
+hurts adherence. Skip weak filler like "beautiful", "amazing", "best quality";
+modern image models ignore them.
+
+- detail and edges: "high detail", "ultra-detailed", "crisp edges", "sharp focus"
+- finish: "4K poster quality", "magazine-grade finish", "editorial quality"
+- composition: "balanced composition", "rule-of-thirds framing"
+- vector/illustration anchors: "consistent line weight", "even stroke", "limited color count"
+- photoreal/3D anchors: "studio lighting", "soft shadows", "global illumination", "subsurface scattering"
+- cinematic anchors: "subtle film grain", "muted contrast", "anamorphic flare", "color graded"
+- backgrounds: "low-detail text-safe area", "smooth gradient where copy lands"
+
+### Required Negatives
+
+Every `generate` entry must include this baseline in `avoid`, plus
+slide-specific negatives:
+
+- "embedded text, captions, watermarks, signatures, logos"
+- "low-resolution, blurry, jpeg artifacts, pixelation, banding"
+- "realistic named people, recognizable celebrities"
+- "generic stock-illustration look, clipart, photo-bashed collage"
+
+Add when relevant:
+
+- humans involved: "distorted hands, extra fingers, deformed faces, uncanny anatomy"
+- background images: "busy patterns where copy lands, high-contrast detail in the text-safe area"
+- product mockups: "fake brand logos, misspelled labels, plastic-looking materials"
+- vector style: "raster artifacts, photographic noise, gradient banding"
+- photoreal style: "over-saturated colors, HDR halos, plastic skin"
+
+### Bad vs Good Prompt
+
+Bad (vague, decorative, generic output):
+
+```text
+Modern illustration of AI workflow, blue colors, professional style, beautiful, high quality
+```
+
+Good (structured, anchored, specific):
+
+```text
+Subject: three abstract data streams converging into a glowing neural core, floating geometric nodes orbit the core, translucent flow lines connect them.
+Composition: off-center hero on the right two-thirds, generous negative space on the left for title overlay, eye-level perspective, rule-of-thirds framing.
+Style: editorial vector illustration, clean linework, soft gradient fills, subtle grain texture.
+Palette: deep indigo #1E2A5E, electric cyan #22D3EE accents, warm amber #F59E0B highlights, off-white #F8FAFC background.
+Lighting: soft directional light from upper-left, gentle rim light on focal node, no harsh shadows.
+Mood: optimistic, technical, forward-looking.
+Quality: high detail, crisp edges, 4K poster quality, magazine-grade finish, balanced composition.
+```
+
+### Per-Kind Prompt Hints
+
+Tune the prompt by image `kind`. Anchor stays the same; subject/composition/quality vary.
+
+- **hero_illustration**: lead with subject + composition; reserve text-safe area on one side; pair with `editorial-vector-soft`, `isometric-tech`, or `3d-soft-render`; quality booster: "consistent line weight" or "soft ambient occlusion".
+- **full_bleed_background**: emphasize palette + lighting + low-detail center or lower-third band for text; pair with `cinematic-scene` or `abstract-texture`; quality booster: "low-detail text-safe area in the upper third", "smooth gradient where copy lands".
+- **product_mockup**: pair with `photoreal-product`; specify surface, material, reflection, depth of field, one hero angle, neutral seamless backdrop; quality booster: "studio lighting", "soft shadows", "subsurface scattering".
+- **scene**: pair with `cinematic-scene`; specify environment, time of day, atmosphere, single focal subject, foreground/midground/background; quality booster: "volumetric light", "subtle film grain".
+- **spot_illustration**: pair with `flat-minimal` or `editorial-vector-soft`; square `2048x2048`; single centered object, neutral background; quality booster: "limited color count", "even stroke".
+- **texture_tile**: pair with `abstract-texture`; state seamless or non-seamless, micro-detail scale, no recognizable subject; quality booster: "smooth gradient mesh", "subtle particle highlights".
+- **portrait_alternative** (when named people would otherwise be needed): pair with `editorial-vector-soft` or `flat-minimal`; subject must be a silhouette, jersey, nameplate, emblem, or stat card — never a realistic likeness; always include "no facial features, no recognizable likeness" in `avoid`.
 
 Allowed decisions:
 
@@ -344,9 +468,56 @@ ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/html_to_editable_pptx.js" deck.
 
 The export script runs self-check again, writes `qa/html_self_check.json`,
 creates `slides/slide-*.png` preview images for visual QA, temporarily inlines
-local `<img>` paths in the browser DOM for export, loads
+local `<img>` paths in the browser DOM for export, captures a per-slide
+background-decoration bitmap (see below), loads
 `scripts/dom-to-pptx.bundle.js`, and writes `output.pptx`. It does not rewrite
 `deck.html`.
+
+### Background Capture Layer
+
+`html_to_editable_pptx.js` defaults to `--bg-capture always`. For each slide it
+takes a 1920x1080 PNG that contains **only** the slide-level background and
+pure-decoration nodes; every text container, text node, pill / chip / card
+background, and `<img>` is hidden during capture. The captures are written to
+`assets/bg-capture/slide-XX.png` next to `deck.html` and inserted into the
+in-memory DOM as `<img class="pptx-bg">` at the back of each slide before
+`dom-to-pptx` runs. After capture the exporter removes every node it marked
+as pure decoration from the export tree so the bitmap is not painted twice.
+
+A node counts as **pure decoration** (and is therefore baked into the bitmap)
+when **all** of these are true:
+
+- it is not an `<img>`, and
+- it has no descendant `<img>`, and
+- it has no non-whitespace text in any descendant
+
+Plus, regardless of content, these elements are always treated as decoration:
+`<svg>` (including any text/tspan inside it), `<hr>`, `<canvas>`, and CSS
+`::before` / `::after` pseudo-elements.
+
+Resulting layer order in PPT:
+
+1. background bitmap (one per slide, faithful pixel render of all decoration)
+2. existing `<img>` elements, including `assets/generated/*` (kept as native
+   PPT pictures and remain individually replaceable)
+3. text containers, pills, chips, cards, badges (kept as native PPT shapes
+   with native fills, borders, radii)
+4. text (kept as native editable text frames)
+
+Implications for authors:
+
+- Text is never baked. Pills / chips / cards that *wrap* text are also not
+  baked — their fills, borders, and rounded corners become native PPT shapes
+  and stay editable.
+- Decorative SVGs, inline icons, dividers (`<hr>`), and CSS-painted
+  decorations *with no text or `<img>` inside them* are baked into the bitmap.
+  Do not also expect them as separate editable PPT shapes.
+- Slide-level visual changes happen in `deck.html`. The bitmap is regenerated
+  on every export, so do not hand-edit `assets/bg-capture/*.png`.
+- Use `--bg-capture never` only for purely flat decks where the bitmap layer
+  adds no value.
+- Keep `assets/bg-capture/` under the deliverable workspace; it is reproducible
+  build output and part of the source asset tree.
 
 Do not install the npm `dom-to-pptx` package for this workflow. The editable
 export must use this skill's bundled `scripts/dom-to-pptx.bundle.js`, which may

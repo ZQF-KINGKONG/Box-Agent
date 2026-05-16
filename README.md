@@ -179,7 +179,7 @@ api_key: "your-api-key"
 api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic" # "anthropic" or "openai"
-max_steps: 100
+max_steps: 200
 ```
 
 ```bash

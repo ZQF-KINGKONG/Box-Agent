@@ -1,0 +1,174 @@
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const CAPTURE_CSS = `
+/* Hide every non-decoration element during capture so the bitmap contains
+ * only the slide-level background and pure decoration (no text, no <img>,
+ * no text containers / cards / pills). */
+.pptx-capture-mode [data-pptx-non-decoration] {
+  visibility: hidden !important;
+}
+/* Hide text rendered inside decoration SVGs too (icons sometimes include
+ * <text>/<tspan> labels we never want baked into the bitmap). */
+.pptx-capture-mode [data-pptx-decoration] text,
+.pptx-capture-mode [data-pptx-decoration] tspan {
+  fill: transparent !important;
+  -webkit-text-fill-color: transparent !important;
+}
+`;
+
+const EXPORT_CSS = `
+/* After capture: remove decoration nodes from the DOM-to-PPTX export tree,
+ * because their visuals already live in the background bitmap. The decoration
+ * node's pseudo-elements (::before / ::after) are removed implicitly with the
+ * host element. We do NOT globally disable ::before/::after, because
+ * dom-to-pptx reads ::before content strings as inline icon text on
+ * non-decoration (text-bearing) elements. */
+.pptx-export-flat [data-pptx-decoration]:not(.pptx-bg) {
+  display: none !important;
+}
+/* The slide's own background is in the bitmap; make sure dom-to-pptx
+ * does not paint it again. */
+.pptx-export-flat .slide {
+  background: transparent !important;
+  background-image: none !important;
+}
+/* Background image must be visible, sized in absolute pixels, and below
+ * every text/image element. */
+.pptx-export-flat img.pptx-bg {
+  display: block !important;
+  visibility: visible !important;
+  position: absolute !important;
+  left: 0 !important;
+  top: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  pointer-events: none !important;
+  opacity: 1 !important;
+}
+`;
+
+async function injectCaptureStyles(page) {
+  await page.addStyleTag({ content: CAPTURE_CSS + EXPORT_CSS });
+}
+
+async function markDecorationNodes(page) {
+  await page.evaluate(() => {
+    const DECORATION_TAGS = new Set(["SVG", "HR", "CANVAS"]);
+
+    function hasContent(el) {
+      if (el.querySelector("img")) return true;
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+      let n;
+      while ((n = walker.nextNode())) {
+        if (n.textContent.trim()) return true;
+      }
+      return false;
+    }
+
+    Array.from(document.querySelectorAll(".slide")).forEach(slide => {
+      const all = slide.querySelectorAll("*");
+      all.forEach(el => {
+        if (el === slide) return;
+        if (el.classList.contains("pptx-bg")) return;
+        // <img> is always a native picture (never a decoration node).
+        if (el.tagName === "IMG") {
+          el.setAttribute("data-pptx-non-decoration", "");
+          return;
+        }
+        // Treat SVG / HR / CANVAS as decoration even if they contain text.
+        if (DECORATION_TAGS.has(el.tagName)) {
+          el.setAttribute("data-pptx-decoration", "");
+          return;
+        }
+        // Anything inside a decoration SVG follows the SVG root.
+        if (el.closest("svg")) {
+          el.setAttribute("data-pptx-decoration", "");
+          return;
+        }
+        if (hasContent(el)) {
+          el.setAttribute("data-pptx-non-decoration", "");
+        } else {
+          el.setAttribute("data-pptx-decoration", "");
+        }
+      });
+    });
+  });
+}
+
+async function captureSlideBackgrounds({ page, slideHandles, captureDir }) {
+  fs.mkdirSync(captureDir, { recursive: true });
+
+  await page.evaluate(() => {
+    document.documentElement.classList.add("pptx-capture-mode");
+  });
+  await page.evaluate(
+    () => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    })
+  );
+
+  const captures = [];
+  for (let i = 0; i < slideHandles.length; i += 1) {
+    const filename = `slide-${String(i + 1).padStart(2, "0")}.png`;
+    const filePath = path.join(captureDir, filename);
+    await slideHandles[i].screenshot({ path: filePath, type: "png" });
+    captures.push({ index: i, filePath, filename });
+  }
+
+  await page.evaluate(() => {
+    document.documentElement.classList.remove("pptx-capture-mode");
+  });
+
+  return captures;
+}
+
+async function applyDecorationFlatten({ page, captures, width, height }) {
+  const items = captures.map(capture => {
+    const bytes = fs.readFileSync(capture.filePath);
+    return {
+      index: capture.index,
+      dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
+    };
+  });
+
+  await page.evaluate(
+    payload => {
+      const slides = Array.from(document.querySelectorAll(".slide"));
+      payload.items.forEach(item => {
+        const slide = slides[item.index];
+        if (!slide) return;
+        const existing = slide.querySelector(":scope > img.pptx-bg");
+        if (existing) existing.remove();
+        const bg = document.createElement("img");
+        bg.className = "pptx-bg";
+        bg.src = item.dataUrl;
+        bg.setAttribute("alt", "");
+        bg.setAttribute("aria-hidden", "true");
+        bg.setAttribute("data-pptx-bg-capture", "true");
+        // Explicit pixel sizing so dom-to-pptx never sees a 0x0 rect.
+        bg.style.width = payload.width + "px";
+        bg.style.height = payload.height + "px";
+        slide.insertBefore(bg, slide.firstChild);
+      });
+      document.documentElement.classList.add("pptx-export-flat");
+    },
+    { items, width, height }
+  );
+
+  await page.waitForFunction(() => {
+    const bgs = Array.from(document.querySelectorAll("img.pptx-bg"));
+    if (!bgs.length) return false;
+    return bgs.every(img => img.complete && img.naturalWidth > 0);
+  });
+}
+
+module.exports = {
+  injectCaptureStyles,
+  markDecorationNodes,
+  captureSlideBackgrounds,
+  applyDecorationFlatten,
+};

@@ -62,7 +62,7 @@ class ImageGenerationConfig(BaseModel):
 class AgentConfig(BaseModel):
     """Agent configuration"""
 
-    max_steps: int = 100
+    max_steps: int = 200
     workspace_dir: str = "./workspace"
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
@@ -263,7 +263,7 @@ class Config(BaseModel):
 
         # Parse Agent configuration
         agent_config = AgentConfig(
-            max_steps=data.get("max_steps", 100),
+            max_steps=data.get("max_steps", 200),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             enable_memory=data.get("enable_memory", True),

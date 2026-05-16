@@ -781,7 +781,7 @@ async def run_agent_loop(
     llm,
     messages: list[Message],
     tools: dict[str, Tool],
-    max_steps: int = 100,
+    max_steps: int = 200,
     token_limit: int = 113400,
     is_cancelled: CancelChecker | None = None,
     logger: AgentLogger | None = None,
@@ -1227,6 +1227,27 @@ async def run_agent_loop(
                     success=result.success, content=tc_content, error=tc_error,
                 )
 
+            # Append the tool message BEFORE yielding any events. The yields
+            # below hand control back to the consumer, which may suspend or
+            # raise; if we yielded first and only appended on resumption,
+            # the conversation could be left with an assistant tool_calls
+            # message that has no matching tool response — a fatal protocol
+            # state for the next LLM call.
+            msg_content = _tool_message_content_for_model(
+                tool_name=fn_name,
+                arguments=fn_args,
+                result=result,
+                visible_content=tc_content,
+                visible_error=tc_error,
+            )
+            tool_msg = Message(
+                role="tool",
+                content=msg_content,
+                tool_call_id=tc_id,
+                name=fn_name,
+            )
+            messages.append(tool_msg)
+
             yield ToolCallResult(
                 tool_call_id=tc_id,
                 tool_name=fn_name,
@@ -1257,23 +1278,6 @@ async def run_agent_loop(
                 already = {a.path for a in regex_artifacts}
                 for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
                     yield artifact
-
-            # Append compact model-facing tool content. Full tool output is
-            # still emitted above via ToolCallResult for hosts/UI/logs.
-            msg_content = _tool_message_content_for_model(
-                tool_name=fn_name,
-                arguments=fn_args,
-                result=result,
-                visible_content=tc_content,
-                visible_error=tc_error,
-            )
-            tool_msg = Message(
-                role="tool",
-                content=msg_content,
-                tool_call_id=tc_id,
-                name=fn_name,
-            )
-            messages.append(tool_msg)
 
             # Cancellation check after each tool
             if cancelled():
@@ -1405,6 +1409,24 @@ async def run_agent_loop(
                         success=result.success, content=par_content, error=par_error,
                     )
 
+                # Append the tool message BEFORE yielding any events — see
+                # the equivalent comment in the sequential branch above for
+                # the protocol-state rationale.
+                msg_content = _tool_message_content_for_model(
+                    tool_name=fn_name,
+                    arguments=fn_args,
+                    result=result,
+                    visible_content=par_content,
+                    visible_error=par_error,
+                )
+                tool_msg = Message(
+                    role="tool",
+                    content=msg_content,
+                    tool_call_id=tc_id,
+                    name=fn_name,
+                )
+                messages.append(tool_msg)
+
                 yield ToolCallResult(
                     tool_call_id=tc_id,
                     tool_name=fn_name,
@@ -1423,23 +1445,6 @@ async def run_agent_loop(
                 if not result.success and result.permission_request and not permission_negotiator:
                     pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                     yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
-
-                # Append compact model-facing tool content. Full tool output is
-                # still emitted above via ToolCallResult for hosts/UI/logs.
-                msg_content = _tool_message_content_for_model(
-                    tool_name=fn_name,
-                    arguments=fn_args,
-                    result=result,
-                    visible_content=par_content,
-                    visible_error=par_error,
-                )
-                tool_msg = Message(
-                    role="tool",
-                    content=msg_content,
-                    tool_call_id=tc_id,
-                    name=fn_name,
-                )
-                messages.append(tool_msg)
 
         # ── Step end ────────────────────────────────────────
         elapsed = perf_counter() - step_start

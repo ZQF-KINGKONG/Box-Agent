@@ -494,9 +494,45 @@ class GrantStore:
 # ── Bash helper ──
 
 
-_ABS_PATH_RE = re.compile(r'(?:^|\s|["\']|>|>>)(\/(?:[^\s"\'\\]|\\.)+)')
+# Absolute paths: a leading '/' followed by chars that are plausibly part of a
+# real filesystem path. We exclude shell/regex metacharacters (`<>$(){};|&`) so
+# that fragments embedded in `sed`/HTML/redirects do not get mis-extracted as
+# paths (e.g. `/<strong>$1<\/strong>/g`). Backslash is also excluded; real
+# POSIX paths never need a `\X` escape inside the path literal.
+#
+# Prefix `["\']` may anchor a path (e.g. `cp "/tmp/a"`), but only when it is
+# an *opening* quote — a closing quote after `"$VAR"` / `"${VAR}"` followed by
+# `/slide-*.png` would otherwise produce a phantom `/slide-*.png` absolute
+# path. The negative lookbehind `(?<![\w}])` enforces that the quote is not
+# preceded by a word char or `}` (variable close).
+_ABS_PATH_RE = re.compile(r'(?:^|\s|(?<![\w}])["\'])(\/[^\s"\'\\<>$(){};|&]+)')
 _TILDE_PATH_RE = re.compile(r'(?:^|\s|["\';=])(~(?:/[^\s"\'\\;|&]*)?)')
 _HOME_VAR_RE = re.compile(r'(\$HOME(?:/[^\s"\'\\;|&]*)?)')
+
+# Real shell redirect operators (`>`, `>>`, `2>`, `2>>`, ...). When followed by
+# a path, that path is what we want to extract — but we must distinguish a real
+# redirect from a `>` that happens to be the closing bracket of an HTML/XML
+# tag (e.g. `</strong>/g`). A redirect is preceded by whitespace, start-of-
+# string, or an fd digit. We rewrite those to whitespace before extraction so
+# the existing whitespace-prefix path regex picks the target up cleanly.
+_REDIRECT_RE = re.compile(r'(^|[\s\d])>{1,2}')
+
+# sed/perl-style substitution: `s<delim>pattern<delim>replacement<delim>[flags]`.
+# Stripped before path extraction so the regex bodies of `sed 's/.../.../g'`,
+# `perl -pe 's|...|...|'` etc. don't get scanned for absolute paths.
+_SED_SUBST_RE = re.compile(
+    r"""
+    (?<![A-Za-z0-9_])           # `s` must not follow a word char
+    s
+    ([/|#,@!:%])                # the chosen delimiter (group 1)
+    (?:\\.|(?!\1).)*            # pattern body: escaped char or non-delim
+    \1
+    (?:\\.|(?!\1).)*            # replacement body
+    \1
+    [a-zA-Z]*                   # optional flags (g, i, m, ...)
+    """,
+    re.VERBOSE,
+)
 
 # Bare system roots that almost never represent a real user write/read target.
 # When the regex catches one of these (typically because of shell punctuation
@@ -522,7 +558,19 @@ def extract_absolute_paths(command: str) -> list[str]:
     seen: set[str] = set()
     paths: list[str] = []
 
-    for m in _ABS_PATH_RE.finditer(command):
+    # Strip sed/perl substitution expressions first so the regex bodies don't
+    # get mis-parsed as absolute paths (e.g. the `/g` flag at the end of
+    # `sed 's|a|b|g'` or the literal `/` delimiters in `s/foo/bar/`).
+    sanitized = _SED_SUBST_RE.sub(" ", command)
+    # Normalize real shell redirects (`>`, `>>`, `2>`) to whitespace so the
+    # path immediately following them is picked up via the whitespace-prefix
+    # branch of `_ABS_PATH_RE`. We do this only for redirects preceded by
+    # whitespace/SOL/fd-digit so that `>` inside an HTML/XML tag like
+    # `</strong>/g` is left alone (and therefore not treated as a path
+    # boundary).
+    sanitized = _REDIRECT_RE.sub(lambda m: m.group(1) + " ", sanitized)
+
+    for m in _ABS_PATH_RE.finditer(sanitized):
         p = m.group(1).rstrip(";")
         if p in ("/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"):
             continue
@@ -537,7 +585,7 @@ def extract_absolute_paths(command: str) -> list[str]:
 
     home = str(Path.home())
 
-    for m in _TILDE_PATH_RE.finditer(command):
+    for m in _TILDE_PATH_RE.finditer(sanitized):
         raw = m.group(1)  # e.g. "~" or "~/Downloads"
         suffix = raw[1:]  # strip leading ~
         expanded = home + suffix
@@ -545,7 +593,7 @@ def extract_absolute_paths(command: str) -> list[str]:
             seen.add(expanded)
             paths.append(expanded)
 
-    for m in _HOME_VAR_RE.finditer(command):
+    for m in _HOME_VAR_RE.finditer(sanitized):
         raw = m.group(1)  # e.g. "$HOME" or "$HOME/file.txt"
         suffix = raw[5:]  # strip leading $HOME
         expanded = home + suffix

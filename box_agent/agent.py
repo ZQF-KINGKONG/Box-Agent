@@ -88,7 +88,7 @@ class Agent:
         llm_client: LLMClient,
         system_prompt: str,
         tools: list[Tool],
-        max_steps: int = 100,
+        max_steps: int = 200,
         workspace_dir: str = "./workspace",
         token_limit: int = 113400,
         hooks: list | None = None,

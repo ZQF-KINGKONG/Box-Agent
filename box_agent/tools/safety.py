@@ -40,12 +40,41 @@ _ESCAPE_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bcd\s+/"), "cd to absolute path"),
     (re.compile(r"\bcd\s+~"), "cd to home directory"),
     (re.compile(r'(?:^|\s|;|&&|\|\|)(?:cat|less|head|tail|grep|awk|sed)\s+/'), "read from absolute path"),
-    (re.compile(r'(?:^|\s|;|&&|\|\|)(?:cp|mv|ln)\s+.*/'), "file operation with absolute path"),
-    (re.compile(r'>\s*/'), "redirect to absolute path"),
+    # `cp`/`mv`/`ln` writing to an absolute path. Match only when the FIRST
+    # argument (source) starts with `/`. The previous form `\s+.*/` matched
+    # any `cp ... /` anywhere on the line, which falsely flagged commands like
+    # `cp slides/x.png output/rendered/` (all relative, just contains a slash).
+    (re.compile(r'(?:^|\s|;|&&|\|\|)(?:cp|mv|ln)\s+/'), "file operation with absolute path"),
+    # Real shell redirects: `>`/`>>` (optionally with fd prefix like `2>`) followed
+    # by `/`. Must be preceded by whitespace, start-of-string, or an fd digit so
+    # that `>/` appearing inside an HTML tag or a sed/perl substitution body
+    # (e.g. `<\/h1>/<h1>` after the closing `>` of the previous tag) is not
+    # mis-classified as a redirect to an absolute path.
+    (re.compile(r'(?:^|[\s\d])>{1,2}\s*/'), "redirect to absolute path"),
     # Home directory references: ~ and $HOME anywhere as path tokens
     (re.compile(r'(?<!\w)~(?=/|\s|;|"|\'|&|\||$)'), "command references home directory via ~"),
     (re.compile(r'\$HOME\b'), "command references home directory via $HOME"),
 ]
+
+# sed/perl-style substitution `s<delim>pattern<delim>replacement<delim>[flags]`.
+# Stripped from the command BEFORE pattern matching so the regex bodies in
+# `sed 's/.../.../g'`, `perl -0pi -e 's|...|...|'`, etc. do not yield false
+# positives like "redirect to absolute path" via a stray `>/` inside the
+# pattern (e.g. `<\/strong>/<strong>` ends with `>/<`). Mirror of the same
+# constant in `permissions.py::extract_absolute_paths`.
+_SED_SUBST_RE = re.compile(
+    r"""
+    (?<![A-Za-z0-9_])           # `s` must not follow a word char
+    s
+    ([/|#,@!:%])                # the chosen delimiter (group 1)
+    (?:\\.|(?!\1).)*            # pattern body: escaped char or non-delim
+    \1
+    (?:\\.|(?!\1).)*            # replacement body
+    \1
+    [a-zA-Z]*                   # optional flags (g, i, m, ...)
+    """,
+    re.VERBOSE,
+)
 
 # /dev/ special files that are safe to redirect to / read from.
 # Only sinks and standard streams — NOT unbounded sources like
@@ -138,6 +167,10 @@ def _command_has_unsafe_paths(command: str, workspace_dir: str | None) -> bool:
     components are not misclassified as filesystem paths.
     """
     cleaned = _URL_RE.sub("", command)
+    # Drop sed/perl substitution bodies so their literal `/…/` regex segments
+    # are not scanned as filesystem paths (mirrors the same strip in
+    # `extract_absolute_paths`).
+    cleaned = _SED_SUBST_RE.sub(" ", cleaned)
     for m in _ABS_PATH_SCAN_RE.finditer(cleaned):
         p = m.group(1).rstrip(";")
         if not _path_is_safe(p, workspace_dir):
@@ -162,8 +195,14 @@ def detect_scope_escape(command: str, workspace_dir: str | None = None) -> str |
     Returns:
         A reason string if escape is detected, or None if the command looks safe.
     """
+    # Strip sed/perl substitution bodies first so their `s/.../.../`
+    # regex literals can't be mis-read as redirects, `cat /…` reads, etc.
+    # Replace with same-length spaces so all downstream string indices
+    # (used by `_extract_path_token`) stay aligned with the original.
+    sanitized = _SED_SUBST_RE.sub(lambda m: " " * (m.end() - m.start()), command)
+
     for pattern, reason in _ESCAPE_PATTERNS:
-        match = pattern.search(command)
+        match = pattern.search(sanitized)
         if match:
             path_token = _extract_path_token(command, match, reason)
 

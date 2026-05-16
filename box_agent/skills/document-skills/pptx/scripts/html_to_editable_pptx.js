@@ -4,6 +4,12 @@ const Module = require("module");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const { fileURLToPath, pathToFileURL } = require("url");
+const {
+  injectCaptureStyles,
+  markDecorationNodes,
+  captureSlideBackgrounds,
+  applyDecorationFlatten,
+} = require("./bg_capture");
 
 function officeRaccoonPrefix() {
   if (process.env.BOX_AGENT_NODE_PREFIX) return process.env.BOX_AGENT_NODE_PREFIX;
@@ -26,7 +32,7 @@ Module._initPaths();
 
 function usage() {
   console.log(
-    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width W] [--height H] [--svg-vector true|false] [--allow-self-check-issues] (default: false for pixel fidelity)"
+    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width W] [--height H] [--svg-vector true|false] [--bg-capture always|never] [--allow-self-check-issues] (default: --svg-vector false for pixel fidelity, --bg-capture always for visual fidelity)"
   );
   console.log("  If --width/--height are omitted, the first .slide element's CSS size is auto-detected.");
 }
@@ -126,6 +132,7 @@ function parseArgs(argv) {
     height: null,
     svgVector: false,
     allowSelfCheckIssues: false,
+    bgCapture: "always",
   };
   for (let i = 2; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -141,6 +148,10 @@ function parseArgs(argv) {
       i += 1;
     } else if (arg === "--svg-vector" && value) {
       opts.svgVector = value !== "false";
+      i += 1;
+    } else if (arg === "--bg-capture" && value) {
+      if (value !== "always" && value !== "never") failUsage();
+      opts.bgCapture = value;
       i += 1;
     } else if (arg === "--allow-self-check-issues") {
       opts.allowSelfCheckIssues = true;
@@ -314,19 +325,38 @@ async function main() {
     console.log(`Inlined ${inlinedImages.length} local image(s) for PPTX export.`);
   }
 
-  await page.addScriptTag({ path: bundlePath });
-
-  const slides = await page.locator(".slide").elementHandles();
-  if (!slides.length) {
+  const slideHandles = await page.locator(".slide").elementHandles();
+  if (!slideHandles.length) {
     await browser.close();
     console.error("No .slide elements found in HTML.");
     process.exit(1);
   }
 
+  let bgCaptures = [];
+  const bgCaptureDir = path.join(path.dirname(htmlPath), "assets", "bg-capture");
+  if (opts.bgCapture === "always") {
+    await injectCaptureStyles(page);
+    await markDecorationNodes(page);
+    bgCaptures = await captureSlideBackgrounds({
+      page,
+      slideHandles,
+      captureDir: bgCaptureDir,
+    });
+    await applyDecorationFlatten({
+      page,
+      captures: bgCaptures,
+      width: detectedWidth,
+      height: detectedHeight,
+    });
+    console.log(`Captured ${bgCaptures.length} background image(s) to ${bgCaptureDir}.`);
+  }
+
+  await page.addScriptTag({ path: bundlePath });
+
   const previews = [];
-  for (let i = 0; i < slides.length; i += 1) {
+  for (let i = 0; i < slideHandles.length; i += 1) {
     const imagePath = path.join(outDir, `slide-${String(i + 1).padStart(2, "0")}.png`);
-    await slides[i].screenshot({ path: imagePath });
+    await slideHandles[i].screenshot({ path: imagePath });
     previews.push(imagePath);
   }
 
@@ -373,6 +403,11 @@ async function main() {
         htmlSelfCheck: selfCheckReport,
         editableExport: "dom-to-pptx",
         localImagesInlinedForExport: inlinedImages,
+        bgCapture: {
+          mode: opts.bgCapture,
+          directory: opts.bgCapture === "always" ? bgCaptureDir : null,
+          files: bgCaptures.map(c => c.filePath),
+        },
       },
       null,
       2

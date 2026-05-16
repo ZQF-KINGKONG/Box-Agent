@@ -129,6 +129,41 @@ class TestDetectScopeEscape:
         assert detect_scope_escape("cd subdir") is None
         assert detect_scope_escape("echo hello > output.txt") is None
 
+    def test_perl_substitution_with_html_close_tag_not_blocked(self):
+        """`perl -0pi -e 's/<\\/h1>/<h1>…/' file.html` must not be flagged as
+        "redirect to absolute path" because of the `>/` inside the regex body."""
+        cmd = (
+            r"""perl -0pi -e 's/<h1>old<\/h1>/<h1>new<\/h1>/; """
+            r"""s/\.foo\{w:600px\}/.foo{w:540px}/g' output/page.html"""
+        )
+        assert detect_scope_escape(cmd) is None
+
+    def test_sed_substitution_with_absolute_path_in_body_not_blocked(self):
+        """`sed 's|/old/path|/new/path|g' file` substitution body is stripped
+        before scanning, so the workspace-relative target file is fine."""
+        assert (
+            detect_scope_escape("sed -i 's|/old/path|/new/path|g' file.txt") is None
+        )
+
+    def test_real_redirect_after_perl_subst_still_blocked(self):
+        """The strip removes the substitution body, but a real `> /abs/path`
+        elsewhere in the command must still be caught."""
+        cmd = r"perl -pe 's/a/b/g' file.txt > /tmp/out.txt"
+        assert detect_scope_escape(cmd) is not None
+
+    def test_cp_with_only_relative_paths_not_blocked(self):
+        """`cp slides/a.png output/rendered/` is all relative — the `.*/` form
+        of the old regex falsely flagged it. The narrow form must let it pass."""
+        assert detect_scope_escape("cp slides/slide-*.png output/rendered/") is None
+        assert detect_scope_escape("cp slides/slide-*.png output/rendered/ && ls output/rendered") is None
+        assert detect_scope_escape("mv a/b.txt c/d.txt") is None
+        assert detect_scope_escape("ln -s src/foo bar/baz") is None
+
+    def test_cp_with_absolute_source_still_blocked(self):
+        """`cp /etc/passwd .` (absolute source) is still flagged."""
+        assert detect_scope_escape("cp /etc/passwd local.txt") is not None
+        assert detect_scope_escape("mv /var/log/app.log archive/") is not None
+
 
 # ── validate_path_in_workspace ────────────────────────────────────────
 

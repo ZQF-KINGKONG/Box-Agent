@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import re
+import sys
 import time
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -18,6 +19,7 @@ from pydantic import Field, model_validator
 
 from .base import Tool, ToolResult
 from .pptx_safety import detect_pptx_self_check_bypass
+from .runtime import bundled_win_bash
 from .safety import (
     ask_user_confirmation,
     backup_file,
@@ -282,6 +284,47 @@ class BashTool(Tool):
         """
         self.is_windows = platform.system() == "Windows"
         self.shell_name = "PowerShell" if self.is_windows else "bash"
+        # Win-only: prefer the PortableGit ``bash.exe`` shipped inside the
+        # frozen runtime when available so the LLM can use bash syntax + the
+        # unix coreutils that the skills assume. Falls back to PowerShell
+        # when the bundle is absent (dev installs / older runtimes).
+        # Mac/Linux behavior unchanged.
+        self._bundled_win_bash: str | None = None
+        self._bundled_win_path_dirs: list[str] = []
+        if self.is_windows:
+            bundled = bundled_win_bash()
+            if bundled is not None:
+                self._bundled_win_bash = str(bundled)
+                self.shell_name = "bash"
+                # bash.exe lives at <PortableGit>/usr/bin/bash.exe. We launch
+                # bash without ``--login`` to avoid MSYS profile slow-start,
+                # which means /etc/profile never runs and coreutils dirs are
+                # absent from PATH. Prepend the three PortableGit search dirs
+                # explicitly so the LLM's `find`/`grep`/`sed`/`git` resolve.
+                portable_git_root = bundled.parent.parent.parent
+                self._bundled_win_path_dirs = [
+                    str(portable_git_root / "usr" / "bin"),
+                    str(portable_git_root / "mingw64" / "bin"),
+                    str(portable_git_root / "cmd"),
+                ]
+                # Some Electron launchers (and the restart-electron-foreground
+                # PowerShell helper) strip the Win system dirs from the env
+                # they hand to box-agent-acp, which leaves `powershell.exe`,
+                # `cmd.exe`, `where`, etc. unreachable from the LLM's bash.
+                # Append them defensively after the PortableGit dirs so the
+                # bundled coreutils still take precedence.
+                sys_root = os.environ.get("SystemRoot") or r"C:\Windows"
+                self._bundled_win_path_dirs.extend([
+                    os.path.join(sys_root, "system32"),
+                    sys_root,
+                    os.path.join(sys_root, "system32", "Wbem"),
+                    os.path.join(sys_root, "system32", "WindowsPowerShell", "v1.0"),
+                ])
+            log.info(
+                "bash_tool/init shell=%s bundled_bash=%s frozen=%s path_dirs=%s",
+                self.shell_name, self._bundled_win_bash,
+                getattr(sys, "frozen", False), self._bundled_win_path_dirs,
+            )
         # Unix: resolve login shell so subprocess inherits user's PATH.
         # Only trust known POSIX-compatible shells; fall back to /bin/bash
         # for fish, csh, and other non-POSIX shells whose syntax is
@@ -318,8 +361,45 @@ class BashTool(Tool):
         """
         stderr = asyncio.subprocess.STDOUT if merge_stderr else asyncio.subprocess.PIPE
         if self.is_windows:
+            # Win-only: detach stdin so the child shell does not inherit the
+            # ACP stdin pipe (parent box-agent-acp has stdio piped to Electron).
+            # Without this, MSYS bash.exe / powershell.exe may keep the handle
+            # alive even after the command finishes, leading to hangs.
+            if self._bundled_win_bash is not None:
+                # Copy env so we can prepend PortableGit search dirs without
+                # mutating the cached ``_subprocess_env``. Fall back to the
+                # process env when no custom env was prepared.
+                spawn_env = (
+                    dict(self._subprocess_env)
+                    if self._subprocess_env is not None
+                    else os.environ.copy()
+                )
+                if self._bundled_win_path_dirs:
+                    existing_path = spawn_env.get("PATH", "")
+                    path_parts = list(self._bundled_win_path_dirs)
+                    if existing_path:
+                        path_parts.append(existing_path)
+                    spawn_env["PATH"] = os.pathsep.join(path_parts)
+                log.info(
+                    "bash/spawn shell=bundled_bash cmd=%r cwd=%s merge_stderr=%s path_head=%s",
+                    command[:500], self.workspace_dir, merge_stderr,
+                    spawn_env.get("PATH", "")[:200],
+                )
+                return await asyncio.create_subprocess_exec(
+                    self._bundled_win_bash, "-c", command,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=stderr,
+                    cwd=self.workspace_dir,
+                    env=spawn_env,
+                )
+            log.info(
+                "bash/spawn shell=powershell cmd=%r cwd=%s merge_stderr=%s",
+                command[:500], self.workspace_dir, merge_stderr,
+            )
             return await asyncio.create_subprocess_exec(
                 "powershell.exe", "-NoProfile", "-Command", command,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 cwd=self.workspace_dir,
@@ -384,7 +464,12 @@ Examples:
   - npm test
   - python3 -m http.server 8080 (with run_in_background=true)""",
         }
-        return shell_examples["Windows"] if self.is_windows else shell_examples["Unix"]
+        # When the bundled Git-for-Windows bash is active on Win, the shell is
+        # POSIX bash with coreutils — use the Unix description so the LLM
+        # picks bash syntax (`&&`, `$()`, `grep`, `sed`) instead of PowerShell.
+        if self.is_windows and self._bundled_win_bash is None:
+            return shell_examples["Windows"]
+        return shell_examples["Unix"]
 
     @property
     def parameters(self) -> dict[str, Any]:

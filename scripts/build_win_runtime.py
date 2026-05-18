@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Windows-only BoxAgent runtime builder with two stages.
+
+Stages:
+    bin/              ← PyInstaller-frozen BoxAgent (changes when source changes)
+    runtime/          ← PortableGit (bash) + python-build-standalone (python)
+    runtimes/         ← Node
+
+`--exe-only` rebuilds **bin/ only**, leaving runtime/ and runtimes/ untouched.
+Use this when you change BoxAgent Python source but don't touch bash/node/python.
+
+Usage:
+    # Full build (PyInstaller + bash + python + node + tar.gz)
+    python scripts/build_win_runtime.py --version 0.8.40
+
+    # Rebuild only the BoxAgent exe; keep existing runtime/ and runtimes/
+    python scripts/build_win_runtime.py --version 0.8.40 --exe-only
+
+    # Drop new bin/ straight onto the dev install (no tar)
+    python scripts/build_win_runtime.py --exe-only --no-tar \\
+        --install-to D:\\qilin2\\officev3\\build-resources\\box-agent-runtime
+
+Output (default):
+    dist/runtime/box-agent-runtime/                 (assembled tree)
+    dist/runtime/box-agent-runtime-v{ver}-win32-x64.tar.gz
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# Reuse existing helpers from build_runtime.py so we don't drift.
+from scripts.build_runtime import (  # type: ignore
+    BUILD_TOOLS_CACHE,
+    PYTHON_STANDALONE_VERSION,
+    _install_portable_git_win,
+    _install_portable_python_win,
+    _install_sandbox_packages_win,
+    _relativize_node_manifest,
+)
+from box_agent.tools.runtime import DEFAULT_NODE_VERSION, NodeRuntimeManager
+
+
+def _read_version_from_package() -> str:
+    """Pull version from box_agent/__init__.py or pyproject — fallback to 'dev'."""
+    init_file = PROJECT_ROOT / "box_agent" / "__init__.py"
+    if init_file.is_file():
+        for line in init_file.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("__version__"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return "dev"
+
+
+def _ensure_win() -> None:
+    if sys.platform != "win32":
+        print(f"This script only runs on Windows (got: {sys.platform})", file=sys.stderr)
+        sys.exit(2)
+
+
+def _run_pyinstaller(bin_dir: Path) -> None:
+    """Run PyInstaller and copy the output into ``bin_dir``."""
+    print("\n[win] Installing runtime extras...")
+    extras_cmd_pip = [sys.executable, "-m", "pip", "install", "--quiet",
+                      f"{PROJECT_ROOT}[runtime]"]
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        extras = subprocess.run(
+            [uv_bin, "pip", "install", "--quiet", f"{PROJECT_ROOT}[runtime]"],
+            cwd=str(PROJECT_ROOT),
+        )
+        if extras.returncode != 0:
+            subprocess.run(extras_cmd_pip, cwd=str(PROJECT_ROOT))
+    else:
+        subprocess.run(extras_cmd_pip, cwd=str(PROJECT_ROOT))
+
+    work_dir = bin_dir.parent.parent / "pyinstaller_work"
+    dist_dir = bin_dir.parent.parent / "pyinstaller_out"
+    spec_dir = bin_dir.parent.parent
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+    if dist_dir.exists():
+        shutil.rmtree(dist_dir)
+
+    entry_point = PROJECT_ROOT / "box_agent" / "acp" / "runtime_entry.py"
+
+    datas = [
+        (str(PROJECT_ROOT / "box_agent" / "config"), "box_agent/config"),
+        (str(PROJECT_ROOT / "box_agent" / "skills"), "box_agent/skills"),
+    ]
+    datas_args: list[str] = []
+    for src, dst in datas:
+        if Path(src).exists():
+            datas_args.extend(["--add-data", f"{src}{os.pathsep}{dst}"])
+
+    hidden_imports = [
+        "box_agent", "box_agent.acp", "box_agent.acp.debug_logger",
+        "box_agent.agent", "box_agent.cli", "box_agent.config", "box_agent.core",
+        "box_agent.events", "box_agent.llm", "box_agent.llm.anthropic_client",
+        "box_agent.llm.openai_client", "box_agent.llm.llm_wrapper",
+        "box_agent.logger", "box_agent.retry", "box_agent.schema",
+        "box_agent.tools", "box_agent.tools.bash_tool", "box_agent.tools.file_tools",
+        "box_agent.tools.jupyter_tool", "box_agent.tools.mcp_loader",
+        "box_agent.tools.skill_tool", "box_agent.utils",
+        "tiktoken", "tiktoken_ext", "tiktoken_ext.openai_public",
+        "httpx", "httpcore", "anthropic", "openai", "pydantic", "yaml", "mcp", "acp",
+        "jupyter_client", "jupyter_client.provisioning",
+        "jupyter_client.provisioning.local_provisioner",
+        "ipykernel", "ipykernel.inprocess", "ipykernel.inprocess.manager",
+        "ipykernel_launcher", "jupyter_core",
+        "debugpy", "debugpy._vendored",
+        "pandas", "numpy", "matplotlib", "matplotlib.backends",
+        "matplotlib.backends.backend_agg",
+        "seaborn", "openpyxl", "xlrd", "sklearn", "sklearn.cluster",
+        "sklearn.linear_model", "sklearn.preprocessing",
+        "docx", "pypdf", "pdfplumber", "reportlab",
+        "reportlab.pdfgen", "reportlab.lib", "pptx",
+        "pip", "pip._internal", "pip._internal.cli", "pip._internal.cli.main",
+    ]
+    hidden_args: list[str] = []
+    for imp in hidden_imports:
+        hidden_args.extend(["--hidden-import", imp])
+
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--noconfirm", "--clean",
+        "--name", "box-agent-acp",
+        "--distpath", str(dist_dir),
+        "--workpath", str(work_dir),
+        "--specpath", str(spec_dir),
+        *datas_args, *hidden_args,
+        "--collect-all", "tiktoken",
+        "--collect-all", "tiktoken_ext",
+        "--collect-all", "jupyter_client",
+        "--collect-all", "ipykernel",
+        "--collect-all", "jupyter_core",
+        "--collect-all", "debugpy",
+        "--collect-all", "matplotlib",
+        "--collect-submodules", "pandas",
+        "--collect-submodules", "seaborn",
+        "--collect-submodules", "openpyxl",
+        "--collect-submodules", "sklearn",
+        "--collect-submodules", "pip",
+        str(entry_point),
+    ]
+
+    print("\n[win] Running PyInstaller...")
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+    if result.returncode != 0:
+        print("PyInstaller failed!", file=sys.stderr)
+        sys.exit(1)
+
+    pyinstaller_output = dist_dir / "box-agent-acp"
+    if not pyinstaller_output.exists():
+        print(f"Expected output not found: {pyinstaller_output}", file=sys.stderr)
+        sys.exit(1)
+
+    if bin_dir.exists():
+        shutil.rmtree(bin_dir)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    for item in pyinstaller_output.iterdir():
+        dest = bin_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest)
+        else:
+            shutil.copy2(item, dest)
+
+    entry_bin = bin_dir / "box-agent-acp.exe"
+    if entry_bin.exists():
+        entry_bin.chmod(0o755)
+
+    shutil.rmtree(dist_dir, ignore_errors=True)
+    shutil.rmtree(work_dir, ignore_errors=True)
+    for spec in spec_dir.glob("*.spec"):
+        spec.unlink(missing_ok=True)
+
+    print(f"[win] BoxAgent exe -> {bin_dir}")
+
+
+def _install_node_win(runtime_dir: Path) -> None:
+    node_root = runtime_dir / "runtimes" / "node"
+    if (node_root / "versions").exists() and any((node_root / "versions").iterdir()):
+        print(f"[win] Node runtime already present: {node_root}")
+        return
+    print(f"\n[win] Installing bundled Node.js {DEFAULT_NODE_VERSION} for win-x64...")
+    manager = NodeRuntimeManager(root=node_root)
+    manager.install_win(version=DEFAULT_NODE_VERSION, platform_id="win-x64")
+    shutil.rmtree(node_root / "downloads", ignore_errors=True)
+    _relativize_node_manifest(node_root)
+    print(f"[win] Node runtime ready: {node_root}")
+
+
+def _write_manifest(runtime_dir: Path, version: str) -> None:
+    manifest = {
+        "name": "box-agent",
+        "version": version,
+        "platform": "win32",
+        "arch": "x64",
+        "entry": "bin/box-agent-acp.exe",
+        "mode": "standalone",
+    }
+    (runtime_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+    (runtime_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
+
+
+def _create_tar(output_dir: Path, runtime_dir: Path, version: str) -> Path:
+    archive_name = f"box-agent-runtime-v{version}-win32-x64.tar.gz"
+    archive_path = output_dir / archive_name
+    print(f"\n[win] Creating archive: {archive_path}")
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(runtime_dir, arcname="box-agent-runtime")
+    size_mb = archive_path.stat().st_size / (1024 * 1024)
+    print(f"[win] Archive created: {archive_path} ({size_mb:.1f} MB)")
+    return archive_path
+
+
+def _install_to(runtime_dir: Path, target: Path, exe_only: bool) -> None:
+    """Copy assembled runtime tree to an existing officev3 install location."""
+    target = target.resolve()
+    if exe_only:
+        src_bin = runtime_dir / "bin"
+        dst_bin = target / "bin"
+        if dst_bin.exists():
+            shutil.rmtree(dst_bin)
+        shutil.copytree(src_bin, dst_bin)
+        # Refresh manifest + VERSION too so consumers see new version
+        for fname in ("manifest.json", "VERSION"):
+            src_f = runtime_dir / fname
+            if src_f.is_file():
+                shutil.copy2(src_f, target / fname)
+        print(f"[win] Installed bin/ -> {target}")
+    else:
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(runtime_dir, target)
+        print(f"[win] Installed full runtime tree -> {target}")
+
+
+def main() -> None:
+    _ensure_win()
+
+    parser = argparse.ArgumentParser(description="Windows-only BoxAgent runtime builder")
+    parser.add_argument("--version", default=None,
+                        help="Version string (default: read from box_agent/__init__.py)")
+    parser.add_argument("--output", default="dist/runtime",
+                        help="Output directory (default: dist/runtime)")
+    parser.add_argument("--exe-only", action="store_true",
+                        help="Only rebuild bin/ (PyInstaller). Keep existing runtime/ and runtimes/.")
+    parser.add_argument("--no-tar", action="store_true",
+                        help="Skip the tar.gz archive step (faster dev iteration).")
+    parser.add_argument("--install-to", default=None,
+                        help="After build, copy artifacts to this path "
+                             "(e.g. officev3 build-resources/box-agent-runtime).")
+    args = parser.parse_args()
+
+    version = args.version or _read_version_from_package()
+    output_dir = Path(args.output).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    runtime_dir = output_dir / "box-agent-runtime"
+    BUILD_TOOLS_CACHE.mkdir(parents=True, exist_ok=True)
+
+    print(f"Building box-agent-runtime v{version} for win32-x64")
+    print(f"Output: {runtime_dir}")
+    print(f"Mode: {'exe-only' if args.exe_only else 'full'}")
+
+    if args.exe_only:
+        if not runtime_dir.exists():
+            print(
+                f"\nERROR: --exe-only requires an existing runtime at:\n  {runtime_dir}\n"
+                "Run a full build first (drop --exe-only) to bootstrap "
+                "runtime/ and runtimes/.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        # Wipe only bin/
+        bin_dir = runtime_dir / "bin"
+        if bin_dir.exists():
+            shutil.rmtree(bin_dir)
+        _run_pyinstaller(bin_dir)
+        # Manifest version bump so consumers see the new exe
+        _write_manifest(runtime_dir, version)
+    else:
+        # Full clean build
+        if runtime_dir.exists():
+            shutil.rmtree(runtime_dir)
+        runtime_dir.mkdir(parents=True)
+        bin_dir = runtime_dir / "bin"
+        bin_dir.mkdir()
+        _run_pyinstaller(bin_dir)
+        _write_manifest(runtime_dir, version)
+        # bash + python + sandbox packages + node
+        _install_portable_git_win(runtime_dir)
+        _install_portable_python_win(runtime_dir)
+        python_exe = runtime_dir / "runtime" / "python" / "python.exe"
+        if python_exe.is_file():
+            _install_sandbox_packages_win(python_exe)
+        _install_node_win(runtime_dir)
+
+    print(f"\n[win] Runtime tree assembled: {runtime_dir}")
+
+    if not args.no_tar:
+        _create_tar(output_dir, runtime_dir, version)
+    else:
+        print("[win] --no-tar set, skipping archive step")
+
+    if args.install_to:
+        _install_to(runtime_dir, Path(args.install_to), args.exe_only)
+
+
+if __name__ == "__main__":
+    main()

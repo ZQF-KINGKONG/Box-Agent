@@ -144,6 +144,21 @@ def _build_python_runtime(
         )
 
     if getattr(sys, "frozen", False):
+        # Win-only: a bundled portable Python is shipped under
+        # ``<runtime_root>/runtime/python/`` so shell skills (`$BOX_AGENT_PYTHON`)
+        # have a real interpreter. Mac/Linux frozen behavior unchanged.
+        if sys.platform == "win32":
+            bundled_python = bundled_win_python()
+            if bundled_python is not None:
+                path = str(bundled_python)
+                return SkillRuntime(
+                    kind="python",
+                    status="available",
+                    provider="box_agent",
+                    executable_path=path,
+                    env_vars={"BOX_AGENT_PYTHON": path, "BOX_AGENT_PYTHON3": path},
+                    notes=("Bundled Windows portable Python.",),
+                )
         return SkillRuntime(
             kind="python",
             status="unavailable",
@@ -261,6 +276,106 @@ class NodeRuntimeManager:
                 shutil.rmtree(temp_dir)
 
         missing = [name for name, path in (("node", node), ("npm", npm), ("npx", npx)) if not _is_executable_file(str(path))]
+        if missing:
+            raise NodeRuntimeInstallError(f"Installed Node runtime is incomplete: missing {', '.join(missing)}")
+
+        self._write_manifest(
+            version=version,
+            platform_id=target,
+            node=node,
+            npm=npm,
+            npx=npx,
+            node_modules=self.node_modules_dir,
+        )
+        return self.discover()
+
+    def install_win(
+        self,
+        *,
+        version: str = DEFAULT_NODE_VERSION,
+        platform_id: str | None = None,
+        downloader: Any | None = None,
+        base_url: str = NODE_DIST_BASE_URL,
+    ) -> SkillRuntime:
+        """Install the pinned official Node.js Windows runtime.
+
+        Mirrors :meth:`install_macos` but for ``win-x64``/``win-arm64``: pulls
+        the official Node ``.zip`` archive plus ``SHASUMS256.txt``, verifies
+        SHA-256, extracts into ``versions/``, then atomically writes
+        ``manifest.json``.
+        """
+        target = platform_id or _detect_node_win_platform()
+        if target not in {"win-x64", "win-arm64"}:
+            raise NodeRuntimeInstallError(f"Unsupported Windows Node platform: {target}")
+        if not version.startswith("v"):
+            raise NodeRuntimeInstallError("Node version must include the leading 'v'.")
+
+        archive_name = f"node-{version}-{target}.zip"
+        version_dir = self.versions_dir / archive_name.removesuffix(".zip")
+        node = version_dir / "node.exe"
+        npm = version_dir / "npm.cmd"
+        npx = version_dir / "npx.cmd"
+
+        if all(_path_exists(path) for path in (node, npm, npx)):
+            self._write_manifest(
+                version=version,
+                platform_id=target,
+                node=node,
+                npm=npm,
+                npx=npx,
+                node_modules=self.node_modules_dir,
+            )
+            return self.discover()
+
+        self.downloads_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = self.downloads_dir / archive_name
+        shasums_path = self.downloads_dir / f"SHASUMS256-{version}.txt"
+        version_url = f"{base_url.rstrip('/')}/{version}"
+        fetch = downloader or _download_url
+        fetch(f"{version_url}/{archive_name}", archive_path)
+        fetch(f"{version_url}/SHASUMS256.txt", shasums_path)
+
+        expected = _checksum_for_archive(shasums_path.read_text(encoding="utf-8"), archive_name)
+        actual = _sha256_file(archive_path)
+        if actual != expected:
+            raise NodeRuntimeInstallError(
+                f"Checksum mismatch for {archive_name}: expected {expected}, got {actual}"
+            )
+
+        temp_dir = self.versions_dir / f".{version_dir.name}.tmp"
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _safe_extract_zip(archive_path, temp_dir)
+            extracted = temp_dir / version_dir.name
+            if not extracted.is_dir():
+                raise NodeRuntimeInstallError(f"Node archive did not contain {version_dir.name}")
+            if version_dir.exists():
+                shutil.rmtree(version_dir)
+            version_dir.parent.mkdir(parents=True, exist_ok=True)
+            # ``Path.rename`` is a raw MoveFileEx on Win and trips WinError 5
+            # if Defender / Search Indexer briefly holds a handle on the freshly
+            # extracted node.exe. ``shutil.move`` falls back to copy+delete and
+            # is more tolerant; retry once after a short pause as a final
+            # safety net.
+            try:
+                shutil.move(str(extracted), str(version_dir))
+            except PermissionError:
+                import time
+                time.sleep(2)
+                shutil.move(str(extracted), str(version_dir))
+        except Exception as exc:
+            if version_dir.exists() and not all(_path_exists(path) for path in (node, npm, npx)):
+                shutil.rmtree(version_dir)
+            if isinstance(exc, NodeRuntimeInstallError):
+                raise
+            raise NodeRuntimeInstallError(f"Failed to extract Node runtime archive: {exc}") from exc
+        finally:
+            if temp_dir.exists():
+                shutil.rmtree(temp_dir)
+
+        missing = [name for name, path in (("node.exe", node), ("npm.cmd", npm), ("npx.cmd", npx)) if not _path_exists(path)]
         if missing:
             raise NodeRuntimeInstallError(f"Installed Node runtime is incomplete: missing {', '.join(missing)}")
 
@@ -440,12 +555,67 @@ def _is_executable_file(path: str) -> bool:
 
 
 def _bundled_node_runtime_root() -> Path | None:
+    # Dev override: when ``BOX_AGENT_NODE_RUNTIME_ROOT`` is set and points at
+    # a directory containing ``manifest.json``, use it. Lets dev (non-frozen)
+    # runs reuse the Node runtime that the Electron host's
+    # managedNodeDependencies.ts already extracted under
+    # ``officev3/build-resources/box-agent-runtime/runtimes/node`` instead of
+    # requiring a separate PyInstaller bundle.
+    override = os.environ.get("BOX_AGENT_NODE_RUNTIME_ROOT")
+    if override:
+        override_path = Path(override)
+        if (override_path / "manifest.json").exists():
+            return override_path
     if not getattr(sys, "frozen", False):
         return None
     candidate = Path(sys.executable).resolve().parent.parent / "runtimes" / "node"
     if (candidate / "manifest.json").exists():
         return candidate
     return None
+
+
+def _bundled_runtime_root() -> Path | None:
+    """Return the PyInstaller frozen runtime root directory, or None if not frozen.
+
+    Layout assumed: ``<root>/bin/box-agent-acp(.exe)`` so root is the parent
+    of the directory containing ``sys.executable``. Win-only bundled tools
+    (PortableGit / portable Python) live under ``<root>/runtime/``.
+    """
+    if not getattr(sys, "frozen", False):
+        return None
+    return Path(sys.executable).resolve().parent.parent
+
+
+def bundled_win_bash() -> Path | None:
+    """Locate the Windows-bundled PortableGit ``bash.exe`` if present.
+
+    Dev override: when ``BOX_AGENT_BUNDLED_BASH`` is set and points at an
+    existing ``bash.exe``, use it. Lets dev (non-frozen) runs exercise the
+    bundled-bash code path without rebuilding the PyInstaller bundle.
+    """
+    if sys.platform != "win32":
+        return None
+    override = os.environ.get("BOX_AGENT_BUNDLED_BASH")
+    if override:
+        override_path = Path(override)
+        if override_path.is_file():
+            return override_path
+    root = _bundled_runtime_root()
+    if root is None:
+        return None
+    candidate = root / "runtime" / "PortableGit" / "usr" / "bin" / "bash.exe"
+    return candidate if candidate.is_file() else None
+
+
+def bundled_win_python() -> Path | None:
+    """Locate the Windows-bundled portable ``python.exe`` if present."""
+    if sys.platform != "win32":
+        return None
+    root = _bundled_runtime_root()
+    if root is None:
+        return None
+    candidate = root / "runtime" / "python" / "python.exe"
+    return candidate if candidate.is_file() else None
 
 
 def _is_bundled_node_runtime_root(root: Path) -> bool:
@@ -460,6 +630,21 @@ def _is_bundled_node_runtime_root(root: Path) -> bool:
 
 class NodeRuntimeInstallError(RuntimeError):
     """Node runtime installation failed without changing the active runtime."""
+
+
+def _detect_node_win_platform() -> str:
+    if sys.platform != "win32":
+        raise NodeRuntimeInstallError(f"Node Win install requires Windows, got {sys.platform}.")
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64"}:
+        return "win-x64"
+    if machine in {"arm64", "aarch64"}:
+        return "win-arm64"
+    raise NodeRuntimeInstallError(f"Unsupported Windows CPU architecture for Node runtime: {machine}")
+
+
+def _path_exists(path: Path) -> bool:
+    return path.is_file()
 
 
 def _detect_node_macos_platform() -> str:
@@ -517,3 +702,17 @@ def _safe_extract_tar(archive_path: Path, dest: Path) -> None:
                 except ValueError as exc:
                     raise NodeRuntimeInstallError(f"Unsafe link in Node archive: {member.name}") from exc
         tar.extractall(dest)
+
+
+def _safe_extract_zip(archive_path: Path, dest: Path) -> None:
+    import zipfile
+
+    dest_resolved = dest.resolve()
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        for member in zf.namelist():
+            target = (dest / member).resolve()
+            try:
+                target.relative_to(dest_resolved)
+            except ValueError as exc:
+                raise NodeRuntimeInstallError(f"Unsafe path in Node archive: {member}") from exc
+        zf.extractall(dest)

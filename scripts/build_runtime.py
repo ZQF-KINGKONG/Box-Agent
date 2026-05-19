@@ -14,6 +14,7 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -39,6 +40,11 @@ PORTABLE_GIT_URL = (
     f"https://github.com/git-for-windows/git/releases/download/"
     f"{PORTABLE_GIT_TAG}/PortableGit-{PORTABLE_GIT_VERSION}-64-bit.7z.exe"
 )
+# Pinned SHA-256 of the upstream PortableGit self-extractor. Mismatch implies
+# CDN tampering / MITM proxy / cache corruption; refuse to execute the .exe.
+# Source: https://github.com/git-for-windows/git/releases/tag/v2.46.0.windows.1
+PORTABLE_GIT_SHA256 = "dedae83f4d0851bcbf473c516701e2da6a5d7c574d694d5eceec46d1307132ea"
+
 # Standalone CPython distribution with full stdlib + venv + ensurepip.
 # install_only build is what we need.
 PYTHON_STANDALONE_VERSION = "3.12.6"
@@ -47,6 +53,12 @@ PYTHON_STANDALONE_URL = (
     f"https://github.com/indygreg/python-build-standalone/releases/download/"
     f"{PYTHON_STANDALONE_RELEASE}/cpython-{PYTHON_STANDALONE_VERSION}+"
     f"{PYTHON_STANDALONE_RELEASE}-x86_64-pc-windows-msvc-install_only.tar.gz"
+)
+# Pinned SHA-256 of the upstream python-build-standalone archive. Source:
+# https://github.com/astral-sh/python-build-standalone/releases/download/
+#   20240909/cpython-3.12.6+20240909-x86_64-pc-windows-msvc-install_only.tar.gz.sha256
+PYTHON_STANDALONE_SHA256 = (
+    "6280ce84c87ebaca2c4b42040bad48e7efbfd1b3f323579378ecf043e9fb023d"
 )
 BUILD_TOOLS_CACHE = Path.home() / ".cache" / "box-agent-build-tools"
 
@@ -365,6 +377,12 @@ def _install_portable_git_win(runtime_dir: Path) -> None:
             print(f"[win] Downloading PortableGit -> {archive}")
             _download_to(PORTABLE_GIT_URL, archive)
 
+    # PortableGit is a self-extracting .exe — about to be executed below.
+    # Verify SHA-256 before invoking the binary, otherwise a tampered
+    # download / poisoned cache entry would execute arbitrary code on the
+    # build host.
+    _verify_sha256(archive, PORTABLE_GIT_SHA256, label="PortableGit")
+
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         shutil.rmtree(target)
@@ -410,6 +428,11 @@ def _install_portable_python_win(runtime_dir: Path) -> None:
         if not archive.is_file():
             print(f"[win] Downloading python-build-standalone -> {archive}")
             _download_to(PYTHON_STANDALONE_URL, archive)
+
+    # The extracted interpreter is invoked later to pre-install sandbox
+    # packages, so a tampered archive becomes code execution on the build
+    # host. Verify the pinned SHA-256 before touching the contents.
+    _verify_sha256(archive, PYTHON_STANDALONE_SHA256, label="python-build-standalone")
 
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
@@ -511,6 +534,28 @@ def _download_to(url: str, dest: Path) -> None:
     finally:
         if tmp.exists():
             tmp.unlink()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_sha256(archive: Path, expected: str, *, label: str) -> None:
+    """Abort the build if ``archive`` does not match the pinned SHA-256.
+
+    Guards against CDN tampering / MITM proxies / corrupted cache entries.
+    Matches the integrity check already done on the Node download path.
+    """
+    actual = _sha256_file(archive)
+    if actual.lower() != expected.lower():
+        raise RuntimeError(
+            f"{label} SHA-256 mismatch for {archive}: "
+            f"expected {expected}, got {actual}"
+        )
 
 
 def _relativize_node_manifest(node_root: Path) -> None:

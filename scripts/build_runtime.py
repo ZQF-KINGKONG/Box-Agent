@@ -14,6 +14,7 @@ Requires:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -21,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.request
 from pathlib import Path
 
 # Make `python scripts/build_runtime.py` work from a source checkout even when
@@ -29,6 +31,36 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from box_agent.tools.runtime import DEFAULT_NODE_VERSION, NodeRuntimeManager
+
+# ── Win-only bundled tool versions ────────────────────────────
+# bash + coreutils. PortableGit ships as a 7-Zip self-extracting .exe.
+PORTABLE_GIT_VERSION = "2.46.0"
+PORTABLE_GIT_TAG = "v2.46.0.windows.1"
+PORTABLE_GIT_URL = (
+    f"https://github.com/git-for-windows/git/releases/download/"
+    f"{PORTABLE_GIT_TAG}/PortableGit-{PORTABLE_GIT_VERSION}-64-bit.7z.exe"
+)
+# Pinned SHA-256 of the upstream PortableGit self-extractor. Mismatch implies
+# CDN tampering / MITM proxy / cache corruption; refuse to execute the .exe.
+# Source: https://github.com/git-for-windows/git/releases/tag/v2.46.0.windows.1
+PORTABLE_GIT_SHA256 = "dedae83f4d0851bcbf473c516701e2da6a5d7c574d694d5eceec46d1307132ea"
+
+# Standalone CPython distribution with full stdlib + venv + ensurepip.
+# install_only build is what we need.
+PYTHON_STANDALONE_VERSION = "3.12.6"
+PYTHON_STANDALONE_RELEASE = "20240909"
+PYTHON_STANDALONE_URL = (
+    f"https://github.com/indygreg/python-build-standalone/releases/download/"
+    f"{PYTHON_STANDALONE_RELEASE}/cpython-{PYTHON_STANDALONE_VERSION}+"
+    f"{PYTHON_STANDALONE_RELEASE}-x86_64-pc-windows-msvc-install_only.tar.gz"
+)
+# Pinned SHA-256 of the upstream python-build-standalone archive. Source:
+# https://github.com/astral-sh/python-build-standalone/releases/download/
+#   20240909/cpython-3.12.6+20240909-x86_64-pc-windows-msvc-install_only.tar.gz.sha256
+PYTHON_STANDALONE_SHA256 = (
+    "6280ce84c87ebaca2c4b42040bad48e7efbfd1b3f323579378ecf043e9fb023d"
+)
+BUILD_TOOLS_CACHE = Path.home() / ".cache" / "box-agent-build-tools"
 
 # ── Platform detection ───────────────────────────────────────
 
@@ -262,6 +294,8 @@ def build_runtime(version: str, output_dir: Path) -> Path:
 
     if plat == "darwin" and arch in {"arm64", "x64"}:
         _install_bundled_node_runtime(runtime_dir, plat=plat, arch=arch)
+    elif plat == "win32" and arch == "x64":
+        _install_bundled_win_runtimes(runtime_dir)
     else:
         print(f"\nSkipping bundled Node runtime for unsupported platform: {plat}-{arch}")
 
@@ -299,6 +333,229 @@ def _install_bundled_node_runtime(runtime_dir: Path, *, plat: str, arch: str) ->
     shutil.rmtree(node_root / "downloads", ignore_errors=True)
     _relativize_node_manifest(node_root)
     print(f"Bundled Node runtime: {node_root}")
+
+
+def _install_bundled_win_runtimes(runtime_dir: Path) -> None:
+    """Bundle PortableGit (bash/coreutils) + standalone Python + Node into the Win runtime.
+
+    box-agent on Windows can't rely on system bash/python/node — Mac users have
+    them by default, Win users almost never. This drops self-contained copies
+    into the runtime tar so the artifact is install-and-go.
+    """
+    print("\n[win] Installing bundled PortableGit + Python + Node runtimes...")
+    BUILD_TOOLS_CACHE.mkdir(parents=True, exist_ok=True)
+
+    _install_portable_git_win(runtime_dir)
+    _install_portable_python_win(runtime_dir)
+
+    node_root = runtime_dir / "runtimes" / "node"
+    print(f"\n[win] Installing bundled Node.js runtime {DEFAULT_NODE_VERSION} for win-x64...")
+    manager = NodeRuntimeManager(root=node_root)
+    manager.install_win(version=DEFAULT_NODE_VERSION, platform_id="win-x64")
+    shutil.rmtree(node_root / "downloads", ignore_errors=True)
+    _relativize_node_manifest(node_root)
+    print(f"[win] Bundled Node runtime: {node_root}")
+
+
+def _install_portable_git_win(runtime_dir: Path) -> None:
+    """Download and extract PortableGit 7-Zip SFX into ``runtime/PortableGit/``."""
+    target = runtime_dir / "runtime" / "PortableGit"
+    bash_exe = target / "usr" / "bin" / "bash.exe"
+    if bash_exe.is_file():
+        print(f"[win] PortableGit already present: {target}")
+        return
+
+    override = os.environ.get("BOX_AGENT_BUILD_PORTABLE_GIT")
+    if override:
+        archive = Path(override)
+        if not archive.is_file():
+            raise RuntimeError(f"BOX_AGENT_BUILD_PORTABLE_GIT not found: {archive}")
+        print(f"[win] Using PortableGit override: {archive}")
+    else:
+        archive = BUILD_TOOLS_CACHE / f"PortableGit-{PORTABLE_GIT_VERSION}-64-bit.7z.exe"
+        if not archive.is_file():
+            print(f"[win] Downloading PortableGit -> {archive}")
+            _download_to(PORTABLE_GIT_URL, archive)
+
+    # PortableGit is a self-extracting .exe — about to be executed below.
+    # Verify SHA-256 before invoking the binary, otherwise a tampered
+    # download / poisoned cache entry would execute arbitrary code on the
+    # build host.
+    _verify_sha256(archive, PORTABLE_GIT_SHA256, label="PortableGit")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+
+    # PortableGit-*.7z.exe is a 7-Zip self-extracting archive. The supported
+    # extraction flags are: -y (assume yes), -o<dir> (output directory).
+    print(f"[win] Extracting PortableGit -> {target}")
+    result = subprocess.run(
+        [str(archive), "-y", f"-o{target}"],
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"PortableGit extraction failed (exit {result.returncode}): "
+            f"{result.stderr.decode(errors='replace')[:500]}"
+        )
+
+    if not bash_exe.is_file():
+        raise RuntimeError(f"PortableGit extracted but bash.exe missing: {bash_exe}")
+    print(f"[win] PortableGit ready: {bash_exe}")
+
+
+def _install_portable_python_win(runtime_dir: Path) -> None:
+    """Download and extract python-build-standalone install_only into ``runtime/python/``."""
+    target = runtime_dir / "runtime" / "python"
+    python_exe = target / "python.exe"
+    if python_exe.is_file():
+        print(f"[win] Portable Python already present: {target}")
+        return
+
+    override = os.environ.get("BOX_AGENT_BUILD_PORTABLE_PYTHON")
+    if override:
+        archive = Path(override)
+        if not archive.is_file():
+            raise RuntimeError(f"BOX_AGENT_BUILD_PORTABLE_PYTHON not found: {archive}")
+        print(f"[win] Using portable Python override: {archive}")
+    else:
+        archive = (
+            BUILD_TOOLS_CACHE
+            / f"cpython-{PYTHON_STANDALONE_VERSION}-{PYTHON_STANDALONE_RELEASE}-win-x64-install_only.tar.gz"
+        )
+        if not archive.is_file():
+            print(f"[win] Downloading python-build-standalone -> {archive}")
+            _download_to(PYTHON_STANDALONE_URL, archive)
+
+    # The extracted interpreter is invoked later to pre-install sandbox
+    # packages, so a tampered archive becomes code execution on the build
+    # host. Verify the pinned SHA-256 before touching the contents.
+    _verify_sha256(archive, PYTHON_STANDALONE_SHA256, label="python-build-standalone")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+
+    # install_only tar.gz layout: ``python/python.exe + python/Lib/...``.
+    print(f"[win] Extracting portable Python -> {target}")
+    extract_root = target.parent / ".python-extract"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True)
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            tar.extractall(extract_root)
+        inner = extract_root / "python"
+        if not inner.is_dir():
+            raise RuntimeError(f"Portable Python archive missing 'python/' dir: {archive}")
+        # Win: ``Path.rename`` (MoveFileEx) trips ``WinError 5`` when
+        # Defender/Search Indexer briefly holds the freshly extracted
+        # ``python.exe``. ``shutil.move`` falls back to copy+delete and is
+        # more tolerant; retry once after a short pause as final safety net.
+        try:
+            shutil.move(str(inner), str(target))
+        except PermissionError:
+            import time
+            time.sleep(2)
+            shutil.move(str(inner), str(target))
+    finally:
+        if extract_root.exists():
+            shutil.rmtree(extract_root, ignore_errors=True)
+
+    if not python_exe.is_file():
+        raise RuntimeError(f"Portable Python extracted but python.exe missing: {python_exe}")
+    print(f"[win] Portable Python ready: {python_exe}")
+
+    _install_sandbox_packages_win(python_exe)
+
+
+# Pre-installed into the bundled Python's site-packages so that the frozen
+# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
+# etc. without spawning pip at first run. Mirrors
+# ``box_agent.tools.jupyter_tool.SANDBOX_DEFAULT_PACKAGES`` + ``ipykernel``.
+_SANDBOX_BUNDLED_PACKAGES = (
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "openpyxl",
+    "scikit-learn",
+    "ipykernel",
+)
+
+
+def _install_sandbox_packages_win(python_exe: Path) -> None:
+    """Pre-install sandbox data-science packages into the bundled portable Python."""
+    print(f"\n[win] Pre-installing sandbox packages into bundled Python: {', '.join(_SANDBOX_BUNDLED_PACKAGES)}")
+    print(f"[win] (this can take several minutes the first time)")
+    # Strip parent-process venv markers so the bundled python doesn't try to
+    # load pip/site-packages from the build venv (.venv-build / uv cpython)
+    # — those copies are ABI-incompatible with python-build-standalone and
+    # trip ``AttributeError: class must define a '_type_' attribute`` in
+    # ctypes when imported.
+    clean_env = {
+        k: v for k, v in os.environ.items()
+        if k not in {
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "VIRTUAL_ENV",
+            "__PYVENV_LAUNCHER__",
+            "PYTHONNOUSERSITE",
+            "PYTHONUSERBASE",
+        }
+    }
+    clean_env["PYTHONNOUSERSITE"] = "1"
+    result = subprocess.run(
+        [
+            str(python_exe), "-I", "-m", "pip", "install",
+            "--no-warn-script-location",
+            "--disable-pip-version-check",
+            *_SANDBOX_BUNDLED_PACKAGES,
+        ],
+        capture_output=True,
+        env=clean_env,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Pre-install of sandbox packages failed (exit {result.returncode}): "
+            f"{result.stderr.decode(errors='replace')[:1000]}"
+        )
+    print("[win] Sandbox packages ready in bundled Python.")
+
+
+def _download_to(url: str, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    try:
+        with urllib.request.urlopen(url, timeout=300) as response, tmp.open("wb") as f:
+            shutil.copyfileobj(response, f)
+        os.replace(tmp, dest)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_sha256(archive: Path, expected: str, *, label: str) -> None:
+    """Abort the build if ``archive`` does not match the pinned SHA-256.
+
+    Guards against CDN tampering / MITM proxies / corrupted cache entries.
+    Matches the integrity check already done on the Node download path.
+    """
+    actual = _sha256_file(archive)
+    if actual.lower() != expected.lower():
+        raise RuntimeError(
+            f"{label} SHA-256 mismatch for {archive}: "
+            f"expected {expected}, got {actual}"
+        )
 
 
 def _relativize_node_manifest(node_root: Path) -> None:

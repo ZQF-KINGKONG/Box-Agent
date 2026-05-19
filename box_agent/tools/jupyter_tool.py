@@ -8,6 +8,7 @@ environment, so user-installed packages don't pollute the tool's dependencies.
 
 import asyncio
 import json
+import os
 import platform
 import re
 import subprocess
@@ -82,8 +83,28 @@ class SandboxEnvironment:
     def __init__(self, base_dir: Path | None = None):
         self.base_dir = base_dir or SANDBOX_BASE_DIR
         self.venv_dir = self.base_dir / "venv"
-        self.python_path = self.venv_dir / "bin" / "python"
+        # Windows venv lays out python under Scripts/, Unix under bin/.
+        if sys.platform == "win32":
+            self.python_path = self.venv_dir / "Scripts" / "python.exe"
+        else:
+            self.python_path = self.venv_dir / "bin" / "python"
         self._ready = False
+        self._bundled_override = False
+
+        # Windows-only override: point at an already-prepared interpreter
+        # (e.g. the bundled python.exe in officev3/build-resources) so we
+        # skip venv creation and pip install entirely. Mirrors the
+        # BOX_AGENT_BUNDLED_BASH / BOX_AGENT_NODE_RUNTIME_ROOT pattern.
+        # Gated to win32 so a stray env var on macOS/Linux cannot bypass
+        # the normal sandbox venv initialization.
+        if sys.platform == "win32":
+            override = os.environ.get("BOX_AGENT_BUNDLED_PYTHON")
+            if override:
+                override_path = Path(override)
+                if override_path.exists():
+                    self.python_path = override_path
+                    self._bundled_override = True
+                    self._ready = True
 
     @property
     def is_created(self) -> bool:
@@ -847,6 +868,12 @@ class JupyterSandboxTool(Tool):
         self, session_id: str, workspace: Path, env: SandboxEnvironment
     ) -> "JupyterKernelSession | InProcessKernelSession":
         """Create the appropriate kernel session for the current environment."""
+        # Windows compatibility: PyInstaller frozen Win exe's in-process
+        # ipykernel hangs (start_kernel never returns). When a bundled
+        # standalone python is available via BOX_AGENT_BUNDLED_PYTHON, route
+        # the kernel through a subprocess instead. macOS unaffected.
+        if sys.platform == "win32" and env._bundled_override:
+            return JupyterKernelSession(session_id, workspace, env)
         if IS_FROZEN:
             return InProcessKernelSession(session_id, workspace)
         return JupyterKernelSession(session_id, workspace, env)

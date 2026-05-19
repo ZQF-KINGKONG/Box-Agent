@@ -16,7 +16,7 @@
 
 1. Install `pptxgenjs` only in managed Office Raccoon prefix when native path is required.
 2. For HTML export, do not install `dom-to-pptx`; use bundled `scripts/dom-to-pptx.bundle.js`.
-3. Preferred install targets are `$HOME/Library/Application Support/office-raccoon` and `${BOX_AGENT_RUNTIME_PREFIX:-...}` when provided.
+3. Preferred install targets are managed Office Raccoon prefixes in `${BOX_AGENT_NODE_PREFIX}` or `${BOX_AGENT_RUNTIME_PREFIX}` (platform default is supplied by environment/runtime; do not hardcode one OS).
 4. Use `pip`/Python packages only through managed environment path when missing helpers are required.
 
 ## 4. Fallback behavior

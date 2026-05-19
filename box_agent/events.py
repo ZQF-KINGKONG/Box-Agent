@@ -308,6 +308,38 @@ class InjectedMessageEvent:
     content: str
 
 
+# ── Memory promotion proposal ───────────────────────────────────
+
+
+@dataclass(frozen=True)
+class MemoryPromotionCandidate:
+    """One CONTEXT.md entry the agent is asking the user to promote to MEMORY.md (core).
+
+    Promotion is permanent. The host renders ``content`` and offers
+    pin / skip / reject; the chosen decision is paired with ``entry_id``
+    in the response.
+    """
+
+    entry_id: str
+    content: str
+    hits: int
+    confidence: float
+
+
+@dataclass(frozen=True)
+class MemoryProposalEvent:
+    """Emitted at turn end when there are eligible CONTEXT.md entries to suggest for core promotion.
+
+    Consumers (CLI / ACP host) collect per-candidate decisions
+    (``pin`` / ``skip`` / ``reject``) and feed them back via
+    ``MemoryManager.consume_core_proposal``. The event is informational
+    — emission already bumped ``last_proposed`` on each candidate, so a
+    no-op response naturally hibernates them for the cooldown window.
+    """
+
+    candidates: tuple[MemoryPromotionCandidate, ...]
+
+
 # ── Union type ──────────────────────────────────────────────────
 
 AgentEvent = Union[
@@ -324,6 +356,7 @@ AgentEvent = Union[
     ConfirmationRequired,
     SummarizationEvent,
     MemoryEvent,
+    MemoryProposalEvent,
     ErrorEvent,
     LogFileEvent,
     DoneEvent,

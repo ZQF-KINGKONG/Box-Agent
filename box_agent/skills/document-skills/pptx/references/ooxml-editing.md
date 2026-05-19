@@ -43,8 +43,9 @@ Text usually lives in `a:t` nodes inside slide XML. Replace only exact target te
 After repacking:
 
 1. Run `scripts/validate_pptx_package.py`.
-2. Open or render with LibreOffice.
+2. Open or render with LibreOffice when available.
 3. Extract text and compare expected slide order.
-4. Inspect rendered images for visual regressions.
+4. Inspect rendered images for visual regressions when rendering is available.
+   If not available, report visual verification as blocked.
 
 If PowerPoint repairs the file on open, the package is not healthy even if a zip check passes.

@@ -276,23 +276,43 @@ async function main() {
   await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready);
 
-  let detectedWidth = opts.width;
-  let detectedHeight = opts.height;
+  const detected = await page.evaluate(() => {
+    const s = document.querySelector(".slide");
+    if (!s) return null;
+    const cs = getComputedStyle(s);
+    return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
+  });
+
+  let detectedWidth = detected && detected.w > 0 ? detected.w : null;
+  let detectedHeight = detected && detected.h > 0 ? detected.h : null;
+
+  if (opts.width !== null || opts.height !== null) {
+    const cssW = detectedWidth;
+    const cssH = detectedHeight;
+    const mismatchW = opts.width !== null && cssW && Math.abs(opts.width - cssW) > 2;
+    const mismatchH = opts.height !== null && cssH && Math.abs(opts.height - cssH) > 2;
+    if (mismatchW || mismatchH) {
+      console.error(
+        `Refusing to export: --width/--height (${opts.width ?? "auto"}x${opts.height ?? "auto"}) ` +
+        `do not match the .slide CSS size (${Math.round(cssW || 0)}x${Math.round(cssH || 0)}).`
+      );
+      console.error(
+        "Per SKILL.md §0 rule 7, do NOT pass --width/--height to html_to_editable_pptx.js. " +
+        "Either remove these flags so the script auto-detects from .slide CSS, " +
+        "or fix .slide { width; height } in the HTML to the intended canvas size."
+      );
+      await browser.close();
+      process.exit(1);
+    }
+    if (opts.width !== null) detectedWidth = opts.width;
+    if (opts.height !== null) detectedHeight = opts.height;
+  }
 
   if (detectedWidth === null || detectedHeight === null) {
-    const detected = await page.evaluate(() => {
-      const s = document.querySelector(".slide");
-      if (!s) return null;
-      const cs = getComputedStyle(s);
-      return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
-    });
-    if (detected && detected.w > 0 && detected.h > 0) {
-      detectedWidth = detected.w;
-      detectedHeight = detected.h;
-    } else {
-      detectedWidth = 1920;
-      detectedHeight = 1080;
-    }
+    detectedWidth = detectedWidth || 1920;
+    detectedHeight = detectedHeight || 1080;
+    console.log(`Auto-detected slide size: ${detectedWidth}x${detectedHeight}`);
+  } else if (opts.width === null && opts.height === null) {
     console.log(`Auto-detected slide size: ${detectedWidth}x${detectedHeight}`);
   }
 

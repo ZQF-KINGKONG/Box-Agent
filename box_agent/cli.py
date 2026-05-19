@@ -311,6 +311,7 @@ def print_help():
   {Colors.BRIGHT_GREEN}/sandbox_status{Colors.RESET} - Show sandbox session status
   {Colors.BRIGHT_GREEN}/log{Colors.RESET}       - Show log directory and recent files
   {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET} - Read a specific log file
+  {Colors.BRIGHT_GREEN}/memory review{Colors.RESET} - 审阅可升级到核心记忆的候选条目
   {Colors.BRIGHT_GREEN}/exit{Colors.RESET}      - Exit program (also: exit, quit, q)
 
 {Colors.BOLD}{Colors.BRIGHT_YELLOW}Keyboard Shortcuts:{Colors.RESET}
@@ -932,7 +933,10 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     if config.agent.enable_memory:
         from box_agent.memory import MemoryManager
 
-        memory_mgr = MemoryManager(memory_dir=config.agent.memory_dir)
+        memory_mgr = MemoryManager(
+            memory_dir=config.agent.memory_dir,
+            dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
+        )
 
     # 3.4 One-time OpenClaw import
     if memory_mgr:
@@ -940,6 +944,22 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             await memory_mgr.import_openclaw(llm_client)
         except Exception:
             pass
+
+    # 3.4.1 Memory maintenance (decay / archive cleanup / dedup / compact).
+    # Off the critical path — the compact phase can issue a slow LLM call on
+    # large CONTEXT.md. Fire-and-forget, same pattern as the background MCP
+    # loader, so the REPL is responsive even if maintenance takes a while.
+    maintainer_task: asyncio.Task | None = None
+    if memory_mgr and config.agent.memory_maintainer_enabled:
+        from box_agent.memory_maintainer import MemoryMaintainer
+
+        async def _run_maintainer() -> None:
+            try:
+                await MemoryMaintainer(memory_mgr, config.agent, llm=llm_client).run_if_due()
+            except Exception:
+                pass
+
+        maintainer_task = asyncio.create_task(_run_maintainer(), name="memory-maintainer")
 
     # 3.5 Memory extractor (lifecycle-triggered auto memory)
     memory_extractor = None
@@ -1046,6 +1066,9 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         workspace_dir=str(workspace_dir),
         token_limit=config.llm.context_token_limit,
         hooks=hooks,
+        memory_promotion_enabled=config.agent.memory_promotion_proposal_enabled,
+        memory_promotion_hit_threshold=config.agent.memory_promotion_hit_threshold,
+        memory_promotion_cooldown_days=config.agent.memory_promotion_cooldown_days,
     )
 
     # Wire CLI permission negotiator (parity with ACP in-band negotiation)
@@ -1056,6 +1079,12 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     # Wire memory extractor
     if memory_extractor:
         agent._memory_extractor = memory_extractor
+
+    # Wire memory promotion negotiator (interactive prompts).
+    # Non-interactive `--task` mode skips it to avoid blocking on stdin.
+    if memory_mgr and config.agent.memory_promotion_proposal_enabled and not task:
+        from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
+        agent._proposal_negotiator = CLIMemoryProposalNegotiator(memory_mgr)
 
     # 8. Display welcome information
     if not task:
@@ -1082,7 +1111,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     # 9. Setup prompt_toolkit session
     # Command completer
     command_completer = WordCompleter(
-        ["/help", "/clear", "/clear_all", "/history", "/stats", "/sandbox_status", "/log", "/exit", "/quit", "/q"],
+        ["/help", "/clear", "/clear_all", "/history", "/stats", "/sandbox_status", "/log", "/memory", "/exit", "/quit", "/q"],
         ignore_case=True,
         sentence=True,
     )
@@ -1230,6 +1259,38 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                         # /log <filename> - read specific log file
                         filename = parts[1].strip("\"'")
                         read_log_file(filename)
+                    continue
+
+                elif command == "/memory" or command.startswith("/memory "):
+                    parts = user_input.split(maxsplit=1)
+                    sub = parts[1].strip().lower() if len(parts) > 1 else ""
+                    if sub == "review":
+                        if not memory_mgr:
+                            print(f"{Colors.YELLOW}⚠️  Memory disabled in config.{Colors.RESET}\n")
+                        else:
+                            from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
+                            from box_agent.events import MemoryProposalEvent, MemoryPromotionCandidate
+                            entries = memory_mgr.list_promotion_candidates(
+                                hit_threshold=config.agent.memory_promotion_hit_threshold,
+                                cooldown_days=0,  # manual review bypasses cooldown
+                            )
+                            if not entries:
+                                print(f"{Colors.DIM}🧠 暂无可升级到核心记忆的候选条目。{Colors.RESET}\n")
+                            else:
+                                memory_mgr.mark_proposed([e.id for e in entries])
+                                evt = MemoryProposalEvent(
+                                    candidates=tuple(
+                                        MemoryPromotionCandidate(
+                                            entry_id=e.id,
+                                            content=e.content,
+                                            hits=e.hits,
+                                            confidence=e.confidence,
+                                        ) for e in entries
+                                    )
+                                )
+                                await CLIMemoryProposalNegotiator(memory_mgr).negotiate(evt)
+                    else:
+                        print(f"{Colors.DIM}用法: /memory review — 审阅可升级到核心记忆的候选条目{Colors.RESET}\n")
                     continue
 
                 else:

@@ -51,7 +51,8 @@ DOM-to-PPTX exporter.
 
 This produces an editable PowerPoint deck from HTML-authored slides. The output
 is more editable than an image-only deck, but CSS-to-PPTX mapping can drift, so
-render QA is mandatory.
+render QA is required for full visual validation, but if runtime is unavailable
+or blocked, report `Rendering: BLOCKED` and continue with a clear limitation.
 
 ## File Layout
 
@@ -118,11 +119,14 @@ Use image generation for visuals that should be bitmap assets, such as hero
 illustrations, product mockups, scene images, textures, photo-like backgrounds,
 and people-heavy visuals that should not be built from PowerPoint shapes.
 
-Do not generate images just to make a slide look busy, but do not be overly
-conservative either. Every slide must get an explicit image decision in
-`assets/generated/manifest.json`; use `generate` when a bitmap visual would
-make the message faster to understand or more memorable than typography,
-charts, icons, or HTML/CSS alone.
+Default to `generate` for covers, dividers, posters, brand campaigns,
+product launches, and vision/future-state pages; only fall back when the
+image service is unavailable or the user opts out. Avoid generating filler
+images just to dress up text-heavy slides, but never skip a bitmap when one
+would clearly carry the message. Every slide must get an explicit image
+decision in `assets/generated/manifest.json`; pick `generate` whenever a
+bitmap visual would make the message faster to understand or more memorable
+than typography, charts, icons, or HTML/CSS alone.
 
 ### Image Decision Rules
 
@@ -431,7 +435,7 @@ rather than a machine-specific absolute path. In Office Raccoon this is usually
 
 ```bash
 PPTX_SKILL_DIR="${BOX_AGENT_PPTX_SKILL_DIR:-$HOME/.box-agent/skills/pptx}"
-OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-$HOME/Library/Application Support/office-raccoon}}"
+OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}"
 ```
 
 The top-level workflow runs this preflight before writing the full deck. If you

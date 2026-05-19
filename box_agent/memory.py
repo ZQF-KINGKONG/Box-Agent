@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -20,6 +23,178 @@ if TYPE_CHECKING:
     from .schema import Message
 
 logger = logging.getLogger(__name__)
+
+
+# ── Token / Jaccard helpers (shared with MemoryMaintainer) ──────
+
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+def tokens(text: str) -> set[str]:
+    """Lowercase word-character tokens for Jaccard similarity.
+
+    Unicode-aware: handles CJK runs as single tokens, so 中文+英文
+    混排 content lines remain comparable.
+    """
+    return {t.lower() for t in _TOKEN_RE.findall(text)}
+
+
+def jaccard(a: set[str], b: set[str]) -> float:
+    """Symmetric set-overlap ratio. 0.0 when either side is empty."""
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+# ── Context entry: metadata-bearing record stored in CONTEXT.md ──
+
+@dataclass
+class ContextEntry:
+    """One context-memory record with metadata.
+
+    Stored in CONTEXT.md as an HTML comment header followed by a content
+    block. ``hits``/``last_used`` mutate over time; everything else is set
+    at creation.
+    """
+    id: str
+    content: str
+    created: str  # ISO-8601 UTC, second precision
+    last_used: str
+    hits: int = 0
+    source: str = "tool"  # "tool" | "extractor" | "legacy" | "user"
+    confidence: float = 1.0
+    # Promotion-to-core tracking. ``core_status`` is "none" by default;
+    # set to "rejected" after the user permanently declines promotion.
+    # ``last_proposed`` is bumped each time the entry is offered for
+    # core promotion so the cooldown skips noisy candidates.
+    core_status: str = "none"  # "none" | "rejected"
+    last_proposed: str = ""  # ISO-8601 UTC or empty if never proposed
+
+
+_ENTRY_HEADER_RE = re.compile(r"^\s*<!--\s*ctx\s+(.+?)\s*-->\s*$")
+_ENTRY_KV_RE = re.compile(r"(\w+)=(\S+)")
+
+
+def _now_iso() -> str:
+    """UTC ISO-8601 timestamp at second precision (no microseconds, no TZ suffix)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _new_entry_id() -> str:
+    """Sortable, collision-resistant id: ``ctx_<utc>_<rand6>``."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return f"ctx_{stamp}_{uuid.uuid4().hex[:6]}"
+
+
+def _new_entry(content: str, *, source: str = "tool", confidence: float = 1.0) -> ContextEntry:
+    now = _now_iso()
+    return ContextEntry(
+        id=_new_entry_id(),
+        content=content.strip(),
+        created=now,
+        last_used=now,
+        hits=0,
+        source=source,
+        confidence=confidence,
+    )
+
+
+def _format_entry_header(e: ContextEntry) -> str:
+    parts = [
+        f"id={e.id}",
+        f"created={e.created}",
+        f"last_used={e.last_used}",
+        f"hits={e.hits}",
+        f"source={e.source}",
+        f"confidence={e.confidence:.2f}",
+    ]
+    if e.core_status and e.core_status != "none":
+        parts.append(f"core_status={e.core_status}")
+    if e.last_proposed:
+        parts.append(f"last_proposed={e.last_proposed}")
+    return "<!-- ctx " + " ".join(parts) + " -->"
+
+
+def _parse_entry_header(line: str) -> dict[str, str] | None:
+    m = _ENTRY_HEADER_RE.match(line)
+    if not m:
+        return None
+    return dict(_ENTRY_KV_RE.findall(m.group(1)))
+
+
+def parse_context_file(path: Path) -> list[ContextEntry]:
+    """Parse CONTEXT.md into entries. Auto-detects legacy line-based format.
+
+    Legacy format (no ``<!-- ctx ... -->`` headers): each non-empty line
+    becomes a separate entry with default metadata and ``source="legacy"``.
+    """
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8")
+    return _parse_context_text(text)
+
+
+def _parse_context_text(text: str) -> list[ContextEntry]:
+    lines = text.splitlines()
+    has_headers = any(_ENTRY_HEADER_RE.match(l) for l in lines)
+
+    if not has_headers:
+        return [
+            _new_entry(line, source="legacy")
+            for line in lines
+            if line.strip()
+        ]
+
+    entries: list[ContextEntry] = []
+    i = 0
+    while i < len(lines):
+        meta = _parse_entry_header(lines[i])
+        if meta is None:
+            i += 1
+            continue
+        i += 1
+        content_lines: list[str] = []
+        while i < len(lines) and _parse_entry_header(lines[i]) is None:
+            content_lines.append(lines[i])
+            i += 1
+        while content_lines and not content_lines[-1].strip():
+            content_lines.pop()
+        while content_lines and not content_lines[0].strip():
+            content_lines.pop(0)
+        content = "\n".join(content_lines).strip()
+        if not content:
+            continue
+        try:
+            entries.append(ContextEntry(
+                id=meta.get("id") or _new_entry_id(),
+                content=content,
+                created=meta.get("created") or _now_iso(),
+                last_used=meta.get("last_used") or meta.get("created") or _now_iso(),
+                hits=int(meta.get("hits", "0")),
+                source=meta.get("source") or "legacy",
+                confidence=float(meta.get("confidence", "1.0")),
+                core_status=meta.get("core_status") or "none",
+                last_proposed=meta.get("last_proposed") or "",
+            ))
+        except (ValueError, TypeError):
+            logger.warning("Bad ContextEntry metadata, using defaults: %s", meta)
+            entries.append(_new_entry(content, source="legacy"))
+    return entries
+
+
+def write_context_file(path: Path, entries: list[ContextEntry]) -> None:
+    """Serialize entries to CONTEXT.md in the metadata-bearing format."""
+    if not entries:
+        path.write_text("", encoding="utf-8")
+        return
+    parts: list[str] = []
+    for e in entries:
+        parts.append(_format_entry_header(e))
+        parts.append(e.content)
+        parts.append("")  # blank line between entries
+    text = "\n".join(parts).rstrip() + "\n"
+    path.write_text(text, encoding="utf-8")
 
 
 class MemoryManager:
@@ -34,9 +209,16 @@ class MemoryManager:
       Written by ``memory_write(category="context")`` and ``MemoryExtractor``.
     """
 
-    def __init__(self, memory_dir: str = "~/.box-agent/memory", **_kwargs):
+    def __init__(
+        self,
+        memory_dir: str = "~/.box-agent/memory",
+        *,
+        dedup_jaccard_threshold: float = 0.85,
+        **_kwargs,
+    ):
         self.memory_dir = Path(memory_dir).expanduser()
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        self.dedup_jaccard_threshold = dedup_jaccard_threshold
 
     # ── File paths ──────────────────────────────────────────────
 
@@ -49,6 +231,16 @@ class MemoryManager:
     def context_file(self) -> Path:
         """CONTEXT.md — searchable context, retrieved on demand."""
         return self.memory_dir / "CONTEXT.md"
+
+    @property
+    def archive_file(self) -> Path:
+        """CONTEXT.archive.md — cold storage for decayed entries (not injected, not searched)."""
+        return self.memory_dir / "CONTEXT.archive.md"
+
+    @property
+    def trash_dir(self) -> Path:
+        """Soft-delete root for purged entries. Lazy-created on first write."""
+        return self.memory_dir / "trash"
 
     # ── Core memory (MEMORY.md) ─────────────────────────────────
 
@@ -79,28 +271,86 @@ class MemoryManager:
     # ── Context memory (CONTEXT.md) ─────────────────────────────
 
     def read_context(self) -> str:
-        """Read CONTEXT.md content. Returns empty string if missing."""
-        if not self.context_file.exists():
+        """Read CONTEXT.md as plain text (entries' content joined by newline)."""
+        entries = self._read_context_entries()
+        if not entries:
             return ""
-        return self.context_file.read_text(encoding="utf-8").strip()
+        return "\n".join(e.content for e in entries).strip()
 
     def write_context(self, content: str) -> None:
-        """Overwrite CONTEXT.md with *content*."""
-        self.context_file.write_text(content.strip() + "\n", encoding="utf-8")
+        """Overwrite CONTEXT.md with *content* (creates fresh entries, one per line).
+
+        Destructive — drops metadata of any existing entries. Used by callers
+        that already hold the desired final text (tests, legacy paths). For
+        non-destructive updates use ``append_context`` / ``apply_context_operations``.
+        """
+        entries = [
+            _new_entry(line, source="tool")
+            for line in content.splitlines()
+            if line.strip()
+        ]
+        self._write_context_entries(entries)
 
     def append_context(self, content: str) -> None:
-        """Append to CONTEXT.md, skipping lines already present in Core or Context."""
+        """Append to CONTEXT.md, skipping lines already present in Core or Context.
+
+        Two-tier dedup:
+
+        1. Exact line-level (case-insensitive) — catches verbatim repeats.
+        2. Token-Jaccard fuzzy match against existing entries — catches
+           paraphrased restatements of the same fact. On match, the existing
+           entry's ``hits`` is bumped and ``last_used`` refreshed instead of
+           adding a new entry.
+
+        Existing entries' metadata (hits, created, etc.) is preserved.
+        """
         existing = self.read_context()
         filtered = self._dedupe_context_lines(content, existing_context=existing)
 
         if not filtered:
             return
 
-        new_content = "\n".join(filtered)
-        if existing:
-            self.write_context(f"{existing}\n{new_content}")
-        else:
-            self.write_context(new_content)
+        existing_entries = self._read_context_entries()
+        threshold = self.dedup_jaccard_threshold
+        entry_tokens = [tokens(e.content) for e in existing_entries]
+
+        new_entries: list[ContextEntry] = []
+        merged_any = False
+        now = _now_iso()
+
+        for line in filtered:
+            line_tokens = tokens(line)
+            best_idx = -1
+            best_score = 0.0
+            if line_tokens:
+                for idx, et in enumerate(entry_tokens):
+                    score = jaccard(line_tokens, et)
+                    if score > best_score:
+                        best_score = score
+                        best_idx = idx
+
+            if best_idx >= 0 and best_score >= threshold:
+                existing_entries[best_idx].hits += 1
+                existing_entries[best_idx].last_used = now
+                merged_any = True
+            else:
+                entry = _new_entry(line, source="tool")
+                new_entries.append(entry)
+                existing_entries.append(entry)
+                entry_tokens.append(line_tokens)
+
+        if not new_entries and not merged_any:
+            return
+
+        self._write_context_entries(existing_entries)
+
+    def _read_context_entries(self) -> list[ContextEntry]:
+        """Parse CONTEXT.md into entries (or empty list if missing)."""
+        return parse_context_file(self.context_file)
+
+    def _write_context_entries(self, entries: list[ContextEntry]) -> None:
+        """Serialize entries to CONTEXT.md."""
+        write_context_file(self.context_file, entries)
 
     def _dedupe_context_lines(self, content: str, *, existing_context: str | None = None) -> list[str]:
         """Return non-empty context lines not already present in Core or Context.
@@ -132,18 +382,37 @@ class MemoryManager:
     def search(self, query: str) -> list[str]:
         """Keyword search across CONTEXT.md entries.
 
-        Splits content into lines, returns lines containing *query*
-        (case-insensitive).  Returns an empty list on no match.
+        Returns matched lines (case-insensitive). Side effect: increments
+        ``hits`` and refreshes ``last_used`` on each matched entry, then
+        persists the file. Persistence is synchronous (small file, infrequent).
         """
-        context = self.read_context()
-        if not context or not query:
+        if not query:
+            return []
+        entries = self._read_context_entries()
+        if not entries:
             return []
 
         query_lower = query.lower()
-        return [
-            line for line in context.splitlines()
-            if line.strip() and query_lower in line.lower()
-        ]
+        matched: list[str] = []
+        changed = False
+        now = _now_iso()
+
+        for entry in entries:
+            hit = False
+            for line in entry.content.splitlines():
+                stripped = line.strip()
+                if stripped and query_lower in stripped.lower():
+                    matched.append(line)
+                    hit = True
+            if hit:
+                entry.hits += 1
+                entry.last_used = now
+                changed = True
+
+        if changed:
+            self._write_context_entries(entries)
+
+        return matched
 
     def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
         """Return high-confidence context-memory matches for a user prompt.
@@ -152,10 +421,13 @@ class MemoryManager:
         share strong phrase/token overlap with the prompt.  The result is meant
         to provide *possibly relevant* context, never to force the model to
         treat a new request as a continuation of an old task.
+
+        Side effect: increments ``hits`` and refreshes ``last_used`` on each
+        entry whose content matched at least one returned line.
         """
         query = _sanitize_auto_match_query(query)
-        context = self.read_context()
-        if not query or not context:
+        entries = self._read_context_entries()
+        if not query or not entries:
             return []
 
         query_lower = query.lower()
@@ -163,18 +435,33 @@ class MemoryManager:
         if not query_terms:
             return []
 
-        scored: list[tuple[float, int, str]] = []
-        for line_no, line in enumerate(context.splitlines(), start=1):
-            text = line.strip()
-            if not text:
-                continue
-            if _should_skip_auto_match_line(query_lower, text.lower()):
-                continue
-            score = _score_memory_match(query_lower, query_terms, text.lower())
-            if score >= 2.0:
-                scored.append((score, line_no, text))
+        # (score, line_no, text, entry_index) — line_no is globally indexed
+        # across joined content so callers keep stable ids.
+        scored: list[tuple[float, int, str, int]] = []
+        line_no = 0
+        for entry_idx, entry in enumerate(entries):
+            for raw_line in entry.content.splitlines():
+                line_no += 1
+                text = raw_line.strip()
+                if not text:
+                    continue
+                if _should_skip_auto_match_line(query_lower, text.lower()):
+                    continue
+                score = _score_memory_match(query_lower, query_terms, text.lower())
+                if score >= 2.0:
+                    scored.append((score, line_no, text, entry_idx))
 
         scored.sort(key=lambda item: (-item[0], item[1]))
+        top = scored[:limit]
+
+        if top:
+            now = _now_iso()
+            hit_entry_indices = {entry_idx for _, _, _, entry_idx in top}
+            for idx in hit_entry_indices:
+                entries[idx].hits += 1
+                entries[idx].last_used = now
+            self._write_context_entries(entries)
+
         return [
             {
                 "id": f"context:{line_no}",
@@ -182,7 +469,7 @@ class MemoryManager:
                 "category": "context",
                 "text": text,
             }
-            for _, line_no, text in scored[:limit]
+            for _, line_no, text, _ in top
         ]
 
     # ── Recall (system prompt injection) ────────────────────────
@@ -357,11 +644,17 @@ class MemoryManager:
     def apply_context_operations(self, operations: list[dict]) -> bool:
         """Safely apply model-planned context memory operations.
 
-        ``replace`` and ``drop`` require exactly one full-line match. ``add``
-        uses the same Core/Context dedupe guard as direct appends.
+        ``replace`` and ``drop`` require exactly one entry whose content matches
+        the target string. ``add`` uses the same Core/Context dedupe guard as
+        direct appends. Entry metadata (hits, created) is preserved across
+        replace/drop; only ``last_used`` bumps on replace.
         """
-        context = self.read_context()
-        lines = context.splitlines() if context else []
+        entries = self._read_context_entries()
+        core_norm = {
+            line.strip().lower()
+            for line in self.read_core().splitlines()
+            if line.strip()
+        }
         changed = False
 
         for op in operations:
@@ -372,45 +665,178 @@ class MemoryManager:
                 new = str(op.get("new", "")).strip()
                 if not old or not new:
                     continue
-                indices = [i for i, line in enumerate(lines) if line.strip() == old]
+                indices = [i for i, e in enumerate(entries) if e.content.strip() == old]
                 if len(indices) != 1:
                     if len(indices) > 1:
                         logger.warning("Ambiguous context memory replace skipped (%d matches): %s", len(indices), old[:80])
                     else:
                         logger.debug("Context memory replace target not found: %s", old[:80])
                     continue
-                candidate_context = "\n".join(line for i, line in enumerate(lines) if i != indices[0])
-                if not self._dedupe_context_lines(new, existing_context=candidate_context):
-                    lines.pop(indices[0])
+                new_norm = new.lower()
+                others_norm = {
+                    e.content.strip().lower()
+                    for i, e in enumerate(entries) if i != indices[0]
+                }
+                if new_norm in others_norm or new_norm in core_norm:
+                    entries.pop(indices[0])
                 else:
-                    lines[indices[0]] = new
+                    entries[indices[0]].content = new
+                    entries[indices[0]].last_used = _now_iso()
                 changed = True
 
             elif action == "drop":
                 content = str(op.get("content", "")).strip()
                 if not content:
                     continue
-                indices = [i for i, line in enumerate(lines) if line.strip() == content]
+                indices = [i for i, e in enumerate(entries) if e.content.strip() == content]
                 if len(indices) != 1:
                     if len(indices) > 1:
                         logger.warning("Ambiguous context memory drop skipped (%d matches): %s", len(indices), content[:80])
                     continue
-                lines.pop(indices[0])
+                entries.pop(indices[0])
                 changed = True
 
             elif action == "add":
                 content = str(op.get("content", "")).strip()
-                additions = self._dedupe_context_lines(content, existing_context="\n".join(lines))
-                if additions:
-                    lines.extend(additions)
+                if not content:
+                    continue
+                existing_norm = {e.content.strip().lower() for e in entries}
+                for line in content.splitlines():
+                    norm = line.strip().lower()
+                    if not norm or norm in existing_norm or norm in core_norm:
+                        continue
+                    existing_norm.add(norm)
+                    entries.append(_new_entry(line, source="tool"))
                     changed = True
 
             elif action == "noop":
                 continue
 
         if changed:
-            self.write_context("\n".join(lines))
+            self._write_context_entries(entries)
         return changed
+
+    # ── Core-promotion candidates ───────────────────────────────
+
+    def list_promotion_candidates(
+        self,
+        *,
+        hit_threshold: int,
+        cooldown_days: int,
+    ) -> list[ContextEntry]:
+        """Return CONTEXT.md entries eligible for promotion to MEMORY.md (core).
+
+        Filters:
+        - ``hits >= hit_threshold``
+        - ``core_status != "rejected"`` (rejection is permanent)
+        - ``last_proposed`` either empty or older than ``cooldown_days``
+        - ``source != "core"`` (never re-propose core-originated material)
+        """
+        if hit_threshold <= 0:
+            return []
+        entries = self._read_context_entries()
+        if not entries:
+            return []
+        now = datetime.now(timezone.utc)
+        cooldown = timedelta(days=max(cooldown_days, 0))
+        candidates: list[ContextEntry] = []
+        for e in entries:
+            if e.hits < hit_threshold:
+                continue
+            if e.core_status == "rejected":
+                continue
+            if e.source == "core":
+                continue
+            if e.last_proposed:
+                try:
+                    last = datetime.fromisoformat(e.last_proposed)
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    if now - last < cooldown:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            candidates.append(e)
+        return candidates
+
+    def mark_proposed(self, candidate_ids: list[str]) -> None:
+        """Bump ``last_proposed`` on the given entries and persist."""
+        if not candidate_ids:
+            return
+        entries = self._read_context_entries()
+        wanted = set(candidate_ids)
+        now = _now_iso()
+        changed = False
+        for e in entries:
+            if e.id in wanted:
+                e.last_proposed = now
+                changed = True
+        if changed:
+            self._write_context_entries(entries)
+
+    def consume_core_proposal(self, decisions: dict[str, str]) -> dict[str, int]:
+        """Apply user decisions to promotion candidates.
+
+        ``decisions`` maps entry id → ``"pin"``, ``"skip"``, or ``"reject"``.
+
+        - ``pin``: remove entry from CONTEXT.md, append its content to
+          MEMORY.md (skipping if the same line already exists in core).
+        - ``reject``: keep entry in CONTEXT.md but flip
+          ``core_status="rejected"`` so it is never proposed again.
+        - ``skip``: no-op. ``last_proposed`` was already bumped at emit
+          time, so the cooldown carries the user past this candidate.
+
+        Returns counts for each action ({"pinned": int, "rejected": int,
+        "skipped": int}).
+        """
+        if not decisions:
+            return {"pinned": 0, "rejected": 0, "skipped": 0}
+
+        entries = self._read_context_entries()
+        if not entries:
+            return {"pinned": 0, "rejected": 0, "skipped": 0}
+
+        pinned_contents: list[str] = []
+        keep: list[ContextEntry] = []
+        counts = {"pinned": 0, "rejected": 0, "skipped": 0}
+
+        for e in entries:
+            decision = decisions.get(e.id)
+            if decision == "pin":
+                pinned_contents.append(e.content)
+                counts["pinned"] += 1
+                continue
+            if decision == "reject":
+                e.core_status = "rejected"
+                counts["rejected"] += 1
+            elif decision == "skip":
+                counts["skipped"] += 1
+            keep.append(e)
+
+        if pinned_contents:
+            core = self.read_core()
+            core_lines_norm = {
+                line.strip().lower()
+                for line in core.splitlines()
+                if line.strip()
+            }
+            to_append: list[str] = []
+            for content in pinned_contents:
+                for line in content.splitlines():
+                    norm = line.strip().lower()
+                    if not norm or norm in core_lines_norm:
+                        continue
+                    core_lines_norm.add(norm)
+                    to_append.append(line)
+            if to_append:
+                if core:
+                    self.write_core(core + "\n" + "\n".join(to_append))
+                else:
+                    self.write_core("\n".join(to_append))
+
+        if counts["pinned"] or counts["rejected"]:
+            self._write_context_entries(keep)
+        return counts
 
 
 # ── Auto Memory Extraction ────────────────────────────────────────
@@ -680,7 +1106,11 @@ class MemoryExtractor:
         self._apply_updates(response.content)
 
     def _apply_updates(self, llm_output: str) -> None:
-        """Parse LLM JSON output and apply to CONTEXT.md."""
+        """Parse LLM JSON output and apply to CONTEXT.md.
+
+        Routed through ``apply_context_operations`` so entry metadata
+        (hits, created, last_used) survives merges.
+        """
         text = _strip_json_fences(llm_output)
 
         try:
@@ -695,33 +1125,17 @@ class MemoryExtractor:
         if not additions and not merges:
             return
 
-        context = self._mgr.read_context()
+        operations: list[dict] = []
+        for merge in merges:
+            old = str(merge.get("old", "")).strip()
+            new = str(merge.get("new", "")).strip()
+            if old and new:
+                operations.append({"action": "replace", "old": old, "new": new})
 
-        # Apply merges (line-level exact match only)
-        if merges:
-            lines = context.splitlines()
-            for merge in merges:
-                old = merge.get("old", "").strip()
-                new = merge.get("new", "").strip()
-                if not old or not new:
-                    continue
-                indices = [i for i, line in enumerate(lines) if line.strip() == old]
-                if len(indices) == 1:
-                    lines[indices[0]] = new
-                elif len(indices) > 1:
-                    logger.warning("Ambiguous memory merge skipped (%d matches): %s", len(indices), old[:80])
-                else:
-                    logger.debug("Memory merge target not found: %s", old[:80])
-            context = "\n".join(lines)
-
-        # Apply additions (skip lines that duplicate Core or Context)
         if additions:
-            deduped = self._mgr._dedupe_context_lines("\n".join(additions), existing_context=context)
-            if deduped:
-                addition_text = "\n".join(deduped)
-                if context:
-                    context = f"{context}\n{addition_text}"
-                else:
-                    context = addition_text
+            joined = "\n".join(a for a in additions if isinstance(a, str) and a.strip())
+            if joined:
+                operations.append({"action": "add", "content": joined})
 
-        self._mgr.write_context(context)
+        if operations:
+            self._mgr.apply_context_operations(operations)

@@ -165,6 +165,34 @@ def test_prompt_renders_platform_and_browser_state() -> None:
     assert "enabled=false" in out
 
 
+def test_prompt_renders_image_service_available() -> None:
+    ctx = EnvContext.from_meta({"image_service": {"available": True}})
+    assert ctx is not None
+    assert ctx.image_service is not None
+    assert ctx.image_service.available is True
+    out = build_env_context_prompt(ctx)
+    assert "生图服务状态" in out
+    assert "可用" in out
+    assert "generate_image" in out
+
+
+def test_prompt_renders_image_service_unavailable() -> None:
+    ctx = EnvContext.from_meta({"image_service": {"available": False}})
+    assert ctx is not None
+    out = build_env_context_prompt(ctx)
+    assert "生图服务状态" in out
+    assert "不可用" in out
+
+
+def test_image_service_absent_field_skipped() -> None:
+    ctx = EnvContext.from_meta({"image_service": {}})
+    assert ctx is not None
+    assert ctx.image_service is not None
+    assert ctx.image_service.available is None
+    out = build_env_context_prompt(ctx)
+    assert "生图服务状态" not in out
+
+
 def test_prompt_renders_memory_configured() -> None:
     ctx_done = EnvContext.from_meta({"memory_configured": True})
     assert "已完成" in build_env_context_prompt(ctx_done)

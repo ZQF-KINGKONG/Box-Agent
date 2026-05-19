@@ -23,6 +23,7 @@ from .events import (
     ErrorEvent,
     InjectedMessageEvent,
     LogFileEvent,
+    MemoryProposalEvent,
     PPTProgressEvent,
     PermissionRequestEvent,
     StepEnd,
@@ -93,6 +94,9 @@ class Agent:
         token_limit: int = 113400,
         hooks: list | None = None,
         thinking_enabled: bool = False,
+        memory_promotion_enabled: bool = False,
+        memory_promotion_hit_threshold: int = 5,
+        memory_promotion_cooldown_days: int = 14,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
@@ -102,9 +106,13 @@ class Agent:
         self.cancel_event: Optional[asyncio.Event] = None
         self.inject_queue: asyncio.Queue[str] = asyncio.Queue()
         self._permission_negotiator = None  # set by CLI/ACP when permission engine is active
+        self._proposal_negotiator = None  # set by CLI/ACP to handle MemoryProposalEvent
         self._hooks = hooks
         self._memory_extractor = None  # set by CLI/ACP when memory extraction is enabled
         self.thinking_enabled = thinking_enabled
+        self.memory_promotion_enabled = memory_promotion_enabled
+        self.memory_promotion_hit_threshold = memory_promotion_hit_threshold
+        self.memory_promotion_cooldown_days = memory_promotion_cooldown_days
 
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -168,6 +176,9 @@ class Agent:
             hooks=self._hooks,
             memory_manager=getattr(self._memory_extractor, "_mgr", None),
             memory_extractor=self._memory_extractor,
+            memory_promotion_enabled=self.memory_promotion_enabled,
+            memory_promotion_hit_threshold=self.memory_promotion_hit_threshold,
+            memory_promotion_cooldown_days=self.memory_promotion_cooldown_days,
             inject_queue=self.inject_queue,
             thinking_enabled=self.thinking_enabled,
         ):
@@ -187,6 +198,11 @@ class Agent:
         final_content = ""
         async for event in self.run_events(cancel_event):
             self._render_event(event)
+            if isinstance(event, MemoryProposalEvent) and self._proposal_negotiator is not None:
+                try:
+                    await self._proposal_negotiator.negotiate(event)
+                except Exception:
+                    pass
             if isinstance(event, DoneEvent):
                 final_content = event.final_content
         return final_content

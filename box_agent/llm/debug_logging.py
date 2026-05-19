@@ -361,10 +361,21 @@ def _mapping_from_headers(headers: Any) -> dict[str, Any]:
 
 def request_id_from_headers(headers: Any) -> str | None:
     mapping = _mapping_from_headers(headers)
-    for key in ("x-request-id", "request-id", "x-stainless-request-id", "cf-ray"):
-        for actual_key, value in mapping.items():
-            if str(actual_key).lower() == key:
-                return str(value)
+    lowered = {str(k).lower(): v for k, v in mapping.items()}
+    known_keys = (
+        "x-request-id",
+        "request-id",
+        "x-stainless-request-id",
+        "cf-ray",
+        "x-raccoon-request-id",
+        "x-ws-request-id",
+    )
+    for key in known_keys:
+        if key in lowered:
+            return str(lowered[key])
+    for actual_key, value in lowered.items():
+        if actual_key.endswith("-request-id") or actual_key.endswith("_request_id"):
+            return str(value)
     return None
 
 

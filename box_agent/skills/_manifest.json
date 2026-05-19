@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "box_agent_version": "0.8.39",
-  "generated_at": "2026-05-16T17:42:38Z",
+  "box_agent_version": "0.8.40",
+  "generated_at": "2026-05-19T01:50:48Z",
   "skills": [
     {
       "name": "artifacts-builder",
@@ -26,6 +26,10 @@
     {
       "name": "xlsx",
       "path": "document-skills/xlsx/SKILL.md"
+    },
+    {
+      "name": "html-templates",
+      "path": "html-templates/SKILL.md"
     },
     {
       "name": "internal-comms",

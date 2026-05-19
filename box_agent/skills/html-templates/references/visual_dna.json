@@ -1,0 +1,962 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-05-18",
+  "description": "32 个 HTML 模板的视觉 DNA 提取。用法：检索时按 profile/color_palette 匹配，然后将 style_rules_text + typography + decoration_tokens 作为强约束 prompt 注入到代码生成阶段。",
+  "field_guide": {
+    "style_rules_text": "中文铁律段，描述风格基因（颜色身份、字体、装饰角色、相对比例），用作 LLM 生成阶段的 prompt 注入；不含具体像素数值。",
+    "decoration_tokens": "该模板里真实存在的、最具辨识度的 class（3-6 个），每条带关键 CSS。"
+  },
+  "templates": [
+    {
+      "template_id": "8-bit-orbit",
+      "profile": {
+        "industry_fit": [
+          "游戏/电竞演讲",
+          "科技产品发布会",
+          "Web3/加密货币展示",
+          "独立开发者演示",
+          "黑客马拉松展示",
+          "创意科技论坛"
+        ],
+        "mood_tone": "复古电子美学与赛博朋克能量相碰撞的沉浸式体验",
+        "visual_density": "Medium（内容适度，留白充足用于大气效果）"
+      },
+      "color_palette": {
+        "bg_main": "#0A0E27（深空虚无）",
+        "text_main": "#FFFFFF（纯白）",
+        "accent": "#5EDCF4（霓虹青）、#F0A6CA（霓虹粉）、#F4D03F（霓虹黄）",
+        "muted": "#E2D5F2（薰衣草浅紫）"
+      },
+      "style_rules_text": "深色背景 #0A0E27 + 霓虹三色（青 #5EDCF4、粉 #F0A6CA、黄 #F4D03F）。禁用暖棕和灰度中性色。卡片用粗边（霓虹色）+ 实色块阴影（深蓝偏移）制造像素推进感。按钮用粗体 mono 字体，宽字距、横向 padding 大、纵向 padding 中。扫描线 repeating-linear-gradient 极淡叠加，mix-blend-mode: multiply；噪声粒子 SVG turbulence 极低 opacity。卡片边缘用 clip-path 多边形造像素切角。间距按 8 倍数网格，统一中等模数。",
+      "typography": "Tektur 900 用于 display 英雄文本，display 巨大字号，字距略宽（letter-spacing: 0.04em）；Chakra Petch 400-600 用于正文，正文级字号、字距明显加宽（letter-spacing: 0.15em）；Space Mono 700 用于标签，极小字号、uppercase、宽字距（letter-spacing: 0.2em）。display/正文行高极紧（约 1.05-1.15）。",
+      "decoration_tokens": {
+        "pixel_box": "position: relative；深蓝底；内嵌粗边；clip-path 多边形像素切角；::before 套一圈外围霓虹粗边",
+        "pixel_btn": "横向 padding 大、纵向 padding 中；霓虹底色（青/粉）；多层实色块阴影错位叠加（深蓝 + 黄色重影）造立体像素感",
+        "pixel_label": "font-family: Space Mono；极小字号；深蓝底、黄字；紧凑 padding；letter-spacing: 0.2em uppercase",
+        "feature_card": "细边 rgba(15,27,61,0.2)；backdrop-filter: blur(...)；中等 padding；::before/::after 像素切角装饰",
+        "stat_block": "青色半透底 rgba(94,220,244,0.08)；青色细边 rgba(94,220,244,0.2)；中等 padding；::before/::after 像素切角",
+        "timeline_node": "小尺寸圆点；青色底；粗深蓝描边；active 状态换为黄色"
+      }
+    },
+    {
+      "template_id": "biennale-yellow",
+      "profile": {
+        "industry_fit": [
+          "艺术双年展与美术馆",
+          "设计与版式论坛",
+          "美术机构项目发布",
+          "出版与策展演讲",
+          "美学与设计研究",
+          "文化机构季刊"
+        ],
+        "mood_tone": "宁静的编辑气质，光线与纸张的缓慢对话",
+        "visual_density": "Medium（文字为主，大量留白强化沉思感）"
+      },
+      "color_palette": {
+        "bg_main": "#E9E5DB（温暖羊皮纸）",
+        "text_main": "#1B2566（深靛蓝墨水）",
+        "accent": "#F1EE2E（标志性日光黄）、#E26B4A（温暖余晖橙）",
+        "muted": "#F0DA7C（柔和雾黄）"
+      },
+      "style_rules_text": "背景严格 #E9E5DB 温暖羊皮纸。文本 #1B2566 深靛。标志黄 #F1EE2E 仅用于块级装饰、标题强调、数据条。横向留白宽松（约画布宽 4-6%），纵向适中（约 4%）。圆角全为 0。四栏不对称网格，比例 1.1fr 1fr 1.4fr 2fr。标签 uppercase、宽字距（letter-spacing: 0.18em）、半粗体、标签级小字号。极细实线分隔。辅助光晕 radial-gradient 黄/橙，opacity 0.15-0.55。",
+      "typography": "Instrument Serif 400/italic 用于 display 与标题，巨大字号占视觉主轴，字距略压缩 -0.018em；Archivo 400/600 用于正文与标签，正文级字号、字距明显加宽 0.18em；JetBrains Mono 400/500 用于日期数值，小号 mono。display 行高极紧（约 0.86），正文/标签 1.0-1.5。",
+      "decoration_tokens": {
+        "blocks_grid": "position: absolute；四栏等分 grid-template-columns；b1-b4 各占不同区域；底色 rgba(241,238,46,0.4-0.7) 黄色半透",
+        "sunglow": "background: radial-gradient(ellipse 42% 38% at 52% 42%, rgba(241,238,46,0.95)...) + 第二径向渐变橙色角点；inset: 0",
+        "data_bar": "中等高度色条；底色 #1B2566；.lit 状态换为 #F1EE2E、极细深靛描边",
+        "programme_strand": "双列 grid-template-columns: 编号窄列 + 内容主列；紧凑 gap；底部极细半透深靛分隔线",
+        "section_label": "font-family: Archivo；font-weight: 600；text-transform: uppercase；letter-spacing: 0.2em；底部极细深靛分隔线；紧凑下内边距",
+        "quote_block": "Instrument Serif italic；display 巨大字号；行高紧凑（约 1.06）；色 #1B2566"
+      }
+    },
+    {
+      "template_id": "block-frame",
+      "profile": {
+        "industry_fit": [
+          "创意机构与品牌顾问",
+          "独立 SaaS 产品发布",
+          "设计师个人作品集",
+          "品牌重塑展示",
+          "初创公司融资演讲",
+          "创意评审与案例分析"
+        ],
+        "mood_tone": "大胆图形化、充满设计自信的新锐质感",
+        "visual_density": "High（多层色块、密集网格、高对比构成）"
+      },
+      "color_palette": {
+        "bg_main": "#FFFDF5（温暖米白）",
+        "text_main": "#000000（纯黑）",
+        "accent": "#FE90E8（热粉红）、#C0F7FE（天空蓝）、#99E885（石灰绿）、#F7CB46（金黄）、#FFDC8B（奶油黄）",
+        "muted": "无显著 muted，用黑色与米白对比"
+      },
+      "style_rules_text": "背景 #FFFDF5 与 #000000 纯对比。所有主块元素加粗黑边 + 实色块右下偏移阴影；无圆角。装饰用五种饱和色块轮流填充（热粉、天蓝、石灰绿、金黄、奶油黄）。按钮中等粗黑边、横向 padding 宽、纵向 padding 中，底色用主色块，配中偏移实色阴影。块级间距宽松，内嵌间距紧凑。dot-grid 背景用 radial-gradient(circle, black ...) + 紧凑 background-size。标题 font-weight: 900、uppercase、字距压缩 letter-spacing: -0.03em。3 列网格 gap 中等。",
+      "typography": "Space Grotesk 400-700 用于 display 与标题，标题级到 display 巨大字号，字距压缩（letter-spacing: -0.01 ~ -0.03em），行高极紧（line-height: 0.95-1.0）。Inter 400-900 用于正文，正文级字号、字距略压缩（-0.02em）；Space Grotesk 500 用作 mono 标签，正文偏小，字距略宽（0.02em）。",
+      "decoration_tokens": {
+        "nb_card": "粗黑边；白底；中偏移实色黑阴影 box-shadow",
+        "nb_label": "中粗黑边；紧凑 padding；font-weight: 600；letter-spacing: 0.08em uppercase；色块底色（变量）；小偏移实色黑阴影",
+        "nb_btn": "中粗黑边；横向 padding 宽、纵向 padding 中；font-weight: 700；金黄底；小偏移实色黑阴影",
+        "corner_bracket": "position: absolute；小方块尺寸；中粗黑边（按方向只保留两侧）",
+        "deco_shapes": "旋转矩形 transform: rotate(12deg) / -3deg；圆形 border-radius: 50%；条纹 repeating-linear-gradient 45deg 黑/彩色交替",
+        "timeline_step": "粗黑边；各步色块底；中等 padding；负 margin-right 让相邻边框重叠；.step-connector 短粗黑横条衔接"
+      }
+    },
+    {
+      "template_id": "blue-professional",
+      "profile": {
+        "industry_fit": [
+          "B2B SaaS 商业演讲",
+          "管理咨询交付物",
+          "投资者更新报告",
+          "顾问业务提案",
+          "企业内部审查",
+          "金融与研究简报"
+        ],
+        "mood_tone": "克制的现代专业感，冷静而可信",
+        "visual_density": "Medium（信息充足但不过载）"
+      },
+      "color_palette": {
+        "bg_main": "#FDFAE7（温暖米色）",
+        "text_main": "#111111（几近黑）",
+        "accent": "#1E2BFA（电动钴蓝）",
+        "muted": "#6B6B6B（灰色）、#9A9A9A（浅灰）"
+      },
+      "style_rules_text": "背景 #FDFAE7，文本 #111111，accent 蓝 #1E2BFA 仅用于标题、标签、强调线。中等圆角营造现代感。卡片用极细蓝色边 rgba(30,43,250,0.2) + 极淡蓝底 rgba(30,43,250,0.04)。标签底 rgba(30,43,250,0.08)；padding 紧凑；border-radius pill；标签级小字号。nav 圆形按钮 border-radius: 50%、极细蓝色边。accent 线短粗实色蓝。禁止大块对比色、禁止过重阴影。",
+      "typography": "Space Grotesk 300-700 用于 h1（标题级；font-weight: 700；字距 -0.02em），h2（副标题级；font-weight: 600）。Inter 300-600 用于正文（正文级；font-weight: 400-500；line-height: 1.6）。Space Grotesk 500 用于标签，小号字距略宽。",
+      "decoration_tokens": {
+        "metric_card": "中等 padding；中等圆角；极细蓝色边 rgba(30,43,250,0.2)；极淡蓝底 rgba(30,43,250,0.04)",
+        "stat_cell": "中等 padding；中等圆角；极淡蓝底；极细蓝色边",
+        "agenda_item": "横向 gap 中等；padding 中等；中等圆角；底部极细蓝色分隔线",
+        "split_highlight": "中等 padding；蓝色半透底 rgba(30,43,250,0.08)；中等圆角；左侧中粗实色蓝色重音边 border-left",
+        "bar_fill": "中等高度色条；实色蓝底；中等圆角",
+        "timeline_step": "中等圆形节点；border-radius: 50%；实色蓝底；米色字；Nth-child opacity 递减 1.0 → 0.55"
+      }
+    },
+    {
+      "template_id": "bold-poster",
+      "profile": {
+        "industry_fit": [
+          "品牌宣言",
+          "创意演讲",
+          "编辑内容",
+          "文化艺术"
+        ],
+        "mood_tone": "大胆、编辑感、充满冲击力的视觉宣言",
+        "visual_density": "Low（极简布局，每张幻灯片仅几个大型陈述）"
+      },
+      "color_palette": {
+        "bg_main": "#FFFFFF（纯白）",
+        "text_main": "#1C1410（深棕黑）",
+        "accent": "#D8000F（消防车红）",
+        "muted": "#F5F2EF（暖米色）"
+      },
+      "style_rules_text": "极端排版对比为核心：Shrikhand display 字体占据 display 极致巨大字号，行高极紧（约 0.85-0.9）。深棕黑 #1C1410 文本配白底，单一消防红 #D8000F 作唯一彩色口音。所有网格使用中粗 #1C1410 边框。红色幻灯片背景 #D8000F 配白色文本，带小到中偏移文本阴影。间距宽松：padding 宽松，gap 中到宽松。无圆角、无阴影、无渐变。",
+      "typography": "Shrikhand（display 900）+ Libre Baskerville（衬线 400-700）+ Space Grotesk（无衬线 400-700）；字号从极小标签级到 display 极致巨大；字距 -0.04em ~ 宽字距；行高 0.82-1.75（display 极紧、正文宽松）。",
+      "decoration_tokens": {
+        "hero-title": "Shrikhand；display 巨大字号；行高紧凑（约 0.88）",
+        "hero-title.red": "color: #D8000F；transform: rotate(-4deg)；display 极致巨大字号",
+        "summary-highlights": "3 列网格；中粗 #1C1410 边；中等 padding",
+        "fin-grid": "3 列网格；中粗 #1C1410 边；单元格极细内边线",
+        "svc-card": "左侧中粗红色重音边 border-left #D8000F；左内边距中等",
+        "pillar": "flex 行；右侧中粗 #1C1410 分隔边；奇数行底色 #F5F2EF"
+      }
+    },
+    {
+      "template_id": "broadside",
+      "profile": {
+        "industry_fit": [
+          "品牌宣言",
+          "创意演讲",
+          "编辑内容",
+          "设计演讲",
+          "双语 EN/CN"
+        ],
+        "mood_tone": "报纸社论感、戏剧性、大胆的单色加橙色",
+        "visual_density": "Medium（类型占主导，信息密度中等）"
+      },
+      "color_palette": {
+        "bg_main": "#111111（近黑）",
+        "text_main": "#f0ece5（温暖米色）",
+        "accent": "#e85d26（火橙）",
+        "muted": "#888880（灰褐色）"
+      },
+      "style_rules_text": "深色报纸美学：背景 #111111，文本 #f0ece5。display 字体 Barlow 900，display 极致巨大字号，字距压缩 -0.04em，行高 0.88。橙色 #e85d26 是环境色而非口音——覆盖整张幻灯片背景。动画通过 data-anim 属性（fade-up, reveal-right, scale-in），cubic-bezier(0.16,1,0.3,1) 缓动，0.5s。clip-path 用于 reveal 动画。横向 padding 宽松、纵向 padding 中等。",
+      "typography": "Barlow（900/800/700）+ IBM Plex Mono（标签）+ Noto Sans SC（CJK）；display 极致巨大、h1 巨大、h2 副标题级、正文级；字距 -0.04em ~ 宽字距 0.14em；行高 0.88-1.6。",
+      "decoration_tokens": {
+        "display": "font-weight: 900；letter-spacing: -0.04em；line-height: 0.88",
+        "data-anim": "fade-up / fade-in / reveal-right / reveal-left / scale-in；animation-duration: 0.5s；缓动 cubic-bezier(0.16,1,0.3,1)",
+        "kicker": "IBM Plex Mono；letter-spacing: 0.14em；uppercase；color: #e85d26",
+        "rule": "短中粗水平实线；橙色 #e85d26",
+        "orange .display": "color: #111111（橙色幻灯片上的深墨水，反向对比）"
+      }
+    },
+    {
+      "template_id": "capsule",
+      "profile": {
+        "industry_fit": [
+          "生活品牌",
+          "创意组合",
+          "DTC 产品",
+          "美容/健康",
+          "Y2K 风格"
+        ],
+        "mood_tone": "俏皮、现代、温暖、新鲜的胶囊形状美学",
+        "visual_density": "Medium（模块化卡片，中等信息密度）"
+      },
+      "color_palette": {
+        "bg_main": "#F5F5F0（温暖骨色）",
+        "text_main": "#1A1A1A（墨黑）",
+        "accent": "#E85D4E（珊瑚红）",
+        "muted": "#C4D94E（酸橙）/ #C5B5E0（薰衣草）/ #8BB4F7（天蓝）/ #A06CE8（紫罗兰）/ #F2D160（黄）/ #F5B895（桃）/ #A8E6CF（薄荷）"
+      },
+      "style_rules_text": "模块化胶囊设计系统：所有形状 border-radius: 9999px（药丸形）配中细黑边 #1E1E1E。8 种填充色（珊瑚、酸橙、薰衣草、天蓝、紫罗兰、黄、桃、薄荷）。背景使用径向渐变叠加（rgba 颜色 opacity 0.06-0.15）。卡片大圆角、中细黑边、中偏移柔和实色阴影 rgba(26,26,26,0.08)。display 字体 Bodoni Moda 800-900，display 巨大。grain-overlay 用 SVG feTurbulence，mix-blend-mode: multiply，opacity: 0.04。",
+      "typography": "Bodoni Moda（display 800-900）+ Space Grotesk（正文 300-700）；display 巨大、正文级字号；字距 -0.02em ~ 宽字距 0.15em；行高 0.9-1.6。",
+      "decoration_tokens": {
+        "pill": "border-radius: 9999px（药丸形）；中细黑边 #1E1E1E；display: inline-flex",
+        "pill-filled": "8 色变体（coral/lime/lavender/sky/violet/yellow/peach/mint）",
+        "grain-overlay": "SVG feTurbulence；mix-blend-mode: multiply；opacity: 0.04；position: fixed；inset: 0",
+        "pillar-card": "大圆角；中细黑边；中偏移实色柔阴影 box-shadow var(--shadow)",
+        "chart-bar-fill": "border-radius: 9999px（药丸形条）；transition: width 1s cubic-bezier(0.4,0,0.2,1)"
+      }
+    },
+    {
+      "template_id": "cartesian",
+      "profile": {
+        "industry_fit": [
+          "投资论文",
+          "白皮书",
+          "咨询交付",
+          "研究报告",
+          "文化/艺术"
+        ],
+        "mood_tone": "安静、深思熟虑、优雅、温暖极简",
+        "visual_density": "Low（排版驱动，极少视觉装饰）"
+      },
+      "color_palette": {
+        "bg_main": "#EDE8E0（温暖骨色）",
+        "text_main": "#1A1A1A（墨黑）",
+        "accent": "#8A8178（温暖灰褐）",
+        "muted": "#5A5A5A（深灰）/ #B8B0A4（线条灰）"
+      },
+      "style_rules_text": "纯色调系统，无饱和颜色。背景 #EDE8E0，所有线条极细 #B8B0A4。Playfair Display 衬线 400-700，标题级字号，字距为 0。Inter 无衬线 300-600，正文级字号。几何装饰：圆形极细灰描边，opacity 0.3-0.5。导航点小尺寸圆点，active 时 scale(1.3)。过渡 0.6s ease。横向 padding 宽松、纵向 padding 中等。",
+      "typography": "Playfair Display（衬线 400-700）+ Inter（无衬线 300-600）；h1 标题级、h2 副标题级、正文级；字距 0 ~ 宽字距（标签 0.15em+）；行高 1.1-1.6。",
+      "decoration_tokens": {
+        "geo-decoration": "极细灰描边 #B8B0A4；border-radius: 50%；opacity 0.3-0.5；position: absolute",
+        "geo-decoration::before": "极细虚线灰描边；border-radius: 50%；inset: 10%",
+        "nav-dot": "小尺寸圆点；底色 #B8B0A4；active 状态换深墨色、scale(1.3)",
+        "label": "font-family: Inter；标签级小字号；宽字距；uppercase；color: #8A8178",
+        "card": "极细灰描边；中等 padding；半透白底 rgba(255,255,255,0.3)"
+      }
+    },
+    {
+      "template_id": "cobalt-grid",
+      "profile": {
+        "industry_fit": [
+          "design-research",
+          "editorial",
+          "academic",
+          "architecture",
+          "art publication",
+          "agency capabilities"
+        ],
+        "mood_tone": "considered, literary, studious, quietly-modern, editorial",
+        "visual_density": "Medium（中等密度，网格背景和细致排版平衡内容）"
+      },
+      "color_palette": {
+        "bg_main": "#F0EBDE（温暖奶油色纸张）",
+        "text_main": "#1F2BE0（电蓝钴蓝）",
+        "accent": "#5560E5（柔和钴蓝）",
+        "muted": "rgba(31,43,224,0.10)（极淡网格蓝）"
+      },
+      "style_rules_text": "严格的双色系统：温暖奶油纸张 #F0EBDE 配电蓝钴蓝 #1F2BE0。网格背景采用中等模数响应式尺寸、极细线条。所有装饰（像素阶梯、QR 块、发丝线）均为 #1F2BE0。标题使用 Newsreader 意大利体，display 极致巨大，行高 0.92。正文 Hanken Grotesk 400，行高 1.5。发丝线极细，外边距按响应式间距。",
+      "typography": "Newsreader 意大利体（display）+ Hanken Grotesk（正文）+ DM Mono（mono）；display 极致巨大，行高 0.92；正文级，行高 1.5；字距 -0.005em（标题）、0.16em（大写标签）。",
+      "decoration_tokens": {
+        "pixel-glitch": "SVG 竖条纹图案；stroke: #1F2BE0；极细 stroke-width",
+        "qr-block": "8×8 网格；极紧 gap；底色 var(--paper)；极细 var(--paper) 边",
+        "hairlines": "::before/::after 伪元素；极细水平条；底色 var(--ink)；宽松外边距",
+        "nav-hint": "DM Mono；极小标签字号；letter-spacing: 0.08em；opacity: 0.4",
+        "pagenum": "DM Mono；极小标签字号；letter-spacing: 0.06em"
+      }
+    },
+    {
+      "template_id": "coral",
+      "profile": {
+        "industry_fit": [
+          "fashion/beauty",
+          "fitness",
+          "F&B",
+          "lifestyle",
+          "creative agency"
+        ],
+        "mood_tone": "bold, warm, graphic, punchy, magazine",
+        "visual_density": "Medium（中等密度，大胆排版和充足空白平衡）"
+      },
+      "color_palette": {
+        "bg_main": "#1A1A1A（近黑色）",
+        "text_main": "#1A1A1A（深黑）",
+        "accent": "#E85D5D（饱和珊瑚红）",
+        "muted": "#6B6B6B（灰色）"
+      },
+      "style_rules_text": "近黑色背景 #1A1A1A 配温暖奶油内容区与饱和珊瑚红 #E85D5D 重音。Bebas Neue 超粗体显示字体，display 极致巨大，宽字距 letter-spacing 宽（约 0.2em）。Inter 正文字体，正文级，行高 1.7。导航点采用 rgba(255,255,255,0.3) 边框和珊瑚色激活态。过渡效果 0.6s ease。accent-line 中粗短横条。SVG zigzag 折线层为标志元素。",
+      "typography": "Bebas Neue（display）+ Inter（正文）；display 极致巨大、行高 0.9、宽字距；正文级、行高 1.7；meta 极小字号、宽字距、uppercase。",
+      "decoration_tokens": {
+        "nav-dots": "小尺寸圆点；border-radius: 50%；半透白底 rgba(255,255,255,0.3)；极细半透白描边",
+        "nav-arrow": "中等圆形按钮；border-radius: 50%；半透白底；极细半透白描边",
+        "accent-line": "中等长度短横条；中粗高度；珊瑚色底；margin-top: auto",
+        "zigzag-layer": "SVG polyline；stroke: #1A1A1A；粗 stroke-width；opacity: 0.22"
+      }
+    },
+    {
+      "template_id": "creative-mode",
+      "profile": {
+        "industry_fit": [
+          "creative agency",
+          "design studio",
+          "ad shop",
+          "brand creative review",
+          "concept presentation"
+        ],
+        "mood_tone": "graphic, expressive, modern, creative, confident",
+        "visual_density": "Medium-High（高密度排版，多色彩重音和装饰元素）"
+      },
+      "color_palette": {
+        "bg_main": "#EFE9D9（温暖奶油纸张）",
+        "text_main": "#0F0F0F（墨黑）",
+        "accent": "#1F8A4C（森林绿）、#F06CA8（热粉）、#E85A1F（橙色）、#F5C518（芥末黄）",
+        "muted": "#2A2A2A（深灰）"
+      },
+      "style_rules_text": "温暖奶油背景 #EFE9D9 配饱和多色重音（森林绿、热粉、橙、芥末黄）和墨黑结构。Archivo Black 超粗体，display 极致巨大，字距 -0.01em，行高 0.92，uppercase。Space Grotesk 正文，副标题级，行高 1.4。所有边框粗墨色 var(--ink)。装饰块采用中大偏移实色块阴影 box-shadow var(--color)，创建偏移效果。",
+      "typography": "Archivo Black（display）+ Space Grotesk（正文）+ JetBrains Mono（mono）；display 极致巨大、行高 0.92、字距 -0.01em、uppercase；正文副标题级、行高 1.4；mono 副标题级、字距 0.06em、uppercase。",
+      "decoration_tokens": {
+        "poster": "底色森林绿；粗墨色边 var(--ink)；flex 居中",
+        "switch": "大色块尺寸（近正方）；热粉底；粗墨色边；多层中大偏移实色块阴影（橙色 + 双层墨色加粗轮廓）",
+        "cell": "粗墨色边；中等 padding；flex 列",
+        "step": "粗墨色边；中等 padding；大尺寸高度块"
+      }
+    },
+    {
+      "template_id": "daisy-days",
+      "profile": {
+        "industry_fit": [
+          "education",
+          "kids product",
+          "wellness",
+          "community workshop",
+          "creator portfolio",
+          "team kickoff"
+        ],
+        "mood_tone": "cheerful, playful, warm, sunny, wholesome, friendly",
+        "visual_density": "Medium（中等密度，柔和排版和充足装饰平衡）"
+      },
+      "color_palette": {
+        "bg_main": "#F5F0E6（温暖奶油）",
+        "text_main": "#2D2D2D（深灰黑）",
+        "accent": "#7ECDC0（绿松石）、#F7C8D4（柔粉）、#FDE68A（黄油）、#A8E6CF（薄荷）、#D4A5E8（薰衣草）、#FFCBA4（桃）、#A8D8F0（天空蓝）、#F8635F（珊瑚）",
+        "muted": "#6B6B6B（灰）"
+      },
+      "style_rules_text": "温暖奶油 #F5F0E6 基础配完整粉彩彩虹和墨黑中粗边加中偏移实色阴影。所有卡片中粗边 var(--border)，大圆角，中偏移实色块阴影 box-shadow var(--border)。Fredoka One display，标题级，行高 1.1。Quicksand 正文，正文级，行高 1.6。手绘 SVG 雏菊/彩虹/星/云作为页面装饰元素。",
+      "typography": "Fredoka One（display）+ Quicksand（正文）；display 标题级、行高 1.1；正文级、行高 1.6；badge 小字号、border-radius pill、紧凑 padding。",
+      "decoration_tokens": {
+        "card": "白底；中粗边 var(--border)；大圆角；中偏移实色块阴影 box-shadow var(--border)",
+        "nav-dot": "小尺寸圆点；border-radius: 50%；中细黑描边；白底",
+        "deco-daisy": "SVG 手绘雏菊；stroke: #232323；细 stroke-width；fill: #FFFFFF",
+        "deco-rainbow": "SVG 同心彩虹弧；stroke: #1E1E1C；细 stroke-width；fill 各色"
+      }
+    },
+    {
+      "template_id": "editorial-tri-tone",
+      "profile": {
+        "industry_fit": [
+          "editorial / magazine",
+          "fashion brand",
+          "lifestyle media",
+          "art direction",
+          "cultural institutions"
+        ],
+        "mood_tone": "literary, warm, considered, stylish — 高对比三色配 serif/sans 张力",
+        "visual_density": "Medium（三色块全幅覆盖，内容紧密排列，视觉冲击力强）"
+      },
+      "color_palette": {
+        "bg_main": "#F2B6C6（粉红 / dusty pink）",
+        "text_main": "#7A1F35（深酒红 / burgundy ink）",
+        "accent": "#F2D86A（奶油黄 / mustard cream）",
+        "muted": "rgba(246,237,220,0.25)（半透明奶油色边框）"
+      },
+      "style_rules_text": "三色块系统：粉红 #F2B6C6、奶油黄 #F2D86A、深酒红 #7A1F35 全幅覆盖，无第四色。Bricolage Grotesque 800 display 极致巨大配 Instrument Serif 斜体标题级形成编辑张力。卡片大圆角、中等 padding。单色线条极细 rgba(246,237,220,0.25)。Pill 按钮中等 padding，border-radius: 999px（药丸形）。JetBrains Mono 标签副标题级，宽字距 letter-spacing: 0.15em。",
+      "typography": "Bricolage Grotesque 800（display 极致巨大）+ Instrument Serif italic 400（标题级）+ JetBrains Mono 400（副标题级标签）—字重对比强烈，字距 -0.04em ~ 宽字距 0.18em。",
+      "decoration_tokens": {
+        "pill": "display: inline-flex；中等 padding；border-radius: 999px（药丸形）；font-weight: 500",
+        "label": "font-family: JetBrains Mono；副标题级字号；letter-spacing: 0.15em；uppercase",
+        "card": "大圆角；中等 padding；中等固定高度；flex 列；justify-content: space-between",
+        "footer": "position: absolute；左右宽松内边距；底部中等内边距；正文级字号；宽字距 0.12em",
+        "ribbon": "底色酒红；border-radius: 999px（药丸形）；中等 padding；flex 横向"
+      }
+    },
+    {
+      "template_id": "grove",
+      "profile": {
+        "industry_fit": [
+          "sustainability brand",
+          "wellness brand",
+          "outdoor / nature product",
+          "winery / restaurant",
+          "literary / arts",
+          "advisory deliverable",
+          "bilingual EN/CN"
+        ],
+        "mood_tone": "organic, considered, warm, patient — 古典 serif + 单一铁锈红重音 + 深森林绿",
+        "visual_density": "Medium-Low（大量留白，呼吸感充足，内容稀疏排列）"
+      },
+      "color_palette": {
+        "bg_main": "#192b1b（深森林绿 / deep forest green）",
+        "text_main": "#d4cfbf（温暖骨色 / warm cream）",
+        "accent": "#c8524a（铁锈红 / rust-red terracotta）",
+        "muted": "rgba(212,207,191,0.6)（次级文本）"
+      },
+      "style_rules_text": "深森林绿 #192b1b 主背景，骨色 #d4cfbf 文本，单一铁锈红 #c8524a 点缀（仅用于 em 强调和分隔短线）。Playfair Display 400 标题级配 italic em 用铁锈红强调。Jost 300 正文级，DM Mono 极小标签。留白宽松：横向 padding 宽松（约画布宽 7%），纵向 gap 中等。无饱和第二色、无圆角。动画系统：data-anim 属性驱动 kFadeUp/kRevealRight，缓动 cubic-bezier(0.16,1,0.3,1)、0.7s。",
+      "typography": "Playfair Display 400（标题级）+ Jost 300（正文级）+ JetBrains Mono 300（极小标签）—古典编辑，serif 不加粗，Jost 轻盈，字距 -0.01em。",
+      "decoration_tokens": {
+        "grove-num": "font-family: Playfair Display；display 极致巨大；color: rgba(212,207,191,0.06)（极淡水印）；position: absolute；右下定位",
+        "grove-stat": "flex 列；紧凑 gap；中等下内边距；底部极细半透边 var(--c-border) 分隔",
+        "rule": "短中等水平实线；极细高度；铁锈红 var(--c-accent)",
+        "kicker": "font-family: JetBrains Mono；极小标签字号；letter-spacing: 0.14em；uppercase；色 var(--c-accent)",
+        "bullet-list li::before": "content: '—'；color: var(--c-accent)"
+      }
+    },
+    {
+      "template_id": "long-table",
+      "profile": {
+        "industry_fit": [
+          "supper club / dinner series",
+          "event / community gathering",
+          "small hospitality / restaurant",
+          "creative studio open house",
+          "membership / subscription pitch",
+          "wine / food brand",
+          "modern lifestyle brand"
+        ],
+        "mood_tone": "warm, playful, considered, social — 亲密的 supper-club 美学，大胆 italic 混排",
+        "visual_density": "Medium（温暖奶油纸底，单一铁锈红墨水，社交友好，排版宽松）"
+      },
+      "color_palette": {
+        "bg_main": "#FAF1E2（温暖奶油纸）",
+        "text_main": "#B53D2A（温暖铁锈红）",
+        "accent": "#B53D2A（同上，单一墨水色）",
+        "muted": "rgba(181,61,42,0.32)（半透明铁锈红边框）"
+      },
+      "style_rules_text": "严格双色：奶油纸 #FAF1E2 + 铁锈红 #B53D2A，无第三色。Bricolage Grotesque 800 uppercase display 极致巨大配 Fraunces italic 400 副标题级正文，形成大胆 italic 混排。Pill 按钮用中细墨色 var(--ink) 边 + border-radius: 999px（药丸形）+ 纵向紧凑、横向中等 padding。卡片中细墨色边、中等 padding。无阴影、无渐变、无圆角硬约束（除药丸），纯线条装饰营造亲密 supper-club 排版感。",
+      "typography": "Bricolage Grotesque 800（display 极致巨大）+ Fraunces italic 400（副标题级）+ Fraunces roman 400—大胆对比，字距 -0.012em。",
+      "decoration_tokens": {
+        "pill": "中细墨色边 var(--ink)；border-radius: 999px（药丸形）；纵向紧凑、横向中等 padding；italic",
+        "ed-badge": "中等圆形徽章尺寸；中细墨色边；border-radius: 50%",
+        "rect-tag": "中细墨色边；纵向紧凑、横向中等 padding；italic",
+        "card": "中细墨色边；中等 padding；flex 列；紧凑 gap",
+        "pagenum": "font-family: Fraunces；italic；position: absolute；右下定位（中等内边距）"
+      }
+    },
+    {
+      "template_id": "mat",
+      "profile": {
+        "industry_fit": [
+          "design studio credentials",
+          "architecture / interior brand",
+          "ceramics / craft brand",
+          "furniture pitch",
+          "advisory deliverable",
+          "bilingual EN/CN"
+        ],
+        "mood_tone": "warm-modern, considered, tactile, mid-century — 鼠尾草绿配烧焦橙，木色底色",
+        "visual_density": "Medium（深色背景配奶油卡片，内容呼吸感好，装饰性大气光晕）"
+      },
+      "color_palette": {
+        "bg_main": "#232e26（深沉鼠尾草绿）",
+        "text_main": "#f0e8d2（温暖骨色）",
+        "accent": "#c07030（烧焦橙）",
+        "muted": "rgba(240,232,210,0.58)（次级文本）"
+      },
+      "style_rules_text": "深鼠尾草绿 #232e26 主背景配大气木色光晕（radial-gradient 大半径、opacity 0.28 → 0 渐隐）。Bricolage Grotesque 800 display 极致巨大、h1 巨大，混合大小写（非全 uppercase），字距 -0.03em ~ -0.025em 紧压缩。DM Sans 400 正文级，DM Mono 极小标签。Info card 用奶油底 #ede6d0 配深绿文本作反向色块，中等最大宽度。无动画，完全静态。无圆角、无阴影，全部线条分隔。",
+      "typography": "Bricolage Grotesque 800（display 极致巨大、h1 巨大）+ DM Sans 400（正文级）+ DM Mono 400（极小标签）—现代工业，混合大小写，字距 -0.03em ~ -0.01em。",
+      "decoration_tokens": {
+        "info-card": "底色 var(--c-bg-light)；色 var(--c-fg-light)；中等纵向 padding、宽松横向 padding；中等最大宽度；flex 列",
+        "kicker": "font-family: DM Mono；极小标签字号；letter-spacing: 0.12em；uppercase；色 var(--c-accent)",
+        "rule": "短中等水平实线；极细高度；橙色 var(--c-accent)",
+        "mat-stat": "flex 列；紧凑 gap；中等垂直 padding、宽松右内边距零；右侧极细半透边 var(--c-border) 分隔",
+        "bullet-list li::before": "content: '—'；color: var(--c-accent)；font-family: DM Mono"
+      }
+    },
+    {
+      "template_id": "monochrome",
+      "profile": {
+        "industry_fit": [
+          "user research synthesis",
+          "white paper",
+          "academic deck",
+          "policy brief",
+          "advisory deliverable",
+          "bilingual EN/CN report"
+        ],
+        "mood_tone": "restrained, literary, archival, ledger-like; reads as hand-typeset with deep ink on cream paper",
+        "visual_density": "High（极高密度：文字为设计，留白为结构，排版即视觉）"
+      },
+      "color_palette": {
+        "bg_main": "#fafadf（奶油色背景）",
+        "text_main": "#1a1a16（深墨黑）",
+        "accent": "#1a1a16（无彩色强调，仅用黑墨）",
+        "muted": "#5e5e54（次级石墨灰）"
+      },
+      "style_rules_text": "纯黑墨配奶油纸，零色彩系统。所有强调通过字重（200-600）、字号（极小到 display 巨大）、行距（0.96-1.7）和留白实现。边框极细固定黑线。卡片中等圆角，纵向中等、横向中等 padding。动画采用 cubic-bezier(0.77,0,0.175,1)，时长 0.9s。无装饰图形，纯排版驱动。",
+      "typography": "Jost 几何无衬线（200-600）+ Lora 衬线斜体（标题）+ JetBrains Mono 单宽（标签）；字距 -0.02em ~ 宽字距 0.12em；行高 0.96-1.7；所有标题大写或句式大小写。",
+      "decoration_tokens": {
+        "rule": "短中等水平实线；极细高度；底色 var(--c-border-light)",
+        "kicker": "font-family: JetBrains Mono；极小标签字号；letter-spacing: 0.14em；uppercase",
+        "tag": "极细半透黑描边 var(--c-border-light)；紧凑 padding（约 0.3em 0.8em）；极小标签字号",
+        "insight-card": "中等圆角；中等纵向、横向 padding；底色 var(--c-card-a/b/c)",
+        "slide-chrome": "底部极细分隔线 var(--c-border)；紧凑下内边距；中等下外边距"
+      }
+    },
+    {
+      "template_id": "neo-grid-bold",
+      "profile": {
+        "industry_fit": [
+          "product launch",
+          "design review",
+          "founder pitch",
+          "brand deck",
+          "consulting findings",
+          "conference talk"
+        ],
+        "mood_tone": "confident, punchy, editorial, modern; neo-brutalist grid with neon yellow accent pop",
+        "visual_density": "High（高密度：12 列网格，严格分割，每个卡片信息饱满）"
+      },
+      "color_palette": {
+        "bg_main": "#ECECE8（灰白纸）",
+        "text_main": "#0A0A0A（纯黑墨）",
+        "accent": "#E6FF3D（霓虹黄，仅用于强调）",
+        "muted": "#8A8A85（中灰）"
+      },
+      "style_rules_text": "12 列网格，宽松外边距，紧凑列间隙。卡片底色 #F5F4EF 或 #0A0A0A。所有标题大写，字重 700，字距 -0.015em ~ -0.02em。霓虹黄 #E6FF3D 仅用于 accent 卡片和强调标记，不超过总面积 15%。边框中细黑线。字号从副标题级到 display 极致巨大。无圆角。",
+      "typography": "Space Grotesk 700（标题，大写）+ Space Grotesk 400（正文）+ JetBrains Mono 400（标签，字距 0.08em-0.12em）；行高 0.9-1.45；所有标题 uppercase。",
+      "decoration_tokens": {
+        "pagenum": "position: absolute；左下定位；底色 var(--paper)；色 var(--ink)；font-family: JetBrains Mono；副标题级字号；紧凑 padding",
+        "corner-mark": "position: absolute；右上定位；中等方块尺寸；grid 2×2；极紧 gap",
+        "card": "底色 var(--paper)；position: relative；overflow: hidden",
+        "card.lemon": "底色 var(--accent) 霓虹黄；色 var(--ink)",
+        "stat-num": "font-weight: 700；display 极致巨大；line-height: 0.9；letter-spacing: -0.03em"
+      }
+    },
+    {
+      "template_id": "peoples-platform",
+      "profile": {
+        "industry_fit": [
+          "cultural commentary",
+          "manifesto",
+          "community / civic deck",
+          "design talk",
+          "campaign pitch",
+          "founder vision"
+        ],
+        "mood_tone": "activist, loud, graphic, honest; protest-poster energy with saturated political palette",
+        "visual_density": "Medium-High（中高密度：色块分割，大字排版，信息层级明确）"
+      },
+      "color_palette": {
+        "bg_main": "#F4E9D6（温暖奶油纸）",
+        "text_main": "#0E0E14（深墨黑）",
+        "accent": "#F2A03A（信号橙）+ #E83A2A（警告红）+ #2C2CDC（钴蓝）",
+        "muted": "#8A8A85（中灰）"
+      },
+      "style_rules_text": "三色强调系统：钴蓝 #2C2CDC、信号橙 #F2A03A、警告红 #E83A2A，配温暖奶油 #F4E9D6 和深墨 #0E0E14。所有标题 Alfa Slab One 700，大写，字距 0.005em。多层中等偏移文本阴影 text-shadow（红色错位重影）。边框粗黑线分割。无圆角。字号从副标题级到 display 极致巨大。grain 通过 radial-gradient 模拟（极紧背景尺寸）。",
+      "typography": "Alfa Slab One 700（display 与标题，大写）+ Archivo Narrow 500（正文，副标题级）+ Caveat Brush（脚本强调，标题级）+ DM Mono 400（标签，字距 0.18em-0.22em）；行高 0.86-1.4。",
+      "decoration_tokens": {
+        "display": "font-family: Alfa Slab One；font-weight: 700；uppercase；letter-spacing: 0.005em；line-height: 0.88",
+        "stamp-orange": "color: var(--orange)；多层中等偏移文本阴影 text-shadow（红色 + 深红色错位重影）",
+        "stamp-blue": "color: var(--blue)；中等偏移红色文本阴影",
+        "grain": "双层 radial-gradient（黑白噪点）；极紧背景尺寸；opacity: .5",
+        "frame": "position: absolute；中等 inset 内缩；粗奶油色边 var(--cream)"
+      }
+    },
+    {
+      "template_id": "pin-and-paper",
+      "profile": {
+        "industry_fit": [
+          "research findings with personality",
+          "qualitative report",
+          "founder reflection",
+          "creator essay deck",
+          "workshop debrief"
+        ],
+        "mood_tone": "crafted, handmade, warm, thoughtful, literary; 安全别针插画 + 纸张纹理",
+        "visual_density": "Medium（手写脚本配排版，留白充足，温暖亲密）"
+      },
+      "color_palette": {
+        "bg_main": "#EFE56A（饱和黄纸）",
+        "text_main": "#1F3A8A（深墨蓝）",
+        "accent": "#C2342B（锈红）+ #F8F1D6（软奶油）",
+        "muted": "#1F3A8A（深蓝，用于次级文本）"
+      },
+      "style_rules_text": "黄纸 #EFE56A 配深蓝 #1F3A8A 墨；锈红 #C2342B 作 em 强调，软奶油 #F8F1D6 作卡片底。所有标题 Caveat 手写体 weight 500-700，行高 0.88-1.08。正文 Space Grotesk 400-600，副标题级字号，行高 1.35-1.55。安全别针 SVG（symbol id='pin' / 'pin-open'）position: absolute 散布。纸张纹理通过 radial-gradient 模拟（极淡）。无边框、无阴影、无圆角硬约束，仅用留白、字重和手绘装饰分割层级。",
+      "typography": "Caveat 500-700（标题与强调）+ Space Grotesk 400-600（正文副标题级）+ DM Mono 400（标签 字距 0.16em-0.22em）；行高 0.88-1.55；italic 用于 em 强调。",
+      "decoration_tokens": {
+        "pin": "symbol id='pin' viewBox='0 0 360 110'；stroke: currentColor；中粗 stroke-width；stroke-linecap: round",
+        "pin-open": "symbol id='pin-open' viewBox='0 0 360 130'；stroke: currentColor；中粗 stroke-width",
+        "underline": "底部极细当前色实线；display: inline-block",
+        "scribble": "font-family: Caveat；副标题级字号；color: var(--red)；transform: rotate(-2deg)",
+        "card": "底色 var(--cream)；宽松 padding；border: none；position: relative"
+      }
+    },
+    {
+      "template_id": "pink-script",
+      "profile": {
+        "industry_fit": [
+          "fashion brand",
+          "creator personal brand",
+          "after-hours product",
+          "luxury launch",
+          "editorial feature"
+        ],
+        "mood_tone": "nocturnal, moody, intentional, luxe, expressive; 黑底单一热粉的奢华编辑感",
+        "visual_density": "Low（极简约束，大量留白）"
+      },
+      "color_palette": {
+        "bg_main": "#060507（深墨黑画布）",
+        "text_main": "#F5EDF1（珍珠奶油色）",
+        "accent": "#ED3D8C（饱和热粉红）",
+        "muted": "rgba(245,237,241,.55)（压低的米色文本）"
+      },
+      "style_rules_text": "深黑色背景 #060507 搭配单一热粉色 #ED3D8C 形成强烈对比。采用径向渐变营造聚光效果（约 90% 70% at 30% 30%），电影颗粒纠缠层 opacity 0.08 赋予胶片质感。极细发丝线框 border 半透米色 rgba(245,237,241,.14) 环绕中等 inset 内缩。字距 -0.01em，line-height: 1.05 用于紧凑感。页脚和跑头采用 JetBrains Mono 副标题级、letter-spacing: 0.14em、uppercase 营造标签质感。",
+      "typography": "Instrument Serif italic（display 极致巨大到副标题级多档）+ Inter Light + JetBrains Mono（副标题级，letter-spacing: 0.14em，uppercase）。",
+      "decoration_tokens": {
+        "script": "font-family: Instrument Serif；font-style: italic；color: var(--pink)；letter-spacing: -0.01em；line-height: 1.05",
+        "rule": "极细高度水平线；底色 var(--pink)；opacity: 0.45",
+        "runner": "font-family: JetBrains Mono；副标题级字号；letter-spacing: 0.14em；uppercase；色 var(--mute)",
+        "s-cover .title": "Instrument Serif italic；color: var(--pink)；display 极致巨大；line-height: 1.02；柔光文本阴影 text-shadow rgba(237,61,140,.18)",
+        "s-stats .figure": "Instrument Serif italic；display 巨大；line-height: 0.9；color: var(--pink)"
+      }
+    },
+    {
+      "template_id": "playful",
+      "profile": {
+        "industry_fit": [
+          "creator portfolio",
+          "indie product launch",
+          "lifestyle brand",
+          "small-business pitch",
+          "newsletter/community"
+        ],
+        "mood_tone": "warm, approachable, indie, friendly; 手绘涂鸦 + 错位卡片 + 暖色调",
+        "visual_density": "Medium（宽松网格，有节奏的卡片堆叠，手绘涂鸦点缀）"
+      },
+      "color_palette": {
+        "bg_main": "#F0C8A0（温暖沙色/桃色背景）",
+        "text_main": "#1A1A1A（深黑墨）",
+        "accent": "#F7DEC6（轻柔奶油卡片）",
+        "muted": "结构上纯黑，强调层级对比"
+      },
+      "style_rules_text": "暖色调整体（--bg: #F0C8A0）贯穿，无冷色。圆润矩形容器（中粗 var(--text) 边；非对称大圆角）和错位旋转 transform: rotate(±0.5deg-1deg) 营造手工感。卡片采用双层 border 叠加（::before 微小四向偏移）制造抬起效果。布局采用 grid-template-columns: repeat(N, 1fr) 配合中等 gap 松散节奏。撕裂边界 clip-path 多边形效果应用于特定元素。",
+      "typography": "Syne（display 800，行高 0.85，字距 -0.02em）+ Space Grotesk（正文 400，行高 1.5）；display 巨大流动缩放。",
+      "decoration_tokens": {
+        "doodle": "position: absolute；pointer-events: none；中小尺寸宽度",
+        "blob-frame": "中粗 var(--text) 边；非对称 blob 形大圆角 border-radius（四角差异极大、两轴交错的有机形）；透明底",
+        "rough-box": "中粗 var(--text) 边；position: relative；::before { transform: rotate(0.5deg) } 错位",
+        "toc-item": "中粗 var(--text) 边；中等 padding；::before 微小四向偏移（中细 var(--text) 边）",
+        "service-block": "中粗 var(--text) 边；中等 padding；transform: rotate(±0.3deg ~ ±0.8deg) 轻微旋转",
+        "font-display": "font-family: Syne；font-weight: 800；line-height: 0.85；letter-spacing: -0.02em"
+      }
+    },
+    {
+      "template_id": "raw-grid",
+      "profile": {
+        "industry_fit": [
+          "startup pitch",
+          "accelerator demo day",
+          "founder pitch",
+          "indie product launch",
+          "brand deck",
+          "creator portfolio"
+        ],
+        "mood_tone": "raw, punchy, energetic, confident; 新粗野主义网格 + 厚边框 + 偏移阴影",
+        "visual_density": "High（紧凑网格，3px 边框，6px 偏移阴影，高信息密度）"
+      },
+      "color_palette": {
+        "bg_main": "#FFFFFF（纯白背景）",
+        "text_main": "#0A0A0A（深墨黑）",
+        "accent": "#F2D4CF（柔粉色块）",
+        "muted": "#E5EDD6（贤人绿色块）"
+      },
+      "style_rules_text": "白色画布搭配纯黑结构（中粗 var(--black) 边；中偏移实色块阴影 box-shadow var(--black)）形成新粗野主义美学。所有元素采用中粗 hard border 和中偏移阴影（-sm 变体偏移略小）。网格布局采用 grid-template-columns: 1fr 1fr。文本采用系统 sans 配合 heavy weights（900/800）和 uppercase 营造图形感。粉色 #F2D4CF 和绿色 #E5EDD6 块作为扁平色彩层，无渐变无圆角。",
+      "typography": "Segoe UI/system-ui sans-serif（900/800/700/500）；.t-display 标题级到 display 巨大，font-weight: 900，uppercase，字距 -0.02em；.t-body 正文级，font-weight: 500，line-height: 1.6。",
+      "decoration_tokens": {
+        "border": "中粗黑边 var(--black)",
+        "shadow": "中偏移实色黑阴影 box-shadow var(--black)",
+        "label": "底色 var(--black)；色 var(--white)；紧凑 padding；极小字号；font-weight: 800；uppercase；letter-spacing: 0.08em",
+        "line": "中等长度短横；中粗高度；底色 var(--black)",
+        "s4-card": "中等 padding；flex 列；中粗边 var(--border)",
+        "s3-bar-fill": "全宽；紧凑左内边距；font-weight: 800；底色 var(--pink/--green/--black)"
+      }
+    },
+    {
+      "template_id": "retro-windows",
+      "profile": {
+        "industry_fit": [
+          "retro gaming pitch",
+          "Y2K brand",
+          "creator portfolio (90s aesthetic)",
+          "tech-history talk",
+          "shitpost-but-make-it-fancy deck"
+        ],
+        "mood_tone": "nostalgic, retro, geeky, playful; Windows 95 风格窗口容器",
+        "visual_density": "Medium（中等内容密度，像素完美，无反锯齿美学）"
+      },
+      "color_palette": {
+        "bg_main": "#C0C0C0（Windows 95 按钮灰）",
+        "text_main": "#222222（深文本）",
+        "accent": "#000080（海军蓝标题栏）",
+        "muted": "#1084D0（浅蓝色链接）"
+      },
+      "style_rules_text": "Windows 95 系统调色板：3D 按钮灰 #C0C0C0 配合海军蓝标题栏渐变 linear-gradient(90deg, #000080 0%, #0000a0 100%)。所有窗口采用极细 inset/outset 边框营造 3D 浮起效果（border: 极细 var(--btn-highlight)；右下两侧换为 var(--btn-dark-shadow)；box-shadow: inset 极细 var(--btn-highlight), inset 反向极细 var(--btn-shadow)）。CRT 扫描线叠加层 repeating-linear-gradient 极细 rgba(0,0,0,0.03)。像素字体 Press Start 2P 用于标题，VT323 用于终端。",
+      "typography": "MS Sans Serif 正文级作系统字体；Press Start 2P 用于标题；VT323（副标题级）用于终端效果；.text-xl 标题级 bold，.text-lg 副标题级。",
+      "decoration_tokens": {
+        "win-window": "极细 var(--white) 边；右下两侧换 var(--btn-dark-shadow)；inset 双向极细高光/阴影 box-shadow（凸起立体感）",
+        "win-titlebar": "linear-gradient(90deg, var(--blue-navy) 0%, var(--blue-bright) 100%)；色 var(--white)；紧凑 padding；bold；正文级",
+        "btn-retro": "底色 var(--btn-face)；极细高光边 var(--btn-highlight)；右下换 dark-shadow（凸起）；紧凑纵向、中等横向 padding",
+        "progress-bar": "全宽；中等高度；白底；极细 var(--btn-shadow) 边；极紧 padding",
+        "retro-check": "flex；紧凑 gap；正文级字号；极紧纵向 padding",
+        "check-box": "小方块尺寸；白底；极细 var(--btn-dark-shadow) 边；右下换 highlight（凹陷）"
+      }
+    },
+    {
+      "template_id": "retro-zine",
+      "profile": {
+        "industry_fit": [
+          "indie zine / publication",
+          "music or arts brand",
+          "creator portfolio",
+          "small-batch / craft launch",
+          "cultural / community deck"
+        ],
+        "mood_tone": "crafted, lo-fi, underground, warm-retro",
+        "visual_density": "Medium（中等密度，多层次排版与装饰元素）"
+      },
+      "color_palette": {
+        "bg_main": "#C8B99A（温暖米色纸张）",
+        "text_main": "#1A1A1A（深黑色墨水）",
+        "accent": "#008F4D（饱和森林绿）",
+        "muted": "#B8A98A（深米色）"
+      },
+      "style_rules_text": "两色套印美学：米色纸张 #C8B99A 背景配森林绿 #008F4D 单色重音。所有标题采用 Bebas Neue 全大写、宽字距、行高 0.88-0.95；正文用 Space Grotesk 正文级、行高 1.6-1.7；手写脚本 Caveat 用于统计数据与标签。边框线条中粗纯黑色。所有 post-it 类元素轻微旋转 -2 ~ 6 度。SVG 颗粒叠加层 opacity 0.07。",
+      "typography": "Bebas Neue 全大写浓缩显示（400）+ Caveat 手写脚本（400-700）+ Space Grotesk 无衬线正文（300-700）；display 标题级到巨大、h2 标题级、正文级。",
+      "decoration_tokens": {
+        "grain-overlay": "opacity: 0.07；SVG fractal noise pattern",
+        "stamp": "transform: rotate(-8deg)；display: inline-block",
+        "line-box": "中粗 #1A1A1A 边",
+        "pin": "thumbtack 伪元素 with radial gradient",
+        "tape": "半透明白色矩形 overlay"
+      }
+    },
+    {
+      "template_id": "sakura-chroma",
+      "profile": {
+        "industry_fit": [
+          "product launch or catalogue",
+          "indie hardware or analog studio brand",
+          "music label or release schedule",
+          "creative studio annual report",
+          "magazine or zine pitch",
+          "vintage-flavored brand campaign"
+        ],
+        "mood_tone": "retro, playful, kawaii-tech, warm, tactile, product-catalogue",
+        "visual_density": "Medium（中等密度，彩色条纹与卡片网格）"
+      },
+      "color_palette": {
+        "bg_main": "#F1E6CB（温暖奶油纸张）",
+        "text_main": "#3A2516（深棕色墨水）",
+        "accent": "#E5392A（鲜红色）",
+        "muted": "#E5D6B0（浅奶油色）"
+      },
+      "style_rules_text": "日本 TDK 磁带包装美学：奶油纸张 #F1E6CB + 六色主色板（红、粉、橙、黄、绿、蓝）作为平面块与条纹重音。所有标题 Big Shoulders Display 字重 900、行高 0.84-0.9、字距 -0.012em；正文 Albert Sans 正文级、字重 400-700；单色标签 JetBrains Mono 极小标签、字距 0.06em-0.18em。对角线条纹旋转 -22 度、细到中粗高度。半色调 halftone 纹理叠加。",
+      "typography": "Big Shoulders Display 黑体浓缩（500-900）+ Albert Sans 无衬线正文（400-700）+ JetBrains Mono 等宽标签（400-500）+ Noto Sans JP；display 极致巨大、h2 巨大、正文级。",
+      "decoration_tokens": {
+        "petals": "五个重叠圆形；border-radius: 50%；position: absolute；宽度按画布百分比 32-50%",
+        "ribbon": "position: absolute；transform: rotate(-22deg)；细到中粗对角条带",
+        "rosette": "clip-path: polygon(...12-point starburst)；小尺寸",
+        "stamp": "底色红 var(--red)；紧凑 padding；transform: rotate(-3deg)",
+        "halftone-texture": "radial-gradient(circle at 极小坐标偏移, rgba(58,37,22,0.55) 极小半径, transparent 略大半径)；极紧背景尺寸；opacity: 0.16"
+      }
+    },
+    {
+      "template_id": "scatterbrain",
+      "profile": {
+        "industry_fit": [
+          "brainstorm / workshop",
+          "creative agency credentials",
+          "design-thinking session",
+          "ideation pitch",
+          "art-direction review"
+        ],
+        "mood_tone": "playful, creative, warm, messy-on-purpose, workshop",
+        "visual_density": "High（高密度，多个旋转的 post-it 便签与装饰元素）"
+      },
+      "color_palette": {
+        "bg_main": "#F7F5F0（米白纸张）",
+        "text_main": "#2D2A26（深棕色墨水）",
+        "accent": "#FFE066（亮黄色便签）",
+        "muted": "#5C5750（浅棕色）"
+      },
+      "style_rules_text": "便签纸美学：米白背景 #F7F5F0 + 六色柔和便签调色板（黄 #FFE066、蓝 #A5D8FF、粉 #FFC9C9、绿 #B2F2BB、橙 #FFCC80、紫 #D0BFFF）。所有元素应用小到中等柔和阴影 box-shadow rgba(45,42,38,0.15)。标题 Shrikhand 字重 400、行高 1.1、字距 0.02em；正文 Zilla Slab 正文级、行高 1.7；手写标签 Caveat 副标题级。所有 post-it 轻微旋转 -3 ~ 12 度。",
+      "typography": "Shrikhand 圆润显示（400）+ Zilla Slab 衬线正文（300-700）+ Caveat 手写（400-700）；h1 标题级，h2 副标题级，正文级。",
+      "decoration_tokens": {
+        "post-it": "宽松 padding；小偏移柔阴影 box-shadow var(--shadow)（叠加更深一层）；transform: rotate(-2deg ~ 12deg)",
+        "pin": "::before；小尺寸圆点；border-radius: 50%；底色 radial-gradient(circle at 30% 30%, #ff6b6b, #c92a2a)；负偏移浮于顶端",
+        "tape": "::after；小矩形宽、极小高；半透白底 rgba(255,255,255,0.4)；transform: rotate(-2deg)；负偏移浮于顶端",
+        "doodle": "SVG circles/lines/polygons；opacity: 0.15；position: absolute；pointer-events: none",
+        "cork-texture": "radial-gradient(ellipse...) + linear-gradient(135deg...)"
+      }
+    },
+    {
+      "template_id": "signal",
+      "profile": {
+        "industry_fit": [
+          "investor deck",
+          "consulting deliverable",
+          "board presentation",
+          "legal / policy brief",
+          "academic deck",
+          "advisory pitch",
+          "bilingual EN/CN deck"
+        ],
+        "mood_tone": "institutional, trustworthy, considered, weighty",
+        "visual_density": "High（高密度，多种数据可视化与编辑排版）"
+      },
+      "color_palette": {
+        "bg_main": "#1C2644（深海军蓝）",
+        "text_main": "#E2DCD0（温暖骨白色）",
+        "accent": "#C8A870（柔和古金色）",
+        "muted": "#8A96A8（柔和蓝灰色）"
+      },
+      "style_rules_text": "机构权威美学：深海军蓝 #1C2644 主背景 + 单一柔和古金色 #C8A870 重音。所有标题 Source Serif 4 字重 600-700、行高 0.96-1.18、字距 -0.01 ~ -0.02em；正文 DM Sans 正文级、字重 400、行高 1.65；标签 IBM Plex Mono 极小标签、字重 500、字距 0.14em、全大写。网格纹理中等模数、极淡 rgba(255,255,255,0.03) 线条。所有 em 标签内文本为 italic + accent 金色。边框极细 #2E3D5C。",
+      "typography": "Source Serif 4 编辑衬线（300-700, italic）+ DM Sans 无衬线正文（300-600）+ IBM Plex Mono 等宽标签（300-500）+ Noto Serif/Sans SC；display 极致巨大、h1 巨大、h2 副标题级、h3 副标题级、正文级、label 极小。",
+      "decoration_tokens": {
+        "grid-overlay": "background-image: linear-gradient(rgba(255,255,255,0.03) 极细, transparent), linear-gradient(90deg, rgba(255,255,255,0.03) 极细, transparent)；中等方形背景尺寸",
+        "rule": "短中等水平实线；极细高度；底色 var(--c-accent)",
+        "kicker": "font-family: IBM Plex Mono；极小标签字号；letter-spacing: 0.14em；uppercase；色 var(--c-accent)",
+        "tag": "极细 var(--c-accent) 边；紧凑 padding（约 0.3em 0.8em）；font-family: IBM Plex Mono",
+        "nav-dot": "极小圆点；border-radius: 50%；半透白底 rgba(255,255,255,0.22)"
+      }
+    },
+    {
+      "template_id": "soft-editorial",
+      "profile": {
+        "industry_fit": [
+          "editorial",
+          "advisory",
+          "gallery",
+          "luxury lifestyle",
+          "literary"
+        ],
+        "mood_tone": "literary, elegant, warm, unhurried",
+        "visual_density": "Low（暖纸上的克制排版，空间充足）"
+      },
+      "color_palette": {
+        "bg_main": "#F2EEDF（暖米色纸张）",
+        "text_main": "#2A241B（暖黑墨）",
+        "accent": "#E1A4C2（尘粉红）、#D6DD63（柠檬黄）、#E8C9B6（腮红）、#B7C7A8（鼠尾草）",
+        "muted": "#5C5345（软墨）"
+      },
+      "style_rules_text": "衬线字体 Cormorant Garamond（weight 500）作标题，无衬线 Work Sans 作正文。圆角卡片大圆角，半透明白底 rgba(255,255,255,0.55)。左右对称宽松内边距。卡片内部宽松 padding。强调留白而非排满。柔和粉彩色块（粉、柠檬、腮红、鼠尾草）作为局部 step 块底色。",
+      "typography": "Cormorant Garamond italic + Work Sans；display 极致巨大、标题巨大、副标题级、正文级；行高 0.92-1.5；字距 -0.01 ~ -0.02em。",
+      "decoration_tokens": {
+        "step": "大圆角；底色 var(--pink/lemon/blush/sage)；中等 padding",
+        "card": "大圆角；宽松 padding；text-align: center",
+        "tablet": "大圆角；宽松 padding；display: grid",
+        "panel": "大圆角；宽松 padding；紧凑 gap",
+        "eyebrow": "副标题级字号；position: absolute；左上宽松内边距",
+        "footer": "副标题级字号；font-style: italic；position: absolute；底部宽松内边距"
+      }
+    },
+    {
+      "template_id": "stencil-tablet",
+      "profile": {
+        "industry_fit": [
+          "museum",
+          "archaeology",
+          "heritage brand",
+          "research",
+          "art/architecture"
+        ],
+        "mood_tone": "weighty, tactile, considered, archival",
+        "visual_density": "Medium（彩色块每块文字精简，视觉跳跃感强）"
+      },
+      "color_palette": {
+        "bg_main": "#E2DCC9（骨色）",
+        "text_main": "#0A0A0A（黑）",
+        "accent": "#A06A3C（赤褐）、#C73B7A（洋红）、#EE7A2E（橙）、#2D7E73（蓝绿）、#3F73B7（蓝）、#6F7A2E（橄榄）",
+        "muted": "#000000（纯黑背景）、#F4EFE0（纸色）"
+      },
+      "style_rules_text": "骨色 #E2DCC9 底，多色卡片轮换填充（赤褐、洋红、橙、蓝绿、蓝、橄榄）作色块跳跃。stencil 显示字体 Stardos Stencil weight 700，display 极致巨大占主视觉；Barlow Condensed weight 800 用于标签；Inter weight 400-600 用于正文。中等圆角 border-radius 让色块呈现 tablet 质感。彩色块中等 padding。模板签名：暗背景对比强、字距宽 0.04em-0.14em、文本 uppercase。无阴影、无渐变。",
+      "typography": "Stardos Stencil 700（display 极致巨大标题）+ Barlow Condensed 800（副标题级标签）+ Inter 400-600（正文级到副标题级）；行高 0.9-1.4；字距 0.04em-0.14em；uppercase。",
+      "decoration_tokens": {
+        "tablet": "中等圆角；中等 padding；display 极致巨大字号；line-height: 0.9",
+        "card": "中等圆角；中等 padding；底色 var(--sienna/magenta/orange/teal)",
+        "top": "副标题级字号；font-weight: 800；letter-spacing: 0.04em；uppercase",
+        "footer": "副标题级字号；font-weight: 600；uppercase；letter-spacing: 0.08em",
+        "pill": "border-radius: 999px（药丸形）；紧凑 padding；标签级小字号；letter-spacing: 0.08em"
+      }
+    },
+    {
+      "template_id": "studio",
+      "profile": {
+        "industry_fit": [
+          "design studio",
+          "creative agency",
+          "brand",
+          "fashion",
+          "tech (editorial)"
+        ],
+        "mood_tone": "electric, graphic, bold, high-contrast",
+        "visual_density": "Medium（黑底+黄字极简对比，排版紧凑占满空间）"
+      },
+      "color_palette": {
+        "bg_main": "#1C1C1C（暖黑背景）",
+        "text_main": "#F5D200（酸黄）",
+        "accent": "#F5D200（同酸黄，双用）",
+        "muted": "rgba(245,210,0,0.58-0.32)（黄色不同透明度）"
+      },
+      "style_rules_text": "暖黑底 #1C1C1C 配酸黄 #F5D200 单一文字色，唯一一对高对比双色系统。Barlow weight 900 用于所有标题，display 极致巨大、h1 巨大、h2 标题级、h3 副标题级，所有大写无衬线。Barlow 400-500 正文，IBM Plex Mono 极小标签。字距 -0.02em ~ -0.01em，行高 0.9-0.95 极紧。横向 padding 宽松、纵向中等。无 border-radius；直角方块。bullet 用 em-dash 黄色。无阴影、无渐变。",
+      "typography": "Barlow 900（max weight）display 极致巨大到副标题级，uppercase，字距 -0.02em，行高 0.9。Barlow 400-500 正文级 line-height 1.6。IBM Plex Mono 300-500 标签极小字号。",
+      "decoration_tokens": {
+        "display": "display 极致巨大；font-weight: 900；line-height: 0.9；uppercase；letter-spacing: -0.02em",
+        "h1": "巨大字号；font-weight: 900；uppercase；letter-spacing: -0.02em",
+        "bar-fill": "全宽；底色 var(--c-fg-3) 或 var(--c-accent)",
+        "bullet-list li::before": "content: '\\2014'；color: var(--c-accent)；em-dash 黄色",
+        "label": "font-family: IBM Plex Mono；极小标签字号；letter-spacing: 0.06em"
+      }
+    },
+    {
+      "template_id": "vellum",
+      "profile": {
+        "industry_fit": [
+          "research",
+          "white paper",
+          "academic",
+          "advisory",
+          "founder reflection"
+        ],
+        "mood_tone": "scholarly, literary, patient, intellectual",
+        "visual_density": "Low（深海军色满版背景，黄色 italic 衬线字，大量留白与通透感）"
+      },
+      "color_palette": {
+        "bg_main": "#2A3870（深紫罗兰海军）",
+        "text_main": "#E8D85C（暖黄）",
+        "accent": "#3A7878（尘灰蓝绿，仅用于引号标记）",
+        "muted": "rgba(232,216,92,0.62-0.32)（黄色渐进透明度）"
+      },
+      "style_rules_text": "深紫罗兰海军 #2A3870 满版背景配暖黄 #E8D85C italic 衬线文本，尘灰蓝绿 #3A7878 仅作引号标记。Cormorant Garamond italic（weight 400-600）作 display 与 h 系列标题，绝不加粗。DM Sans 正文 weight 400-500。Courier Prime 标签与属性。横向 padding 宽松、纵向中等（比常规更松），gap-lg 中等、gap-md 紧凑。极细半透黄边 rgba(232,216,92,0.20)。无 border-radius、无阴影、无渐变，干净直线分隔。学术藏书味，留白即结构。",
+      "typography": "Cormorant Garamond italic（display 极致巨大、h1 巨大、h2 副标题级、h3 副标题级，weight 400 italic，行高 0.92-1.15）+ DM Sans 正文级 行高 1.65 + Courier Prime 极小标签。",
+      "decoration_tokens": {
+        "display": "font-family: Cormorant Garamond；italic；font-weight: 400；display 极致巨大；line-height: 0.92",
+        "h1": "italic；巨大字号；font-weight: 400；line-height: 0.95",
+        "pin-note": "font-family: Courier Prime；正文级偏小字号；color: var(--c-accent)",
+        "bullet-list li::before": "content: counter(list-counter)；font-family: Courier Prime；color: var(--c-accent)",
+        "compare-panel.left": "background: #1f2858；.right background: #34407a"
+      }
+    }
+  ]
+}

@@ -76,6 +76,18 @@ class AgentConfig(BaseModel):
     enable_memory_extraction: bool = True
     memory_extraction_cooldown: int = 300  # seconds between extractions
     memory_extraction_step_interval: int = 10  # extract every N agent steps
+    # Memory maintenance (decay + dedup)
+    memory_maintainer_enabled: bool = True
+    memory_maintainer_interval_hours: int = 24  # min hours between maintenance runs
+    memory_decay_days: int = 30  # active → archive after this many days without hits
+    memory_archive_days: int = 90  # archive → trash after this many more days
+    memory_dedup_jaccard: float = 0.85  # token-overlap threshold for entry merging
+    memory_compaction_enabled: bool = True  # LLM topic-cluster compaction in maintainer
+    memory_context_max_entries: int = 50  # compaction triggers above this
+    memory_context_max_tokens: int = 8000  # compaction triggers above this (estimated)
+    memory_promotion_proposal_enabled: bool = True  # auto-suggest CONTEXT → core
+    memory_promotion_hit_threshold: int = 5  # min hits before suggesting promotion
+    memory_promotion_cooldown_days: int = 14  # skip re-proposing for this long
 
 
 class MCPConfig(BaseModel):
@@ -271,6 +283,17 @@ class Config(BaseModel):
             enable_memory_extraction=data.get("enable_memory_extraction", True),
             memory_extraction_cooldown=data.get("memory_extraction_cooldown", 300),
             memory_extraction_step_interval=data.get("memory_extraction_step_interval", 10),
+            memory_maintainer_enabled=data.get("memory_maintainer_enabled", True),
+            memory_maintainer_interval_hours=data.get("memory_maintainer_interval_hours", 24),
+            memory_decay_days=data.get("memory_decay_days", 30),
+            memory_archive_days=data.get("memory_archive_days", 90),
+            memory_dedup_jaccard=data.get("memory_dedup_jaccard", 0.85),
+            memory_compaction_enabled=data.get("memory_compaction_enabled", True),
+            memory_context_max_entries=data.get("memory_context_max_entries", 50),
+            memory_context_max_tokens=data.get("memory_context_max_tokens", 8000),
+            memory_promotion_proposal_enabled=data.get("memory_promotion_proposal_enabled", True),
+            memory_promotion_hit_threshold=data.get("memory_promotion_hit_threshold", 5),
+            memory_promotion_cooldown_days=data.get("memory_promotion_cooldown_days", 14),
         )
 
         # Parse tools configuration

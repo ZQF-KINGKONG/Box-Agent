@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 logger = logging.getLogger(__name__)
 
 _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"cli", "platform", "browser_tools", "memory_configured", "runtimes"}
+    {"cli", "platform", "browser_tools", "image_service", "memory_configured", "runtimes"}
 )
 
 _MAX_PATH_LEN = 512
@@ -179,6 +179,20 @@ class BrowserToolsState(BaseModel):
     enabled: bool | None = None
 
 
+class ImageServiceState(BaseModel):
+    """Whether the host-side image generation service is reachable.
+
+    ``available`` signals that the model may call ``generate_image`` and
+    expect a usable bitmap back. Hosts that have not wired up an image
+    backend should pass ``available=False`` so the model falls back to
+    HTML/CSS/icons instead of planning unreachable generate calls.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    available: bool | None = None
+
+
 class HostRuntime(BaseModel):
     """Sanitized host-provided runtime metadata."""
 
@@ -206,6 +220,7 @@ class EnvContext(BaseModel):
     cli: dict[str, str | None] = Field(default_factory=dict)
     platform: str | None = None
     browser_tools: BrowserToolsState | None = None
+    image_service: ImageServiceState | None = None
     memory_configured: bool | None = None
     runtimes: dict[str, HostRuntime] = Field(default_factory=dict)
     extras: dict[str, Any] = Field(default_factory=dict)
@@ -250,6 +265,7 @@ class EnvContext(BaseModel):
             self.cli
             or self.platform
             or self.browser_tools is not None
+            or self.image_service is not None
             or self.memory_configured is not None
         )
 
@@ -284,6 +300,13 @@ def _format_browser_tools(state: BrowserToolsState) -> list[str]:
     return [f"- 浏览器工具状态：{', '.join(parts)}"]
 
 
+def _format_image_service(state: ImageServiceState) -> list[str]:
+    if state.available is None:
+        return []
+    label = "可用（可调用 generate_image）" if state.available else "不可用（不要计划调用 generate_image，请改用 HTML/CSS/图标）"
+    return [f"- 生图服务状态：{label}"]
+
+
 def build_env_context_prompt(ctx: EnvContext | None) -> str:
     """Render ``EnvContext`` into a markdown checklist for the system prompt.
 
@@ -300,6 +323,8 @@ def build_env_context_prompt(ctx: EnvContext | None) -> str:
     lines.extend(_format_cli_section(ctx.cli))
     if ctx.browser_tools is not None:
         lines.extend(_format_browser_tools(ctx.browser_tools))
+    if ctx.image_service is not None:
+        lines.extend(_format_image_service(ctx.image_service))
     if ctx.memory_configured is not None:
         state = "已完成" if ctx.memory_configured else "未完成"
         lines.append(f"- 个人记忆配置：{state}")

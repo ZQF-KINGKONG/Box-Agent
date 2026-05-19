@@ -10,8 +10,11 @@ image inside the current workspace or requested output folder. Do not write to
 
 For HTML-first decks exported with `scripts/html_to_editable_pptx.js` and
 `dom-to-pptx`, inspect both the source HTML preview PNGs and the rendered PPTX
-output. Editable export can reflow text, shift layers, or lose CSS effects, so
-source previews alone are not enough.
+when renderer runtime exists. If rendering is blocked (missing `soffice`/PDF
+renderer), continue with the rest of QA and report render as blocked.
+
+Editable export can reflow text, shift layers, or lose CSS effects, so source
+previews alone are not enough.
 
 0. HTML self-check for HTML-first decks:
    - Run `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` before export, or rely on `scripts/html_to_editable_pptx.js` which writes the same check internally.
@@ -43,6 +46,7 @@ source previews alone are not enough.
 4. Render:
    - Run `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py output.pptx --out rendered`.
    - Do not pre-check `soffice` and skip this command. The render script owns renderer discovery, Quick Look fallback, and missing-LibreOffice messaging.
+   - If this command fails due to dependency/runtime missing, treat render as blocked and continue: `Rendering: BLOCKED`.
    - If rendering is blocked by permissions or missing runtime after the deck changed, previous render images are stale. Do not use old renders as final proof for the new deck.
    - Do not pass `--format png` unless a PNG is explicitly required; the default JPG output is intentionally compressed to reduce file size.
    - The preferred path is `soffice` PPTX-to-PDF plus `pdftoppm` PDF-to-PNG.
@@ -68,6 +72,8 @@ Do not imply that Node pdf.js can replace LibreOffice; Node pdf.js only handles
 PDF-to-PNG after a PDF already exists.
 This requirement also applies when macOS Quick Look succeeds, because Quick
 Look is only a lightweight fallback and does not provide full per-slide QA.
+On Windows/Linux, Quick Look is not available for this role. If `soffice` is
+missing, emit `Rendering: BLOCKED`.
 
 ## Office Raccoon Command Safety
 

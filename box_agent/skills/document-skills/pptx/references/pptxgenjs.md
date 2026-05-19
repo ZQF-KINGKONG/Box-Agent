@@ -25,7 +25,7 @@ ${BOX_AGENT_NODE:-node} -e "require.resolve('pptxgenjs')"
 
 If this command fails in Office Raccoon, install PptxGenJS into the managed app
 support prefix when possible, for example
-`${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" pptxgenjs`.
+`${BOX_AGENT_NPM:-npm} install --prefix "${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}" pptxgenjs`.
 Do not install globally, do not install inside the deliverable folder, and do
 not switch to another generator unless the user explicitly approves that
 fallback.
@@ -162,7 +162,7 @@ Do not use PowerPoint shapes to draw people, faces, portraits, athletes, celebri
 - Do not call `addShape` with unsupported names such as an assumed `shield`; PptxGenJS will throw before writing the deck.
 - In Office Raccoon, avoid shell checks that rely on `rm -rf`, `/dev/null`, absolute redirects, `/tmp`, or heredocs. Keep logs, previews, generated images, and QA outputs in the current workspace or requested output folder.
 - Avoid excessive shadows, transparency, and rounded cards unless they are part of the actual design language.
-- Render every deck. Valid OOXML can still be visually broken.
-- Do not stop QA after `unzip -t`, file size, slide count, or one extracted title. Run package validation, full text extraction, placeholder scan, render/preview generation, and a slide-by-slide visual pass.
+- Render every deck when a render runtime is available. Valid OOXML can still be visually broken.
+- Do not stop QA after `unzip -t`, file size, slide count, or one extracted title. Run package validation, full text extraction, placeholder scan, and render/preview generation when possible, then a slide-by-slide visual pass.
 - Do not say visual QA passed unless actual rendered slide images or preview images exist. If LibreOffice/Poppler are unavailable and Quick Look did not produce per-slide previews, report rendering as blocked.
 - Avoid long streaming narration. Report progress in short blocks or checklists, and keep the final response structured.

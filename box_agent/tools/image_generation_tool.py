@@ -177,6 +177,8 @@ def _compose_openai_prompt(prompt: str, style: str | None, negative_prompt: str 
 class GenerateImageTool(Tool):
     """Generate an image through a configured HTTP service and save it locally."""
 
+    parallel_safe = True  # independent HTTP calls, output_path per call — no shared state
+
     def __init__(
         self,
         workspace_dir: str = ".",

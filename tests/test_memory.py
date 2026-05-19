@@ -324,3 +324,81 @@ def test_build_memory_block_core_only():
     block = MemoryManager.build_memory_block("- core item")
     assert "[Core Memory]" in block
     assert "core item" in block
+
+
+def test_auto_match_context_bumps_hits_and_last_used(mgr: MemoryManager):
+    """auto_match_context must increment hits/last_used on matched entries.
+
+    Without this side effect, prompt-time recall never accumulates evidence
+    that an entry is useful, and the promotion gate (hit_threshold) is
+    permanently unreachable.
+    """
+    from box_agent.memory import _new_entry, write_context_file
+
+    matched = _new_entry("- 科技公司入职培训PPT 已完成 render 导出")
+    unmatched = _new_entry("- 完全不相关的另一个事实")
+    original_last_used = matched.last_used
+    write_context_file(mgr.context_file, [matched, unmatched])
+
+    results = mgr.auto_match_context("科技公司入职培训 PPT 做好了吗")
+    assert results, "expected at least one auto-match hit"
+
+    entries = {e.id: e for e in mgr._read_context_entries()}
+    assert entries[matched.id].hits == 1
+    assert entries[matched.id].last_used >= original_last_used
+    assert entries[matched.id].last_used != ""
+    # untouched entry stays at 0 hits.
+    assert entries[unmatched.id].hits == 0
+
+
+def test_auto_match_context_no_match_does_not_touch_entries(mgr: MemoryManager):
+    from box_agent.memory import _new_entry, write_context_file
+
+    entry = _new_entry("- 不会被匹配到的内容")
+    write_context_file(mgr.context_file, [entry])
+
+    assert mgr.auto_match_context("完全无关的话题") == []
+    survivor = mgr._read_context_entries()[0]
+    assert survivor.hits == 0
+    assert survivor.last_used == entry.last_used
+
+
+# ── append_context Jaccard fuzzy dedup ────────────────────────
+
+
+def test_append_context_jaccard_merges_paraphrased_line(memory_dir):
+    """Paraphrased restatements of an existing entry should bump hits, not
+    create a new entry. Without this the promotion gate's hit_threshold is
+    permanently sabotaged by LLM extractor wording drift."""
+    mgr = MemoryManager(memory_dir=str(memory_dir), dedup_jaccard_threshold=0.6)
+    mgr.append_context("- user is generating brazil football introduction ppt")
+    before = mgr._read_context_entries()
+    assert len(before) == 1
+    assert before[0].hits == 0
+
+    # Same fact, different wording — most tokens overlap.
+    mgr.append_context("- user generating brazil football ppt introduction")
+
+    after = mgr._read_context_entries()
+    assert len(after) == 1, "paraphrase should have merged, not been appended"
+    assert after[0].hits == 1
+    assert after[0].last_used >= before[0].last_used
+
+
+def test_append_context_jaccard_keeps_distinct_facts(memory_dir):
+    mgr = MemoryManager(memory_dir=str(memory_dir), dedup_jaccard_threshold=0.85)
+    mgr.append_context("- user prefers chinese responses")
+    mgr.append_context("- project uses uv for dependency management")
+
+    entries = mgr._read_context_entries()
+    assert len(entries) == 2
+    assert all(e.hits == 0 for e in entries)
+
+
+def test_append_context_threshold_zero_disables_distinct_lines(memory_dir):
+    """At extremely low threshold (0.0) ANY non-empty existing entry would
+    catch every new line. Default threshold (0.85) must not behave this way."""
+    mgr = MemoryManager(memory_dir=str(memory_dir), dedup_jaccard_threshold=0.85)
+    mgr.append_context("- aaa bbb ccc")
+    mgr.append_context("- xxx yyy zzz")
+    assert len(mgr._read_context_entries()) == 2

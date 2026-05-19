@@ -118,7 +118,7 @@ from the CLI. Finish and deliver `deck.html`, report editable PPTX export as
 `BLOCKED`, and include the install/download commands:
 
 ```text
-OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-$HOME/Library/Application Support/office-raccoon}}"
+OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}"
 Install Playwright: ${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" playwright
 Download Chromium: "$OFFICE_RACCOON_NODE_PREFIX/node_modules/.bin/playwright" install chromium
 ```
@@ -137,10 +137,11 @@ Additional editable-export checks:
 - Treat text slack failures as real blockers. They usually predict the exact
   issue where HTML text looks fine but the editable PPTX wraps one word or one
   CJK character onto a new line.
-- Render the exported PPTX for QA.
+- Attempt to render the exported PPTX for QA; if render runtime is unavailable, set `Rendering: BLOCKED`.
 - Check especially for text reflow, missing gradients, missing images,
   incorrect SVG conversion, wrong z-order, and shifted card/chart positions.
 - If render shows issues, fix `deck.html` and rerun
   `html_to_editable_pptx.js`.
 
-Do not claim full fidelity from `dom-to-pptx` without render QA. Keep the default SVG rasterization unless the user explicitly wants editable vector SVGs.
+Do not claim full fidelity from `dom-to-pptx` without rendered slide images.
+If runtime is blocked, report `Rendering: BLOCKED` and keep the limitation explicit.

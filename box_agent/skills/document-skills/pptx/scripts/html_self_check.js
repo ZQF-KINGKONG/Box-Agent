@@ -163,6 +163,28 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         return src && !src.startsWith("/");
       };
 
+      // Mirror bg_capture.js classification: decoration nodes (and their
+      // descendants) get screenshotted into a slide-level bitmap, so the
+      // dom-to-pptx blacklist does not apply to them. Only text-bearing
+      // elements remain as live PPTX shapes after the capture step.
+      const decorationTags = new Set(["SVG", "HR", "CANVAS"]);
+      const hasTextContent = el => {
+        if (el.querySelector && el.querySelector("img")) return true;
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        let node;
+        while ((node = walker.nextNode())) {
+          if ((node.textContent || "").trim()) return true;
+        }
+        return false;
+      };
+      const isDecorationNode = el => {
+        if (!el || el.nodeType !== 1) return false;
+        if (el.tagName === "IMG") return false;
+        if (decorationTags.has(el.tagName)) return true;
+        if (el.closest && el.closest("svg")) return true;
+        return !hasTextContent(el);
+      };
+
       if (!slideEls.length) {
         issues.push("No .slide elements found.");
         return { ok: false, slideCount: 0, issues, warnings };
@@ -210,30 +232,46 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         descendants.forEach(el => {
           const style = getComputedStyle(el);
           const inline = el.getAttribute("style") || "";
+          const decoration = isDecorationNode(el);
           if (domToPptx) {
+            // Transform/clip-path/text-shadow/backdrop-filter/mix-blend-mode/
+            // animation/transition/radial-conic gradient/non-blur filter on
+            // decoration nodes (or inside SVG) are captured into the
+            // slide-level bitmap by bg_capture and removed from the export
+            // tree, so they no longer reach dom-to-pptx. Skip them on
+            // decoration nodes; keep checking text-bearing elements where
+            // the effects still need a dom-to-pptx-safe equivalent.
             const inlineTransform = (inline.match(/transform\s*:\s*([^;]+)/i) || [])[1] || "";
-            if (inlineTransform && badTransform.test(inlineTransform)) {
-              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx does not support transform:${inlineTransform.trim()}; use left/top or flex centering.`);
+            if (inlineTransform && badTransform.test(inlineTransform) && !decoration) {
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx does not support transform:${inlineTransform.trim()} on text-bearing elements; use left/top or flex centering, or move the effect onto a decoration-only node (no text inside).`);
             }
             const background = style.backgroundImage || "";
-            if (badBackground.test(background)) {
-              warnings.push(`${labelFor(el, slideIndex)}: dom-to-pptx only reliably supports linear gradients; avoid radial/conic gradients.`);
+            if (badBackground.test(background) && !decoration) {
+              warnings.push(`${labelFor(el, slideIndex)}: dom-to-pptx only reliably supports linear gradients on text-bearing elements; move radial/conic gradients to .slide background or a decoration node.`);
             }
             const filter = style.filter || "";
-            if (filter && filter !== "none" && !/^\s*blur\(/i.test(filter) && badFilter.test(filter)) {
-              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx supports blur only; bake filter "${filter}" into the image.`);
+            if (filter && filter !== "none" && !/^\s*blur\(/i.test(filter) && badFilter.test(filter) && !decoration) {
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx supports blur only on text-bearing elements; bake filter "${filter}" into an image or move it to a decoration node.`);
             }
             blockedStyleRules.forEach(rule => {
-              if (rule.re.test(inline)) {
-                issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx blocked style ${rule.name}; use a supported alternative.`);
-              }
+              if (!rule.re.test(inline)) return;
+              if (decoration) return; // captured into bitmap by bg_capture
+              issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx blocked style ${rule.name} on text-bearing element; use a supported alternative or move the effect to a decoration node.`);
             });
             if (viewportUnits.test(inline)) {
+              // Viewport units are a layout-sizing issue, not a visual
+              // effect — bg_capture does not fix layout drift across
+              // viewports, so the rule applies to both decoration and
+              // text-bearing elements.
               issues.push(`${labelFor(el, slideIndex)}: dom-to-pptx export should use fixed px, not viewport units.`);
             }
-            if (["VIDEO", "AUDIO", "IFRAME", "CANVAS"].includes(el.tagName)) {
+            if (["VIDEO", "AUDIO", "IFRAME"].includes(el.tagName)) {
               issues.push(`${labelFor(el, slideIndex)}: <${el.tagName.toLowerCase()}> is not captured by dom-to-pptx; convert it to an image/SVG first.`);
             }
+            // <canvas> is treated as decoration by bg_capture and ends up
+            // in the slide bitmap; JS-drawn content must be painted before
+            // the capture step, which the exporter already waits for via
+            // network-idle + fonts.ready.
           }
           if (!isVisible(el, style)) return;
           const rect = el.getBoundingClientRect();
@@ -409,23 +447,41 @@ async function main() {
   await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready);
 
-  let detectedWidth = opts.width;
-  let detectedHeight = opts.height;
+  const detected = await page.evaluate(() => {
+    const s = document.querySelector(".slide");
+    if (!s) return null;
+    const cs = getComputedStyle(s);
+    return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
+  });
+
+  let detectedWidth = detected && detected.w > 0 ? detected.w : null;
+  let detectedHeight = detected && detected.h > 0 ? detected.h : null;
+
+  if (opts.width !== null || opts.height !== null) {
+    const cssW = detectedWidth;
+    const cssH = detectedHeight;
+    const mismatchW = opts.width !== null && cssW && Math.abs(opts.width - cssW) > 2;
+    const mismatchH = opts.height !== null && cssH && Math.abs(opts.height - cssH) > 2;
+    if (mismatchW || mismatchH) {
+      console.error(
+        `Refusing to run: --width/--height (${opts.width ?? "auto"}x${opts.height ?? "auto"}) ` +
+        `do not match the .slide CSS size (${Math.round(cssW || 0)}x${Math.round(cssH || 0)}).`
+      );
+      console.error(
+        "Per SKILL.md §0 rule 7, do NOT pass --width/--height to html_self_check.js. " +
+        "Either remove these flags so the script auto-detects from .slide CSS, " +
+        "or fix .slide { width; height } in the HTML to the intended canvas size."
+      );
+      await browser.close();
+      process.exit(1);
+    }
+    if (opts.width !== null) detectedWidth = opts.width;
+    if (opts.height !== null) detectedHeight = opts.height;
+  }
 
   if (detectedWidth === null || detectedHeight === null) {
-    const detected = await page.evaluate(() => {
-      const s = document.querySelector(".slide");
-      if (!s) return null;
-      const cs = getComputedStyle(s);
-      return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
-    });
-    if (detected && detected.w > 0 && detected.h > 0) {
-      detectedWidth = detected.w;
-      detectedHeight = detected.h;
-    } else {
-      detectedWidth = 1920;
-      detectedHeight = 1080;
-    }
+    detectedWidth = detectedWidth || 1920;
+    detectedHeight = detectedHeight || 1080;
   }
 
   const needsResize =

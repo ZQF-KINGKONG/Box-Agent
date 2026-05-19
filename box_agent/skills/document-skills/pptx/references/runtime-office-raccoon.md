@@ -16,11 +16,14 @@
 ## 3. Dependency install path
 
 1. Install Node dependencies only into managed Office Raccoon prefixes.
-2. Example install command: `${BOX_AGENT_NPM:-npm} install --prefix "$HOME/Library/Application Support/office-raccoon" pptxgenjs`
+2. Use the managed Office Raccoon prefix variable, never a platform-specific hardcoded path:
+   `OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}"`
+   Then:
+   `${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" pptxgenjs`
 3. For Playwright setup:
 
 ```bash
-OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-$HOME/Library/Application Support/office-raccoon}}"
+OFFICE_RACCOON_NODE_PREFIX="${BOX_AGENT_NODE_PREFIX:-${BOX_AGENT_RUNTIME_PREFIX:-<office-raccoon-prefix>}}"
 ${BOX_AGENT_NPM:-npm} install --prefix "$OFFICE_RACCOON_NODE_PREFIX" playwright
 "$OFFICE_RACCOON_NODE_PREFIX/node_modules/.bin/playwright" install chromium
 ```

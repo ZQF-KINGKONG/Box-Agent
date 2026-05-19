@@ -80,6 +80,7 @@ from box_agent.events import (
     ErrorEvent,
     InjectedMessageEvent,
     LLMOutputEvent,
+    MemoryProposalEvent,
     PPTProgressEvent,
     StepEnd,
     StepStart,
@@ -371,7 +372,18 @@ class BoxACPAgent:
             permission_engine=perm_engine,
             skill_runtime_context=skill_runtime_context,
         )
-        agent = Agent(llm_client=self._llm, system_prompt=system_prompt, tools=tools, max_steps=self._config.agent.max_steps, workspace_dir=str(workspace), token_limit=self._config.llm.context_token_limit, thinking_enabled=deep_think)
+        agent = Agent(
+            llm_client=self._llm,
+            system_prompt=system_prompt,
+            tools=tools,
+            max_steps=self._config.agent.max_steps,
+            workspace_dir=str(workspace),
+            token_limit=self._config.llm.context_token_limit,
+            thinking_enabled=deep_think,
+            memory_promotion_enabled=self._config.agent.memory_promotion_proposal_enabled,
+            memory_promotion_hit_threshold=self._config.agent.memory_promotion_hit_threshold,
+            memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
+        )
 
         # Conditionally add PPT tools based on session_mode
         if session_mode in ("ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"):
@@ -701,7 +713,85 @@ class BoxACPAgent:
                 return {"skills": []}
             log.info("skills/list", count=len(skills))
             return {"skills": skills}
+        if method == "memory_proposal_list":
+            return self._memory_proposal_list(params)
+        if method == "memory_proposal_apply":
+            return self._memory_proposal_apply(params)
         return {"error": f"unknown_method: {method}"}
+
+    def _memory_proposal_list(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return CONTEXT.md entries eligible for promotion to core.
+
+        Request: ``{sessionId, includeCooldown?: bool}``. When
+        ``includeCooldown`` is true, cooldown filtering is bypassed
+        (mirrors the CLI ``/memory review`` behaviour).
+        """
+        session_id = params.get("sessionId", "")
+        if session_id and session_id not in self._sessions:
+            return {"error": "session_not_found"}
+        if self._memory is None:
+            return {"candidates": []}
+        cooldown_days = (
+            0
+            if bool(params.get("includeCooldown"))
+            else self._config.agent.memory_promotion_cooldown_days
+        )
+        entries = self._memory.list_promotion_candidates(
+            hit_threshold=self._config.agent.memory_promotion_hit_threshold,
+            cooldown_days=cooldown_days,
+        )
+        candidates = [
+            {
+                "id": e.id,
+                "content": e.content,
+                "hits": e.hits,
+                "confidence": e.confidence,
+                "created": e.created,
+                "last_used": e.last_used,
+                "last_proposed": e.last_proposed,
+            }
+            for e in entries
+        ]
+        log.info(
+            "memory/proposal_list",
+            session_id=session_id,
+            count=len(candidates),
+            include_cooldown=bool(params.get("includeCooldown")),
+        )
+        return {"candidates": candidates}
+
+    def _memory_proposal_apply(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply user decisions to promotion candidates.
+
+        Request: ``{sessionId, decisions: {id: "pin"|"skip"|"reject"}}``.
+        Returns counts plus the full updated ``MEMORY.md`` text so the
+        host can refresh its core editor without an extra fetch.
+        """
+        session_id = params.get("sessionId", "")
+        if session_id and session_id not in self._sessions:
+            return {"error": "session_not_found"}
+        if self._memory is None:
+            return {"error": "memory_unavailable"}
+        raw = params.get("decisions") or {}
+        if not isinstance(raw, dict):
+            return {"error": "invalid_decisions"}
+        decisions: dict[str, str] = {
+            str(entry_id): value
+            for entry_id, value in raw.items()
+            if isinstance(value, str) and value in ("pin", "skip", "reject")
+        }
+        counts = self._memory.consume_core_proposal(decisions)
+        log.info(
+            "memory/proposal_apply",
+            session_id=session_id,
+            **counts,
+        )
+        return {
+            "pinned": counts["pinned"],
+            "rejected": counts["rejected"],
+            "skipped": counts["skipped"],
+            "core": self._memory.read_core(),
+        }
 
     async def _run_turn(self, state: SessionState, session_id: str) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
@@ -733,6 +823,9 @@ class BoxACPAgent:
             hooks=self._hooks,
             memory_manager=self._memory,
             memory_extractor=state.memory_extractor,
+            memory_promotion_enabled=self._config.agent.memory_promotion_proposal_enabled,
+            memory_promotion_hit_threshold=self._config.agent.memory_promotion_hit_threshold,
+            memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
             inject_queue=state.inject_queue,
             thinking_enabled=agent.thinking_enabled,
         ):
@@ -928,6 +1021,18 @@ class BoxACPAgent:
                     # PermissionRequestEvent: handled inline in core.py via negotiator.
                     # Falls through to case _: pass (no ACP notification sent).
 
+                    case MemoryProposalEvent():
+                        if self._memory is not None:
+                            negotiator_mem = _MemoryProposalNegotiator(
+                                conn=self._conn,
+                                session_id=session_id,
+                                memory_manager=self._memory,
+                            )
+                            try:
+                                await negotiator_mem.negotiate(event)
+                            except Exception as exc:
+                                log.exception("memory/proposal_unhandled", exc, session_id=session_id)
+
                     case _:
                         pass  # StepStart, SummarizationEvent, PermissionRequestEvent, etc.
 
@@ -1106,6 +1211,111 @@ class _PermissionNegotiator:
         return resolved.parent
 
 
+class _MemoryProposalNegotiator:
+    """Reverse-RPC bridge for ``MemoryProposalEvent`` over ACP.
+
+    Sends ``_session/memory_proposal`` (ext method) to the host with a
+    list of candidates; awaits a per-candidate decision map; applies
+    decisions via ``MemoryManager.consume_core_proposal``.
+
+    Hosts that don't implement the method get a ``method_not_found``
+    response — we treat that as "skip all" so the turn still ends
+    cleanly. ``last_proposed`` was already bumped at emit time, so the
+    cooldown carries the user past the unanswered batch.
+    """
+
+    _VALID_DECISIONS = {"pin", "skip", "reject"}
+
+    def __init__(
+        self,
+        conn: AgentSideConnection,
+        session_id: str,
+        memory_manager: Any,
+    ) -> None:
+        self._conn = conn
+        self._session_id = session_id
+        self._mgr = memory_manager
+
+    async def negotiate(self, event: Any) -> None:
+        candidates = getattr(event, "candidates", ()) or ()
+        if not candidates:
+            return
+
+        payload = {
+            "sessionId": self._session_id,
+            "proposals": [
+                {
+                    "id": c.entry_id,
+                    "content": c.content,
+                    "hits": c.hits,
+                    "confidence": c.confidence,
+                }
+                for c in candidates
+            ],
+        }
+
+        log.info(
+            "memory/proposal_request",
+            count=len(candidates),
+            message="Sending memory promotion proposals to host",
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                self._conn.extMethod("session/memory_proposal", payload),
+                timeout=120.0,
+            )
+        except asyncio.TimeoutError:
+            log.warn(
+                "memory/proposal_timeout",
+                count=len(candidates),
+                message="Host did not respond — treating as skip-all",
+            )
+            return
+        except Exception as exc:
+            log.warn(
+                "memory/proposal_error",
+                count=len(candidates),
+                message=f"extMethod failed (host may not support session/memory_proposal): {exc}",
+            )
+            return
+
+        if not isinstance(response, dict):
+            return
+        raw_decisions = response.get("decisions") or {}
+        if not isinstance(raw_decisions, dict):
+            return
+
+        valid_ids = {c.entry_id for c in candidates}
+        decisions: dict[str, str] = {}
+        for entry_id, decision in raw_decisions.items():
+            if entry_id not in valid_ids:
+                continue
+            if not isinstance(decision, str):
+                continue
+            d = decision.lower()
+            if d not in self._VALID_DECISIONS:
+                continue
+            decisions[entry_id] = d
+
+        if not decisions:
+            return
+
+        try:
+            counts = self._mgr.consume_core_proposal(decisions)
+            log.info(
+                "memory/proposal_applied",
+                pinned=counts.get("pinned", 0),
+                rejected=counts.get("rejected", 0),
+                skipped=counts.get("skipped", 0),
+            )
+        except Exception as exc:
+            log.warn(
+                "memory/proposal_apply_error",
+                message=f"consume_core_proposal failed: {exc}",
+            )
+
+
 async def run_acp_server(config: Config | None = None) -> None:
     """Run Box-Agent as an ACP-compatible stdio server."""
     config = config or Config.load()
@@ -1167,7 +1377,10 @@ async def run_acp_server(config: Config | None = None) -> None:
         # Create memory manager if enabled
         memory_mgr = None
         if config.agent.enable_memory:
-            memory_mgr = MemoryManager(memory_dir=config.agent.memory_dir)
+            memory_mgr = MemoryManager(
+                memory_dir=config.agent.memory_dir,
+                dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
+            )
 
         # One-time OpenClaw import (LLM-filtered into Core)
         if memory_mgr:
@@ -1175,6 +1388,23 @@ async def run_acp_server(config: Config | None = None) -> None:
                 await memory_mgr.import_openclaw(llm)
             except Exception:
                 log.warn("server/start", message="OpenClaw import failed (non-fatal)")
+
+        # Memory maintenance (decay / archive cleanup / dedup / compact).
+        # Off the critical path — the compact phase can issue a slow LLM call
+        # on large CONTEXT.md, which used to blow the host's init timeout.
+        # Same pattern as the background MCP loader: fire-and-forget, errors
+        # logged but never block stdio readiness.
+        maintainer_task: asyncio.Task | None = None
+        if memory_mgr and config.agent.memory_maintainer_enabled:
+            from box_agent.memory_maintainer import MemoryMaintainer
+
+            async def _run_maintainer() -> None:
+                try:
+                    await MemoryMaintainer(memory_mgr, config.agent, llm=llm).run_if_due()
+                except Exception:
+                    log.warn("server/start", message="Memory maintainer failed (non-fatal)")
+
+            maintainer_task = asyncio.create_task(_run_maintainer(), name="memory-maintainer")
 
         base_tools, skill_loader, mcp_task = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr, llm=llm)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)

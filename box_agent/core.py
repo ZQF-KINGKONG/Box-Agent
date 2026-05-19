@@ -33,6 +33,8 @@ from .events import (
     InjectedMessageEvent,
     LLMOutputEvent,
     LogFileEvent,
+    MemoryProposalEvent,
+    MemoryPromotionCandidate,
     PPTProgressEvent,
     PermissionRequestEvent,
     StepEnd,
@@ -790,6 +792,9 @@ async def run_agent_loop(
     hooks: list | None = None,
     memory_manager: Any | None = None,
     memory_extractor: Any | None = None,
+    memory_promotion_enabled: bool = False,
+    memory_promotion_hit_threshold: int = 5,
+    memory_promotion_cooldown_days: int = 14,
     inject_queue: asyncio.Queue[str] | None = None,
     thinking_enabled: bool = False,
 ) -> AsyncIterator[AgentEvent]:
@@ -850,6 +855,35 @@ async def run_agent_loop(
     api_total_tokens = 0
     skip_next_token_check = False
     run_start = perf_counter()
+
+    def _build_proposal_event() -> MemoryProposalEvent | None:
+        """Read promotion candidates from memory and bump their last_proposed."""
+        if not (memory_promotion_enabled and memory_manager):
+            return None
+        try:
+            entries = memory_manager.list_promotion_candidates(
+                hit_threshold=memory_promotion_hit_threshold,
+                cooldown_days=memory_promotion_cooldown_days,
+            )
+        except Exception:
+            return None
+        if not entries:
+            return None
+        try:
+            memory_manager.mark_proposed([e.id for e in entries])
+        except Exception:
+            pass
+        return MemoryProposalEvent(
+            candidates=tuple(
+                MemoryPromotionCandidate(
+                    entry_id=e.id,
+                    content=e.content,
+                    hits=e.hits,
+                    confidence=e.confidence,
+                )
+                for e in entries
+            )
+        )
 
     # Loop-guard state: detect when the model emits the same tool_call
     # signature with empty arguments two turns in a row. With a healthy LLM
@@ -1057,6 +1091,9 @@ async def run_agent_loop(
             if memory_extractor:
                 asyncio.create_task(memory_extractor.maybe_extract(messages, "loop_end"))
             yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+            proposal = _build_proposal_event()
+            if proposal is not None:
+                yield proposal
             yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
             return
 
@@ -1463,4 +1500,7 @@ async def run_agent_loop(
         asyncio.create_task(memory_extractor.maybe_extract(messages, "loop_end"))
     if hook_mgr.hooks:
         await hook_mgr.fire_done(stop_reason=StopReason.MAX_STEPS, final_content=msg)
+    proposal = _build_proposal_event()
+    if proposal is not None:
+        yield proposal
     yield DoneEvent(stop_reason=StopReason.MAX_STEPS, final_content=msg)

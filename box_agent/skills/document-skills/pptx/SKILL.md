@@ -66,6 +66,9 @@ Do not switch routes based on convenience.
 | HTML self-check | `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` ⚠️ 不要追加 `--width/--height` |
 | Export HTML | `${BOX_AGENT_NODE:-node} scripts/html_to_editable_pptx.js deck.html output.pptx` ⚠️ 不要追加 `--width/--height` |
 | Check local deps | `${BOX_AGENT_PYTHON:-python3} scripts/setup_check.py` |
+| Check HTML export env | `${BOX_AGENT_NODE:-node} scripts/check_html_export_env.js` |
+
+⚠️ **Dependency probing**: never use bare `node -e "require.resolve('playwright')"` to check for installed packages. Box-Agent installs Node deps into the **office-raccoon managed prefix** (`~/Library/Application Support/office-raccoon/node_modules/` on macOS, `$APPDATA/office-raccoon/node_modules/` on Windows, `~/.config/office-raccoon/node_modules/` on Linux), which is **not** on the default `NODE_PATH`. A naked `node -e` process will report every managed package as `not found`. Always use `scripts/check_html_export_env.js` (Node) or `scripts/setup_check.py` (Python) — both look in the managed prefix.
 
 ## 3. HTML-first Requirements
 

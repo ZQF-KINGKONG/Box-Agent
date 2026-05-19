@@ -353,14 +353,12 @@ async function main() {
   }
 
   let bgCaptures = [];
-  const bgCaptureDir = path.join(path.dirname(htmlPath), "assets", "bg-capture");
   if (opts.bgCapture === "always") {
     await injectCaptureStyles(page);
     await markDecorationNodes(page);
     bgCaptures = await captureSlideBackgrounds({
       page,
       slideHandles,
-      captureDir: bgCaptureDir,
     });
     await applyDecorationFlatten({
       page,
@@ -368,7 +366,7 @@ async function main() {
       width: detectedWidth,
       height: detectedHeight,
     });
-    console.log(`Captured ${bgCaptures.length} background image(s) to ${bgCaptureDir}.`);
+    console.log(`Captured ${bgCaptures.length} background image(s) in-memory.`);
   }
 
   await page.addScriptTag({ path: bundlePath });
@@ -425,8 +423,7 @@ async function main() {
         localImagesInlinedForExport: inlinedImages,
         bgCapture: {
           mode: opts.bgCapture,
-          directory: opts.bgCapture === "always" ? bgCaptureDir : null,
-          files: bgCaptures.map(c => c.filePath),
+          slides: bgCaptures.map(c => c.filename),
         },
       },
       null,

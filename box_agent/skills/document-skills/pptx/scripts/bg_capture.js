@@ -1,8 +1,5 @@
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
-
 const CAPTURE_CSS = `
 /* Hide every non-decoration element during capture so the bitmap contains
  * only the slide-level background and pure decoration (no text, no <img>,
@@ -99,9 +96,7 @@ async function markDecorationNodes(page) {
   });
 }
 
-async function captureSlideBackgrounds({ page, slideHandles, captureDir }) {
-  fs.mkdirSync(captureDir, { recursive: true });
-
+async function captureSlideBackgrounds({ page, slideHandles }) {
   await page.evaluate(() => {
     document.documentElement.classList.add("pptx-capture-mode");
   });
@@ -113,10 +108,12 @@ async function captureSlideBackgrounds({ page, slideHandles, captureDir }) {
 
   const captures = [];
   for (let i = 0; i < slideHandles.length; i += 1) {
-    const filename = `slide-${String(i + 1).padStart(2, "0")}.png`;
-    const filePath = path.join(captureDir, filename);
-    await slideHandles[i].screenshot({ path: filePath, type: "png" });
-    captures.push({ index: i, filePath, filename });
+    const buffer = await slideHandles[i].screenshot({ type: "png" });
+    captures.push({
+      index: i,
+      filename: `slide-${String(i + 1).padStart(2, "0")}.png`,
+      dataUrl: `data:image/png;base64,${buffer.toString("base64")}`,
+    });
   }
 
   await page.evaluate(() => {
@@ -127,13 +124,10 @@ async function captureSlideBackgrounds({ page, slideHandles, captureDir }) {
 }
 
 async function applyDecorationFlatten({ page, captures, width, height }) {
-  const items = captures.map(capture => {
-    const bytes = fs.readFileSync(capture.filePath);
-    return {
-      index: capture.index,
-      dataUrl: `data:image/png;base64,${bytes.toString("base64")}`,
-    };
-  });
+  const items = captures.map(capture => ({
+    index: capture.index,
+    dataUrl: capture.dataUrl,
+  }));
 
   await page.evaluate(
     payload => {

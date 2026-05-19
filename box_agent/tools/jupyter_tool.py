@@ -91,17 +91,20 @@ class SandboxEnvironment:
         self._ready = False
         self._bundled_override = False
 
-        # Dev/Windows override: point at an already-prepared interpreter
+        # Windows-only override: point at an already-prepared interpreter
         # (e.g. the bundled python.exe in officev3/build-resources) so we
         # skip venv creation and pip install entirely. Mirrors the
         # BOX_AGENT_BUNDLED_BASH / BOX_AGENT_NODE_RUNTIME_ROOT pattern.
-        override = os.environ.get("BOX_AGENT_BUNDLED_PYTHON")
-        if override:
-            override_path = Path(override)
-            if override_path.exists():
-                self.python_path = override_path
-                self._bundled_override = True
-                self._ready = True
+        # Gated to win32 so a stray env var on macOS/Linux cannot bypass
+        # the normal sandbox venv initialization.
+        if sys.platform == "win32":
+            override = os.environ.get("BOX_AGENT_BUNDLED_PYTHON")
+            if override:
+                override_path = Path(override)
+                if override_path.exists():
+                    self.python_path = override_path
+                    self._bundled_override = True
+                    self._ready = True
 
     @property
     def is_created(self) -> bool:

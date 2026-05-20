@@ -26,3 +26,11 @@ def test_dom_to_pptx_bundle_exports_browser_api() -> None:
 
     assert "factory(global.domToPptx = {})" in source
     assert "exports.exportToPptx = exportToPptx" in source
+
+
+def test_dom_to_pptx_bundle_preserves_br_inside_text_children() -> None:
+    source = BUNDLE_PATH.read_text(encoding="utf-8")
+
+    assert "if (el.tagName === 'BR') return true;" in source
+    assert "const childParts = collectTextParts(child, style, config.scale);" in source
+    assert "textParts.push(...visibleParts);" in source

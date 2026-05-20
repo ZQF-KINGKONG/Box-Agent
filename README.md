@@ -244,7 +244,10 @@ Box Agent supports the [Agent Communication Protocol](https://github.com/nichoch
 gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
 
 # Or build from source
-uv run python scripts/build_runtime.py
+uv run box-agent-build-runtime --version 0.8.51
+
+# Build macOS Intel/x64 runtime from Apple Silicon
+arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
 ```
 
 The runtime communicates via JSON-RPC over stdio. stdout = protocol only, stderr = diagnostics.

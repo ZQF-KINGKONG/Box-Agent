@@ -62955,6 +62955,8 @@
     }
 
     const isSafeInline = (el) => {
+      if (el.tagName === 'BR') return true;
+
       // 1. Reject Web Components / Custom Elements
       if (el.tagName.includes('-')) return false;
       // 2. Reject Explicit Images/SVGs
@@ -64716,8 +64718,46 @@
           return;
         }
 
-        let textVal = child.nodeType === 3 ? child.nodeValue : child.textContent;
-        let nodeStyle = child.nodeType === 1 ? window.getComputedStyle(child) : style;
+        if (child.nodeType === 1) {
+          const childParts = collectTextParts(child, style, config.scale);
+          const firstTextPart = childParts.find((part) => part.text && typeof part.text === 'string');
+          const lastTextPart = [...childParts]
+            .reverse()
+            .find((part) => part.text && typeof part.text === 'string');
+
+          if (index === 0 && firstTextPart) firstTextPart.text = firstTextPart.text.trimStart();
+          if (trimNextLeading && firstTextPart) {
+            firstTextPart.text = firstTextPart.text.trimStart();
+            trimNextLeading = false;
+          }
+          if (index === node.childNodes.length - 1 && lastTextPart) {
+            lastTextPart.text = lastTextPart.text.trimEnd();
+          }
+
+          const visibleParts = childParts.filter(
+            (part) => part.options?.breakLine || (part.text && part.text.length > 0)
+          );
+          if (visibleParts.length > 0) {
+            const nodeStyle = window.getComputedStyle(child);
+            if (textParts.length > 0 && firstTextPart) {
+              const marginLeft = parseFloat(nodeStyle.marginLeft) || 0;
+              const prevChild = node.childNodes[index - 1];
+              const prevMarginRight = (prevChild && prevChild.nodeType === 1)
+                ? (parseFloat(window.getComputedStyle(prevChild).marginRight) || 0)
+                : 0;
+              const totalGap = marginLeft + prevMarginRight + parentGapPx;
+              if (totalGap > 0) {
+                textParts.push({ text: ' ', options: getTextStyle(style, config.scale) });
+              }
+            }
+
+            textParts.push(...visibleParts);
+          }
+          return;
+        }
+
+        let textVal = child.nodeValue;
+        let nodeStyle = style;
         textVal = textVal.replace(/[\n\r\t]+/g, ' ').replace(/\s{2,}/g, ' ');
 
         // Trimming logic
@@ -64740,20 +64780,6 @@
           // We must NOT render it again as a Text Highlight, otherwise it looks like a solid marker on top of the shape.
           if (child.nodeType === 3 && textOpts.highlight) {
             delete textOpts.highlight;
-          }
-
-          // FIX: Inject space between adjacent inline/flex children when margin or gap creates visual spacing.
-          // Without this, "客户第一""快速迭代" would render as "客户第一快速迭代" in PPTX.
-          if (textParts.length > 0 && child.nodeType === 1) {
-            const marginLeft = parseFloat(nodeStyle.marginLeft) || 0;
-            const prevChild = node.childNodes[index - 1];
-            const prevMarginRight = (prevChild && prevChild.nodeType === 1)
-              ? (parseFloat(window.getComputedStyle(prevChild).marginRight) || 0)
-              : 0;
-            const totalGap = marginLeft + prevMarginRight + parentGapPx;
-            if (totalGap > 0) {
-              textParts.push({ text: ' ', options: getTextStyle(style, config.scale) });
-            }
           }
 
           textParts.push({ text: textVal, options: textOpts });

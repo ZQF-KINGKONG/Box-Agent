@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0.0",
     "pyyaml>=6.0.0",
-    "httpx>=0.27.0",
+    "httpx[socks]>=0.27.0",
     "mcp>=1.0.0",
     "requests>=2.31.0",
     "tiktoken>=0.5.0",
@@ -37,6 +37,7 @@ dependencies = [
 [project.scripts]
 box-agent = "box_agent.cli:main"
 box-agent-acp = "box_agent.acp.server:main"
+box-agent-build-runtime = "box_agent.build_runtime_cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Raccoon-Office/Box-Agent"

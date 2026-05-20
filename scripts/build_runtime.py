@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Build a standalone box-agent-runtime artifact for the current platform.
+"""Build a standalone box-agent-runtime artifact.
 
 Usage:
-    python scripts/build_runtime.py [--version 0.3.2] [--output dist/runtime]
+    box-agent-build-runtime [--version 0.3.2] [--output dist/runtime]
+    arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
 
 Produces:
     dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz
@@ -64,8 +65,26 @@ BUILD_TOOLS_CACHE = Path.home() / ".cache" / "box-agent-build-tools"
 
 # ── Platform detection ───────────────────────────────────────
 
+
+ARCH_ALIASES = {
+    "x86_64": "x64",
+    "amd64": "x64",
+    "x64": "x64",
+    "aarch64": "arm64",
+    "arm64": "arm64",
+}
+
+SUPPORTED_TARGETS = {
+    "darwin-arm64",
+    "darwin-x64",
+    "linux-arm64",
+    "linux-x64",
+    "win32-x64",
+}
+
+
 def detect_platform() -> tuple[str, str]:
-    """Return (platform, arch) in Electron naming convention."""
+    """Return the running Python process platform in Electron naming convention."""
     system = platform.system().lower()
     machine = platform.machine().lower()
 
@@ -78,23 +97,89 @@ def detect_platform() -> tuple[str, str]:
     else:
         plat = system
 
-    arch_map = {
-        "x86_64": "x64",
-        "amd64": "x64",
-        "aarch64": "arm64",
-        "arm64": "arm64",
-    }
-    arch = arch_map.get(machine, machine)
+    arch = ARCH_ALIASES.get(machine, machine)
 
     return plat, arch
+
+
+def parse_target(value: str | None) -> tuple[str, str]:
+    """Parse and validate a target platform id such as ``darwin-x64``."""
+    if not value:
+        return detect_platform()
+
+    target = value.strip().lower()
+    if target in ARCH_ALIASES:
+        plat, _arch = detect_platform()
+        target = f"{plat}-{ARCH_ALIASES[target]}"
+
+    if target not in SUPPORTED_TARGETS:
+        supported = ", ".join(sorted(SUPPORTED_TARGETS))
+        raise ValueError(f"Unsupported target: {value}. Supported targets: {supported}")
+    plat, arch = target.rsplit("-", 1)
+    return plat, arch
+
+
+def require_supported_build_process(target_plat: str, target_arch: str) -> None:
+    """Avoid producing metadata for a platform this process cannot build."""
+    current_plat, current_arch = detect_platform()
+    if target_plat == current_plat and (
+        target_plat == "darwin" or target_arch == current_arch
+    ):
+        return
+
+    target = f"{target_plat}-{target_arch}"
+    current = f"{current_plat}-{current_arch}"
+    hint = "Run the build on the matching target platform."
+    raise RuntimeError(
+        f"Refusing to build {target} from current process {current}. {hint}"
+    )
+
+
+def verify_entry_binary_arch(entry_bin: Path, *, plat: str, arch: str) -> None:
+    """Verify the packaged launcher has the requested CPU architecture."""
+    if plat != "darwin":
+        return
+
+    expected = "x86_64" if arch == "x64" else "arm64"
+    try:
+        result = subprocess.run(
+            ["file", str(entry_bin)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        print(
+            "Warning: `file` command not found; skipping binary arch verification",
+            file=sys.stderr,
+        )
+        return
+
+    output = f"{result.stdout}\n{result.stderr}".lower()
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to inspect packaged binary architecture: {output.strip()}")
+    if expected not in output:
+        raise RuntimeError(
+            f"Packaged binary architecture mismatch for {entry_bin}: "
+            f"expected {expected}, got {output.strip()}"
+        )
+
+
+def pyinstaller_target_arch_args(*, plat: str, arch: str) -> list[str]:
+    """Return PyInstaller architecture args for macOS builds."""
+    if plat != "darwin":
+        return []
+    target_arch = "x86_64" if arch == "x64" else arch
+    return ["--target-arch", target_arch]
 
 
 # ── Build ────────────────────────────────────────────────────
 
 
-def build_runtime(version: str, output_dir: Path) -> Path:
+def build_runtime(version: str, output_dir: Path, *, target: str | None = None) -> Path:
     """Build the runtime artifact and return the archive path."""
-    plat, arch = detect_platform()
+    plat, arch = parse_target(target)
+    require_supported_build_process(plat, arch)
     project_root = PROJECT_ROOT
 
     print(f"Building box-agent-runtime v{version} for {plat}-{arch}")
@@ -231,6 +316,7 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         "--collect-submodules", "openpyxl",
         "--collect-submodules", "sklearn",
         "--collect-submodules", "pip",
+        *pyinstaller_target_arch_args(plat=plat, arch=arch),
         str(entry_point),
     ]
 
@@ -271,6 +357,7 @@ def build_runtime(version: str, output_dir: Path) -> Path:
         entry_bin = bin_dir / "box-agent-acp.exe"
     if entry_bin.exists():
         entry_bin.chmod(0o755)
+        verify_entry_binary_arch(entry_bin, plat=plat, arch=arch)
 
     # VERSION file
     (runtime_dir / "VERSION").write_text(version + "\n", encoding="utf-8")
@@ -582,9 +669,32 @@ def _relativize_node_manifest(node_root: Path) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Build box-agent standalone runtime")
-    parser.add_argument("--version", default=None, help="Version string (default: read from package)")
-    parser.add_argument("--output", default="dist/runtime", help="Output directory")
+    parser.add_argument(
+        "--version",
+        default=os.environ.get("BOX_AGENT_RUNTIME_VERSION"),
+        help="Version string (default: BOX_AGENT_RUNTIME_VERSION or package version)",
+    )
+    parser.add_argument(
+        "--output",
+        default=os.environ.get("BOX_AGENT_RUNTIME_OUTPUT", "dist/runtime"),
+        help="Output directory (default: BOX_AGENT_RUNTIME_OUTPUT or dist/runtime)",
+    )
+    parser.add_argument(
+        "--target",
+        default=os.environ.get("BOX_AGENT_RUNTIME_TARGET"),
+        help="Target platform-arch, e.g. darwin-arm64 or darwin-x64. Arch-only values like x64 are allowed.",
+    )
+    parser.add_argument(
+        "--arch",
+        choices=sorted(set(ARCH_ALIASES.values())),
+        default=None,
+        help="Shortcut for --target <current-platform>-<arch>, e.g. --arch x64",
+    )
     args = parser.parse_args()
+
+    if args.target and args.arch:
+        print("Error: use either --target or --arch, not both", file=sys.stderr)
+        sys.exit(1)
 
     version = args.version
     if not version:
@@ -596,7 +706,16 @@ def main():
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    archive = build_runtime(version, output_dir)
+    target = args.target
+    if args.arch:
+        plat, _arch = detect_platform()
+        target = f"{plat}-{args.arch}"
+
+    try:
+        archive = build_runtime(version, output_dir, target=target)
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
     print(f"\nDone! Artifact: {archive}")
 
 

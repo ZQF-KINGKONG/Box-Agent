@@ -123,12 +123,44 @@ Control via environment variables:
 
 ```bash
 uv sync --group dev
-uv run python scripts/build_runtime.py [--version X.Y.Z] [--output dist/runtime]
+uv run box-agent-build-runtime --version X.Y.Z
 ```
 
 Produces `dist/runtime/box-agent-runtime-v{version}-{platform}-{arch}.tar.gz`.
 
-Supported platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`.
+Supported platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `win32-x64`.
+
+Build the current machine architecture:
+
+```bash
+uv run box-agent-build-runtime --version 0.8.51
+```
+
+Build macOS Intel/x64 from an Apple Silicon Mac:
+
+```bash
+arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
+```
+
+The long form is also supported:
+
+```bash
+arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --target darwin-x64
+```
+
+Optional environment defaults:
+
+```bash
+BOX_AGENT_RUNTIME_VERSION=0.8.51 uv run box-agent-build-runtime
+BOX_AGENT_RUNTIME_OUTPUT=dist/runtime uv run box-agent-build-runtime
+BOX_AGENT_RUNTIME_TARGET=darwin-x64 arch -x86_64 uv run box-agent-build-runtime
+```
+
+The older direct script entry remains available for compatibility:
+
+```bash
+uv run python scripts/build_runtime.py --version 0.8.51 --target darwin-arm64
+```
 
 macOS runtime artifacts additionally bundle a pinned Node.js runtime under
 `box-agent-runtime/runtimes/node/`. The Node manifest uses relative paths so the

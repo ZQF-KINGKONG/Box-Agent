@@ -35,7 +35,6 @@ from .events import (
     LogFileEvent,
     MemoryProposalEvent,
     MemoryPromotionCandidate,
-    PPTProgressEvent,
     PermissionRequestEvent,
     StepEnd,
     StepStart,
@@ -1324,7 +1323,7 @@ async def run_agent_loop(
                 yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 return
 
-        # 2. Parallel execution for parallel_safe tools (e.g. sub_agent, ppt_emit_html)
+        # 2. Parallel execution for parallel_safe tools (e.g. sub_agent)
         if parallel_calls:
             # Emit all ToolCallStart events and apply hook interceptors
             par_args_map: dict[str, dict[str, Any]] = {}  # tc.id → (possibly modified) args
@@ -1342,7 +1341,7 @@ async def run_agent_loop(
                 par_args_map[tc.id] = par_fn_args
 
             # Wire a shared event queue onto EventEmittingTool instances
-            par_event_queue: asyncio.Queue[SubAgentEvent | PPTProgressEvent] = asyncio.Queue()
+            par_event_queue: asyncio.Queue[SubAgentEvent] = asyncio.Queue()
             emitting_tools: list[EventEmittingTool] = []
             for tc in parallel_calls:
                 tool = tools.get(tc.function.name)

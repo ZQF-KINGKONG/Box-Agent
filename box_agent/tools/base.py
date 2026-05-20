@@ -76,15 +76,3 @@ class EventEmittingTool(Tool):
         # Set by core.py before execution to collect progress events.
         self._event_queue: asyncio.Queue | None = None
         self._parent_tool_call_id: str = ""
-
-    def _emit(self, payload: dict) -> None:
-        """Push a progress event onto the shared queue."""
-        if self._event_queue is not None:
-            from ..events import PPTProgressEvent
-
-            self._event_queue.put_nowait(
-                PPTProgressEvent(
-                    parent_tool_call_id=self._parent_tool_call_id,
-                    payload=payload,
-                )
-            )

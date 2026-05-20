@@ -24,7 +24,6 @@ from .events import (
     InjectedMessageEvent,
     LogFileEvent,
     MemoryProposalEvent,
-    PPTProgressEvent,
     PermissionRequestEvent,
     StepEnd,
     StepStart,
@@ -304,10 +303,6 @@ class Agent:
 
             case ErrorEvent(message=msg):
                 print(f"\n{Colors.BRIGHT_RED}❌ Error:{Colors.RESET} {msg}")
-
-            case PPTProgressEvent(payload=p):
-                ptype = p.get("type", "unknown")
-                print(f"{Colors.DIM}  📊 PPT: {ptype}{Colors.RESET}")
 
             case PermissionRequestEvent(scope=scope, requested_scope=req_scope, path=path, reason=reason):
                 print(f"\n{Colors.BRIGHT_YELLOW}🔒 Permission required: {scope} → {req_scope}{Colors.RESET}")

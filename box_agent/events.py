@@ -254,22 +254,6 @@ class SubAgentEvent:
 
 
 @dataclass(frozen=True)
-class PPTProgressEvent:
-    """Structured progress event from a PPT tool.
-
-    ``payload["type"]`` is the discriminator for officev3 dispatch
-    (e.g. ``ppt_plan_json``, ``ppt_outline_delta``,
-    ``ppt_editor_standard_html_result``).
-    """
-
-    parent_tool_call_id: str
-    payload: dict  # {"type": "ppt_plan_json", ...} etc.
-
-
-# ── Permission requests ──────────────────────────────────────
-
-
-@dataclass(frozen=True)
 class PermissionRequestEvent:
     """Capability permission request from a tool.
 
@@ -361,7 +345,6 @@ AgentEvent = Union[
     LogFileEvent,
     DoneEvent,
     SubAgentEvent,
-    PPTProgressEvent,
     PermissionRequestEvent,
     InjectedMessageEvent,
 ]

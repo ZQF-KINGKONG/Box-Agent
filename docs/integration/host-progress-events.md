@@ -7,7 +7,7 @@ Box-Agent emits agent text, tool calls, and structured tool progress through ACP
 Recommended host layout:
 
 - Main conversation: assistant text, final answer, and user-visible fatal errors.
-- Tool/activity cards: tool calls, sub-agent progress, todo snapshots, artifacts, web search metadata, and PPT progress.
+- Tool/activity cards: tool calls, sub-agent progress, todo snapshots, artifacts, and web search metadata.
 - Default collapsed details: sub-agent internals should be grouped and collapsible, not appended one-by-one as chat messages.
 
 ## Sub-agent progress

@@ -469,9 +469,9 @@ async def load_mcp_tools_async(
             _sys.stderr.write("No MCP servers configured\n")
             return []
 
-        all_tools = []
+        connections: list[MCPServerConnection] = []
 
-        # Connect to each enabled server
+        # Build connection objects for each enabled server
         for server_name, server_config in mcp_servers.items():
             if server_config.get("disabled", False):
                 _warn(f"Skipping disabled server: {server_name}")
@@ -507,25 +507,38 @@ async def load_mcp_tools_async(
                 )
             )
 
-            connection = MCPServerConnection(
-                name=server_name,
-                connection_type=conn_type,
-                command=command,
-                args=server_config.get("args", []),
-                env=server_config.get("env", {}),
-                url=url,
-                headers=connection_headers,
-                auth=auth,
-                # Per-server timeout overrides from mcp.json
-                connect_timeout=server_config.get("connect_timeout"),
-                execute_timeout=server_config.get("execute_timeout"),
-                sse_read_timeout=server_config.get("sse_read_timeout"),
+            connections.append(
+                MCPServerConnection(
+                    name=server_name,
+                    connection_type=conn_type,
+                    command=command,
+                    args=server_config.get("args", []),
+                    env=server_config.get("env", {}),
+                    url=url,
+                    headers=connection_headers,
+                    auth=auth,
+                    # Per-server timeout overrides from mcp.json
+                    connect_timeout=server_config.get("connect_timeout"),
+                    execute_timeout=server_config.get("execute_timeout"),
+                    sse_read_timeout=server_config.get("sse_read_timeout"),
+                )
             )
-            success = await connection.connect()
 
+        # Connect to all servers in parallel — one slow/broken server no longer
+        # blocks the others. Each connection has its own timeout (connect()).
+        results = await asyncio.gather(
+            *(conn.connect() for conn in connections),
+            return_exceptions=True,
+        )
+
+        all_tools = []
+        for conn, success in zip(connections, results):
+            if isinstance(success, BaseException):
+                _warn(f"✗ MCP server '{conn.name}' raised during connect: {success}")
+                continue
             if success:
-                _mcp_connections.append(connection)
-                all_tools.extend(connection.tools)
+                _mcp_connections.append(conn)
+                all_tools.extend(conn.tools)
 
         _warn(f"Total MCP tools loaded: {len(all_tools)}")
 

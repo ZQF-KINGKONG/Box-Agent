@@ -36,7 +36,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Final
+from typing import Any
 from uuid import uuid4
 
 from acp import (
@@ -81,7 +81,6 @@ from box_agent.events import (
     InjectedMessageEvent,
     LLMOutputEvent,
     MemoryProposalEvent,
-    PPTProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -179,6 +178,11 @@ class SessionState:
 class BoxACPAgent:
     """Minimal ACP adapter wrapping the existing Agent runtime."""
 
+    # Soft deadline for the first prompt to wait on background MCP loading.
+    # Beyond this we proceed without MCP tools and inject them once ready, so a
+    # single slow/broken MCP server cannot hang the user's first message.
+    _MCP_PROMPT_WAIT_SECONDS: float = 5.0
+
     def __init__(
         self,
         conn: AgentSideConnection,
@@ -204,17 +208,51 @@ class BoxACPAgent:
         self._mcp_loaded = mcp_task is None  # True once MCP has been injected
 
     async def _ensure_mcp_loaded(self) -> None:
-        """Await background MCP loading (first caller blocks, rest are no-ops)."""
+        """Await background MCP loading with a soft deadline.
+
+        First caller waits up to ``_MCP_PROMPT_WAIT_SECONDS``; on timeout we
+        let the prompt proceed without MCP tools and inject them later via
+        ``_finalize_mcp_load``. One slow/broken MCP server can no longer
+        block the user's first message.
+        """
         if self._mcp_loaded:
             return
-        mcp_tools = await await_mcp_tools(self._mcp_task)
-        # Inject into base tool list so future sessions pick them up
+        if self._mcp_task is None:
+            self._mcp_loaded = True
+            return
+        try:
+            mcp_tools = await asyncio.wait_for(
+                asyncio.shield(self._mcp_task),
+                timeout=self._MCP_PROMPT_WAIT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            log.warn(
+                "mcp/slow_load",
+                message=(
+                    f"MCP load exceeded {self._MCP_PROMPT_WAIT_SECONDS}s; "
+                    "proceeding without MCP tools, will inject on completion"
+                ),
+            )
+            asyncio.create_task(self._finalize_mcp_load(), name="mcp-finalize")
+            return
         merge_mcp_tools(self._base_tools, mcp_tools)
-        # Also inject into any already-created sessions
         for state in self._sessions.values():
             register_mcp_tools(state.agent.tools, mcp_tools)
         self._mcp_loaded = True
         log.info("mcp/ready", count=len(mcp_tools))
+
+    async def _finalize_mcp_load(self) -> None:
+        """Background drain of the MCP task after the prompt has already started."""
+        if self._mcp_loaded or self._mcp_task is None:
+            return
+        mcp_tools = await await_mcp_tools(self._mcp_task)
+        if self._mcp_loaded:
+            return
+        merge_mcp_tools(self._base_tools, mcp_tools)
+        for state in self._sessions.values():
+            register_mcp_tools(state.agent.tools, mcp_tools)
+        self._mcp_loaded = True
+        log.info("mcp/ready", count=len(mcp_tools), source="deferred")
 
     def _skills_meta(self) -> list[dict] | None:
         """Return current skills metadata for ACP _meta payload, reloading if changed."""
@@ -385,16 +423,6 @@ class BoxACPAgent:
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
         )
 
-        # Conditionally add PPT tools based on session_mode
-        if session_mode in ("ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"):
-            from box_agent.tools.ppt_tools import PPTEditorHTMLTool, PPTOutlineTool, PPTPlanChatTool
-            ppt_tool_map = {
-                "ppt_plan_chat": PPTPlanChatTool,
-                "ppt_outline": PPTOutlineTool,
-                "ppt_editor_standard_html": PPTEditorHTMLTool,
-            }
-            ppt_tool = ppt_tool_map[session_mode]()
-            agent.tools[ppt_tool.name] = ppt_tool
         # Canonical artifact directory (created eagerly so write tools and the
         # sandbox kernel can chdir into it without race conditions).
         from box_agent.core import ensure_output_dir
@@ -512,9 +540,6 @@ class BoxACPAgent:
         """Build system prompt with conditional mode-specific injection."""
         _MODE_PROMPT_MAP = {
             "data_analysis": "analysis_prompt_path",
-            "ppt_plan_chat": "ppt_plan_chat_prompt_path",
-            "ppt_outline": "ppt_outline_prompt_path",
-            "ppt_editor_standard_html": "ppt_editor_prompt_path",
         }
 
         base_prompt = self._system_prompt
@@ -551,20 +576,15 @@ class BoxACPAgent:
         log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
         return base_prompt
 
-    _PPT_TOOL_MODES: Final[frozenset[str]] = frozenset(
-        {"ppt_plan_chat", "ppt_outline", "ppt_editor_standard_html"}
-    )
-
     def _apply_session_mode(self, state: SessionState, mode: str | None) -> None:
         """Retroactively apply a ``session_mode`` to an existing session.
 
         Used when the caller did not supply ``_meta.session_mode`` and we
         auto-classified the user's first message. Rewrites the agent's system
         message (preserving the workspace-info footer injected by
-        ``Agent.__init__``) and registers the mode-specific PPT tool if any.
-        Safe to call when ``mode`` resolves to the general agent (``None``) —
-        the session already runs as general, so the call is a no-op in that
-        case.
+        ``Agent.__init__``). Safe to call when ``mode`` resolves to the
+        general agent (``None``) — the session already runs as general, so
+        the call is a no-op in that case.
         """
         if mode is None or mode == state.session_mode:
             state.session_mode = mode
@@ -593,20 +613,6 @@ class BoxACPAgent:
             state.agent.messages[0] = Message(role="system", content=new_prompt)
         else:
             state.agent.messages.insert(0, Message(role="system", content=new_prompt))
-
-        if mode in self._PPT_TOOL_MODES:
-            from box_agent.tools.ppt_tools import (
-                PPTEditorHTMLTool,
-                PPTOutlineTool,
-                PPTPlanChatTool,
-            )
-            ppt_tool_map = {
-                "ppt_plan_chat": PPTPlanChatTool,
-                "ppt_outline": PPTOutlineTool,
-                "ppt_editor_standard_html": PPTEditorHTMLTool,
-            }
-            ppt_tool = ppt_tool_map[mode]()
-            state.agent.tools.setdefault(ppt_tool.name, ppt_tool)
 
         state.session_mode = mode
 
@@ -1007,16 +1013,6 @@ class BoxACPAgent:
                             )
                         except Exception as exc:
                             log.exception("sub_agent/send_error", exc, session_id=session_id, tool_call_id=tid)
-
-                    case PPTProgressEvent(parent_tool_call_id=tid, payload=payload):
-                        log.debug("ppt/progress", session_id=session_id, tool_call_id=tid, payload=payload)
-                        try:
-                            await self._send(
-                                session_id,
-                                update_tool_call(tid, raw_output=payload),
-                            )
-                        except Exception as exc:
-                            log.exception("ppt/send_error", exc, session_id=session_id, tool_call_id=tid)
 
                     # PermissionRequestEvent: handled inline in core.py via negotiator.
                     # Falls through to case _: pass (no ACP notification sent).

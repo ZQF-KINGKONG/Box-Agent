@@ -80,7 +80,6 @@ function handleToolCallUpdate(update: ToolCallUpdate) {
     case "web_search":    return upsertWebSearch(update.toolCallId, ro);
     case "memory_search": return upsertMemorySearch(update.toolCallId, ro);
     case "sub_agent_progress": return appendSubAgentProgress(update.toolCallId, ro);
-    // ppt_plan_json / ppt_outline_delta / ppt_editor_standard_html_result …
     default: return;
   }
 }

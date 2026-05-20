@@ -105,8 +105,6 @@ async def test_missing_mode_ignores_legacy_ppt_classification(tmp_path):
     assert llm.classifier_calls == 0
     assert state.session_mode is None
     assert state.auto_classify_pending is False
-    # Legacy PPT events are not emitted unless the caller explicitly opts in.
-    assert "ppt_emit_outline" not in state.agent.tools
     # System message remains general (base prompt was "base system").
     assert state.agent.messages[0].role == "system"
 
@@ -144,8 +142,6 @@ async def test_classification_failure_falls_back_to_general(tmp_path):
     assert state.session_mode is None  # general
     assert state.auto_classify_pending is False
     assert response.stopReason == "end_turn"
-    # No PPT tool should have been registered
-    assert "ppt_emit_outline" not in state.agent.tools
 
 
 @pytest.mark.asyncio

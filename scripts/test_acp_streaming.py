@@ -3,7 +3,7 @@
 
 Usage:
     uv run python scripts/test_acp_streaming.py
-    uv run python scripts/test_acp_streaming.py --mode ppt_plan_chat --prompt "做一个关于AI的PPT"
+    uv run python scripts/test_acp_streaming.py --mode data_analysis --prompt "分析这个 CSV"
 """
 
 import argparse
@@ -30,7 +30,7 @@ async def read_line(proc, timeout=60):
 
 async def main():
     parser = argparse.ArgumentParser(description="Test ACP streaming")
-    parser.add_argument("--mode", default=None, help="session_mode (e.g. ppt_plan_chat, ppt_outline)")
+    parser.add_argument("--mode", default=None, help="session_mode (e.g. data_analysis)")
     parser.add_argument("--prompt", default="你好，简单介绍一下你自己", help="prompt text")
     parser.add_argument("--timeout", type=int, default=120, help="max wait seconds for response")
     args = parser.parse_args()

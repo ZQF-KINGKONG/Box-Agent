@@ -89,12 +89,13 @@ If `html-templates` is unavailable in this session, fall back to authoring the d
 
 1. `.slide` must be exactly `1920px × 1080px` (see §0 rule 7 — do **not** pass `--width/--height` to the scripts).
 2. Leave 16-24px text slack to reduce PowerPoint wrap drift.
-3. Use relative asset paths.
-4. Do not inline large images as data URLs.
-5. Every slide must record an explicit image decision in `assets/generated/manifest.json`; covers, dividers, posters, campaign/launch/vision pages must use `generate` via the `generate_image` tool unless the user opts out.
-6. Keep page numbers on non-cover slides consistent with slide order.
-7. Read `references/html-first.md` and `references/html-editable.md`.
-8. Keep image generation rules in `references/image-assets.md`.
+3. For top/middle/bottom layouts, center the main content group in the available middle area. Do not build slides by stacking blocks from the top with repeated `margin-top`; compute the content group's height and balance top/bottom whitespace with flex/grid alignment or explicit `top` values.
+4. Use relative asset paths.
+5. Do not inline large images as data URLs.
+6. Every slide must record an explicit image decision in `assets/generated/manifest.json`; covers, dividers, posters, campaign/launch/vision pages must use `generate` via the `generate_image` tool unless the user opts out.
+7. Keep page numbers on non-cover slides consistent with slide order.
+8. Read `references/html-first.md` and `references/html-editable.md`.
+9. Keep image generation rules in `references/image-assets.md`.
 
 ### 3.2 Visual effects scope (decoration vs text-bearing)
 

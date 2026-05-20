@@ -426,6 +426,8 @@ class MemoryManager:
         entry whose content matched at least one returned line.
         """
         query = _sanitize_auto_match_query(query)
+        if _is_title_generation_query(query):
+            return []
         entries = self._read_context_entries()
         if not query or not entries:
             return []
@@ -838,6 +840,124 @@ class MemoryManager:
             self._write_context_entries(keep)
         return counts
 
+    # ── LLM-drafted promotion plan ──────────────────────────────
+
+    async def plan_promotion(
+        self,
+        candidates: list[ContextEntry],
+        llm,
+    ) -> "MemoryPromotionPlan | None":
+        """Ask the LLM to draft a single core rewrite consuming *candidates*.
+
+        Returns ``None`` if:
+        - the LLM call raises,
+        - the response is not parseable JSON,
+        - the proposed ``new_core`` shrinks the current core by >50% (a
+          safety bound — promotion should grow or refine core, never gut it),
+        - the planner is given no candidates.
+
+        ``consumed_entry_ids`` in the returned plan is filtered to only
+        contain ids actually present in *candidates*, so even a hallucinated
+        id list can't delete unrelated entries on apply.
+        """
+        from .events import MemoryPromotionPlan
+
+        if not candidates:
+            return None
+
+        current_core = self.read_core()
+        candidate_ids = {e.id for e in candidates}
+
+        other_entries = [
+            e for e in self._read_context_entries() if e.id not in candidate_ids
+        ]
+        other_context = "\n".join(
+            f"{e.id}: {e.content.strip()}" for e in other_entries
+        )
+        candidates_block = "\n".join(
+            f"{e.id} (hits={e.hits}, confidence={e.confidence}):\n{e.content.strip()}"
+            for e in candidates
+        )
+
+        user_prompt = _PROMOTION_PLAN_USER_PROMPT.format(
+            current_core=current_core or "(empty)",
+            candidates=candidates_block,
+            other_context=other_context or "(none)",
+        )
+
+        try:
+            response = await llm.generate(
+                messages=[
+                    {"role": "system", "content": _PROMOTION_PLAN_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                tools=[],
+                thinking_enabled=False,
+            )
+        except Exception as exc:  # noqa: BLE001 — planner is best-effort
+            logger.warning("plan_promotion: LLM call failed: %s", exc)
+            return None
+
+        raw = getattr(response, "content", "") or ""
+        try:
+            data = json.loads(_strip_json_fences(raw))
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning("plan_promotion: bad JSON from LLM: %s", exc)
+            return None
+
+        new_core = str(data.get("new_core", "")).strip()
+        rationale = str(data.get("rationale", "")).strip()
+        raw_ids = data.get("consumed_entry_ids", []) or []
+        if not isinstance(raw_ids, list):
+            return None
+        consumed_ids = tuple(str(x) for x in raw_ids if str(x) in candidate_ids)
+        if not consumed_ids or not new_core:
+            return None
+
+        # Safety: refuse plans that gut more than half of the current core.
+        if current_core:
+            if len(new_core) < len(current_core) * 0.5:
+                logger.warning(
+                    "plan_promotion: rejecting plan that shrinks core by >50%% "
+                    "(%d -> %d chars)",
+                    len(current_core), len(new_core),
+                )
+                return None
+
+        return MemoryPromotionPlan(
+            current_core=current_core,
+            new_core=new_core,
+            consumed_entry_ids=consumed_ids,
+            rationale=rationale,
+        )
+
+    def apply_promotion_plan(self, plan: "MemoryPromotionPlan") -> dict[str, int]:
+        """Apply *plan*: overwrite MEMORY.md, drop consumed CONTEXT entries.
+
+        Returns ``{"applied": 1, "consumed": N}``.
+        """
+        self.write_core(plan.new_core)
+        consumed_set = set(plan.consumed_entry_ids)
+        entries = self._read_context_entries()
+        keep = [e for e in entries if e.id not in consumed_set]
+        removed = len(entries) - len(keep)
+        if removed:
+            self._write_context_entries(keep)
+        return {"applied": 1, "consumed": removed}
+
+    def reject_promotion_plan(self, plan: "MemoryPromotionPlan") -> dict[str, int]:
+        """Mark every consumed candidate ``core_status="rejected"`` (no core change)."""
+        consumed_set = set(plan.consumed_entry_ids)
+        entries = self._read_context_entries()
+        rejected = 0
+        for e in entries:
+            if e.id in consumed_set and e.core_status != "rejected":
+                e.core_status = "rejected"
+                rejected += 1
+        if rejected:
+            self._write_context_entries(entries)
+        return {"rejected": rejected}
+
 
 # ── Auto Memory Extraction ────────────────────────────────────────
 
@@ -906,6 +1026,50 @@ Output ONLY valid JSON (no markdown fences):
 ]}}"""
 
 
+_PROMOTION_PLAN_SYSTEM_PROMPT = (
+    "You are a memory curator promoting hot context-memory entries into core "
+    "(MEMORY.md). Core is always injected into the system prompt of every "
+    "session, so it must stay terse, deduplicated, and high-signal."
+)
+
+_PROMOTION_PLAN_USER_PROMPT = """\
+A few context-memory entries have been accessed often enough to be candidates
+for promotion into core. Decide how to integrate them.
+
+Current core memory (MEMORY.md — your new_core will REPLACE this entirely):
+{current_core}
+
+Promotion candidates (each may be merged with existing core lines, summarized
+with related context, or kept as-is):
+{candidates}
+
+Other context-memory entries (DO NOT remove these from CONTEXT.md, but you may
+summarize-and-fold any that are tightly related into core — list those ids
+under consumed_entry_ids too):
+{other_context}
+
+Rules:
+1. Output the FULL replacement core in `new_core` — preserve every existing
+   useful line that you do not explicitly intend to remove or fold.
+2. If a candidate refines or extends an existing core line, merge them — don't
+   leave both.
+3. If multiple candidates plus a related context entry describe one fact, fold
+   them into a single core line.
+4. Every id in `consumed_entry_ids` will be DELETED from CONTEXT.md on apply.
+   Include every candidate id you have folded into new_core, plus any related
+   context entries you also folded.
+5. Never shrink core by more than half — additions and refinements only.
+6. Keep core bullets one-line, lowercase-y prose, no headings unless already
+   present.
+
+Output ONLY valid JSON (no markdown fences):
+{{
+  "new_core": "<full replacement MEMORY.md text>",
+  "consumed_entry_ids": ["ctx_...", "ctx_..."],
+  "rationale": "<1-2 sentence summary of what changed and why>"
+}}"""
+
+
 def _strip_json_fences(text: str) -> str:
     """Strip optional markdown fences around model JSON."""
     text = text.strip()
@@ -932,6 +1096,35 @@ def _extract_match_terms(text: str) -> list[str]:
                     terms.add(segment[idx:idx + size])
 
     return sorted(terms, key=lambda term: (-len(term), term))
+
+
+_TITLE_GENERATION_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"为(这段|该|此)?(对话|会话|聊天)\s*(提炼|生成|起|拟|取|命名|总结)"),
+    re.compile(r"(对话|会话|聊天)\s*(标题|名称)\s*(提炼|生成|总结|是)"),
+    re.compile(r"(提炼|生成|拟定|起)\s*一?个?\s*(对话|会话|聊天)?\s*标题"),
+    re.compile(r"summari[sz]e\s+(this|the)\s+(conversation|chat|session)\s+(into|as)\s+a\s+title", re.IGNORECASE),
+    re.compile(r"generate\s+a\s+(short\s+)?title", re.IGNORECASE),
+)
+
+_INTERROGATIVE_MARKERS: tuple[str, ...] = (
+    "怎么", "如何", "什么", "为什么", "为何", "?", "？", "how", "what", "why",
+)
+
+
+def _is_title_generation_query(query: str) -> bool:
+    """True if *query* looks like a host title-generation prompt (not a user question).
+
+    Title-generation prompts are injected by the host (e.g. "请为这段对话
+    提炼一个简短标题") and must not bump context-memory hit counts.  But a
+    legitimate user question about titles ("会话标题怎么提炼") should still
+    flow through auto-match, so we require no interrogative marker.
+    """
+    if not query:
+        return False
+    lower = query.lower()
+    if any(marker in lower for marker in _INTERROGATIVE_MARKERS):
+        return False
+    return any(p.search(query) for p in _TITLE_GENERATION_PATTERNS)
 
 
 def _sanitize_auto_match_query(query: str) -> str:

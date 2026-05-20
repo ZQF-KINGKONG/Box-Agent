@@ -884,6 +884,31 @@ async def run_agent_loop(
             )
         )
 
+    async def _build_proposal_event_with_plan() -> MemoryProposalEvent | None:
+        """Same as ``_build_proposal_event`` but also asks the LLM to draft a
+        single core rewrite consuming the hot candidates.  On any planner
+        failure, falls back to the legacy per-candidate proposal (plan=None).
+        """
+        event = _build_proposal_event()
+        if event is None:
+            return None
+        wanted = {c.entry_id for c in event.candidates}
+        try:
+            entries = [
+                e for e in memory_manager._read_context_entries() if e.id in wanted
+            ]
+        except Exception:
+            return event
+        if not entries:
+            return event
+        try:
+            plan = await memory_manager.plan_promotion(entries, llm)
+        except Exception:
+            return event
+        if plan is None:
+            return event
+        return MemoryProposalEvent(candidates=event.candidates, plan=plan)
+
     # Loop-guard state: detect when the model emits the same tool_call
     # signature with empty arguments two turns in a row. With a healthy LLM
     # this should never happen — it's the fingerprint of a relay/provider
@@ -1090,7 +1115,7 @@ async def run_agent_loop(
             if memory_extractor:
                 asyncio.create_task(memory_extractor.maybe_extract(messages, "loop_end"))
             yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
-            proposal = _build_proposal_event()
+            proposal = await _build_proposal_event_with_plan()
             if proposal is not None:
                 yield proposal
             yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=response.content)
@@ -1499,7 +1524,7 @@ async def run_agent_loop(
         asyncio.create_task(memory_extractor.maybe_extract(messages, "loop_end"))
     if hook_mgr.hooks:
         await hook_mgr.fire_done(stop_reason=StopReason.MAX_STEPS, final_content=msg)
-    proposal = _build_proposal_event()
+    proposal = await _build_proposal_event_with_plan()
     if proposal is not None:
         yield proposal
     yield DoneEvent(stop_reason=StopReason.MAX_STEPS, final_content=msg)

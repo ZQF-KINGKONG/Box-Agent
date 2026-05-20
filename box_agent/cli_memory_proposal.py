@@ -1,10 +1,9 @@
 """CLI handler for MemoryProposalEvent.
 
 Renders proposed CONTEXT.md → MEMORY.md (core) promotions in the
-terminal and prompts the user per-candidate to pin / skip / reject.
-Pinning promotes the entry to MEMORY.md permanently; rejecting marks
-it ``core_status="rejected"`` so it is never proposed again; skipping
-relies on the cooldown bumped at emit time.
+terminal.  When the event carries an LLM-drafted plan, the user gets one
+diff to apply/reject in a single keystroke; otherwise we fall back to
+the legacy per-candidate pin/skip/reject flow.
 
 Mirrors the termios pattern from ``cli_permissions.py`` to avoid
 prompt_toolkit interference.
@@ -13,6 +12,7 @@ prompt_toolkit interference.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import sys
 from typing import Any
 
@@ -32,7 +32,9 @@ class Colors:
 _VALID_CHOICES = {"p", "pin", "1", "s", "skip", "2", "", "r", "reject", "3"}
 _PIN_KEYS = {"p", "pin", "1"}
 _REJECT_KEYS = {"r", "reject", "3"}
-# anything else (including empty / skip / 2) is a skip
+# Plan-mode keys
+_APPLY_KEYS = {"a", "apply", "1", "y", "yes"}
+_PLAN_REJECT_KEYS = {"r", "reject", "2", "n", "no"}
 
 
 def _read_with_echo(prompt_text: str) -> str:
@@ -60,13 +62,96 @@ async def _prompt(prompt_text: str) -> str:
         return ""
 
 
+def _render_diff(old: str, new: str, max_lines: int = 40) -> str:
+    """Colored unified diff for terminal display."""
+    diff_lines = list(
+        difflib.unified_diff(
+            old.splitlines(),
+            new.splitlines(),
+            fromfile="MEMORY.md (current)",
+            tofile="MEMORY.md (proposed)",
+            lineterm="",
+            n=2,
+        )
+    )
+    if not diff_lines:
+        return f"{Colors.DIM}(no changes){Colors.RESET}"
+
+    truncated = False
+    if len(diff_lines) > max_lines:
+        diff_lines = diff_lines[:max_lines]
+        truncated = True
+
+    out: list[str] = []
+    for line in diff_lines:
+        if line.startswith("+++") or line.startswith("---"):
+            out.append(f"{Colors.BOLD}{line}{Colors.RESET}")
+        elif line.startswith("+"):
+            out.append(f"{Colors.GREEN}{line}{Colors.RESET}")
+        elif line.startswith("-"):
+            out.append(f"{Colors.RED}{line}{Colors.RESET}")
+        elif line.startswith("@@"):
+            out.append(f"{Colors.CYAN}{line}{Colors.RESET}")
+        else:
+            out.append(line)
+    if truncated:
+        out.append(f"{Colors.DIM}… (diff truncated){Colors.RESET}")
+    return "\n".join(out)
+
+
 class CLIMemoryProposalNegotiator:
-    """Run the per-candidate pin/skip/reject prompt and persist decisions."""
+    """Dispatch to plan-mode or legacy per-candidate prompt and persist decisions."""
 
     def __init__(self, memory_manager: Any) -> None:
         self._mgr = memory_manager
 
     async def negotiate(self, event: MemoryProposalEvent) -> None:
+        if event.plan is not None:
+            await self._negotiate_plan(event)
+        else:
+            await self._negotiate_legacy(event)
+
+    async def _negotiate_plan(self, event: MemoryProposalEvent) -> None:
+        plan = event.plan
+        assert plan is not None
+
+        print()
+        print(f"{Colors.BOLD}🧠 记忆升级建议 (LLM 已起草){Colors.RESET}")
+        if plan.rationale:
+            print(f"{Colors.DIM}{plan.rationale}{Colors.RESET}")
+        print(
+            f"{Colors.DIM}  将合并 {len(plan.consumed_entry_ids)} 条 context "
+            f"到 MEMORY.md, 应用后这些条目从 CONTEXT.md 删除。{Colors.RESET}"
+        )
+        print()
+        print(_render_diff(plan.current_core, plan.new_core))
+        print()
+        print(
+            f"{Colors.DIM}  [1/a/y] apply — 应用此方案   "
+            f"[2/r/n] reject — 拒绝（标记永不再提议）   "
+            f"[回车/s] skip — 暂不{Colors.RESET}"
+        )
+        choice = await _prompt("  选择 [1/2/回车]: ")
+
+        try:
+            if choice in _APPLY_KEYS:
+                counts = self._mgr.apply_promotion_plan(plan)
+                print(
+                    f"{Colors.GREEN}✓ 已应用 — consumed {counts.get('consumed', 0)} "
+                    f"条 context{Colors.RESET}"
+                )
+            elif choice in _PLAN_REJECT_KEYS:
+                counts = self._mgr.reject_promotion_plan(plan)
+                print(
+                    f"{Colors.RED}✗ 已拒绝 — {counts.get('rejected', 0)} "
+                    f"条永不再提议{Colors.RESET}"
+                )
+            else:
+                print(f"{Colors.YELLOW}↷ 暂不（下次冷却到期后再提议）{Colors.RESET}")
+        except Exception as exc:
+            print(f"{Colors.RED}记忆升级写入失败: {exc}{Colors.RESET}")
+
+    async def _negotiate_legacy(self, event: MemoryProposalEvent) -> None:
         candidates = event.candidates
         if not candidates:
             return

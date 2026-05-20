@@ -769,15 +769,83 @@ class BoxACPAgent:
     def _memory_proposal_apply(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply user decisions to promotion candidates.
 
-        Request: ``{sessionId, decisions: {id: "pin"|"skip"|"reject"}}``.
-        Returns counts plus the full updated ``MEMORY.md`` text so the
-        host can refresh its core editor without an extra fetch.
+        Two schemas are accepted:
+
+        **Legacy (per-candidate)** —
+        ``{sessionId, decisions: {id: "pin"|"skip"|"reject"}}``.
+        Returns ``{pinned, rejected, skipped, core}``.
+
+        **Plan-mode (delayed decision)** —
+        ``{sessionId, plan: {currentCore, newCore, consumedEntryIds,
+        rationale}, decision: "apply"|"reject"|"skip"}``.
+        Returns ``{applied|rejected|skipped: int, consumed?: int, core}``.
+        ``sessionId`` may be an empty string for orphan applies (after
+        the originating session has closed) — the server-level memory
+        manager is shared across sessions.
         """
         session_id = params.get("sessionId", "")
         if session_id and session_id not in self._sessions:
             return {"error": "session_not_found"}
         if self._memory is None:
             return {"error": "memory_unavailable"}
+
+        # ── Plan-mode branch ──────────────────────────────
+        raw_plan = params.get("plan")
+        if isinstance(raw_plan, dict):
+            from ..events import MemoryPromotionPlan
+
+            decision = str(params.get("decision", "")).lower()
+            if decision not in ("apply", "reject", "skip"):
+                return {"error": "invalid_decision"}
+
+            raw_ids = raw_plan.get("consumedEntryIds") or []
+            if not isinstance(raw_ids, list):
+                return {"error": "invalid_plan"}
+            new_core = str(raw_plan.get("newCore", ""))
+            current_core = str(raw_plan.get("currentCore", ""))
+            rationale = str(raw_plan.get("rationale", ""))
+            consumed = tuple(str(x) for x in raw_ids)
+
+            if decision in ("apply", "reject") and not consumed:
+                return {"error": "invalid_plan"}
+            if decision == "apply" and not new_core.strip():
+                return {"error": "invalid_plan"}
+
+            plan = MemoryPromotionPlan(
+                current_core=current_core,
+                new_core=new_core,
+                consumed_entry_ids=consumed,
+                rationale=rationale,
+            )
+
+            if decision == "apply":
+                counts = self._memory.apply_promotion_plan(plan)
+                log.info(
+                    "memory/plan_apply",
+                    session_id=session_id,
+                    consumed=counts.get("consumed", 0),
+                )
+                return {
+                    "applied": counts.get("applied", 1),
+                    "consumed": counts.get("consumed", 0),
+                    "core": self._memory.read_core(),
+                }
+            if decision == "reject":
+                counts = self._memory.reject_promotion_plan(plan)
+                log.info(
+                    "memory/plan_reject",
+                    session_id=session_id,
+                    rejected=counts.get("rejected", 0),
+                )
+                return {
+                    "rejected": counts.get("rejected", 0),
+                    "core": self._memory.read_core(),
+                }
+            # skip: host is just dropping its cache; nothing to do here.
+            log.info("memory/plan_skip", session_id=session_id)
+            return {"skipped": 1, "core": self._memory.read_core()}
+
+        # ── Legacy per-candidate branch ───────────────────
         raw = params.get("decisions") or {}
         if not isinstance(raw, dict):
             return {"error": "invalid_decisions"}
@@ -1221,6 +1289,7 @@ class _MemoryProposalNegotiator:
     """
 
     _VALID_DECISIONS = {"pin", "skip", "reject"}
+    _VALID_PLAN_DECISIONS = {"apply", "reject", "skip"}
 
     def __init__(
         self,
@@ -1237,7 +1306,8 @@ class _MemoryProposalNegotiator:
         if not candidates:
             return
 
-        payload = {
+        plan = getattr(event, "plan", None)
+        payload: dict[str, Any] = {
             "sessionId": self._session_id,
             "proposals": [
                 {
@@ -1249,10 +1319,18 @@ class _MemoryProposalNegotiator:
                 for c in candidates
             ],
         }
+        if plan is not None:
+            payload["plan"] = {
+                "currentCore": plan.current_core,
+                "newCore": plan.new_core,
+                "consumedEntryIds": list(plan.consumed_entry_ids),
+                "rationale": plan.rationale,
+            }
 
         log.info(
             "memory/proposal_request",
             count=len(candidates),
+            has_plan=plan is not None,
             message="Sending memory promotion proposals to host",
         )
 
@@ -1278,6 +1356,27 @@ class _MemoryProposalNegotiator:
 
         if not isinstance(response, dict):
             return
+
+        # Plan-mode response: {"decision": "apply"|"reject"|"skip"}
+        if plan is not None and "decision" in response:
+            decision_raw = response.get("decision")
+            decision = decision_raw.lower() if isinstance(decision_raw, str) else ""
+            if decision not in self._VALID_PLAN_DECISIONS:
+                return
+            try:
+                if decision == "apply":
+                    counts = self._mgr.apply_promotion_plan(plan)
+                    log.info("memory/plan_applied", consumed=counts.get("consumed", 0))
+                elif decision == "reject":
+                    counts = self._mgr.reject_promotion_plan(plan)
+                    log.info("memory/plan_rejected", rejected=counts.get("rejected", 0))
+                else:
+                    log.info("memory/plan_skipped")
+            except Exception as exc:
+                log.warn("memory/plan_apply_error", error=str(exc))
+            return
+
+        # Legacy per-candidate response
         raw_decisions = response.get("decisions") or {}
         if not isinstance(raw_decisions, dict):
             return

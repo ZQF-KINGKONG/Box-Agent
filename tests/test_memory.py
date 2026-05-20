@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -402,3 +403,176 @@ def test_append_context_threshold_zero_disables_distinct_lines(memory_dir):
     mgr.append_context("- aaa bbb ccc")
     mgr.append_context("- xxx yyy zzz")
     assert len(mgr._read_context_entries()) == 2
+
+
+# ── Title-generation filter ──────────────────────────────────
+
+
+def test_auto_match_context_ignores_title_generation_prompts(mgr: MemoryManager):
+    """Host-injected title-generation prompts must not bump hits."""
+    from box_agent.memory import _new_entry, write_context_file
+
+    entry = _new_entry("- 科技公司入职培训PPT 已完成 render 导出")
+    write_context_file(mgr.context_file, [entry])
+
+    # Host prompt — has no interrogative marker, matches title-gen pattern.
+    assert mgr.auto_match_context("请为这段对话提炼一个简短标题：科技公司入职培训") == []
+
+    survivor = mgr._read_context_entries()[0]
+    assert survivor.hits == 0
+
+
+def test_auto_match_context_user_question_about_title_still_matches(mgr: MemoryManager):
+    """A user question about title-related memory must not be classified as a
+    host title-generation prompt — the interrogative-marker guard prevents the
+    title-gen pattern matcher from kicking in even when the prompt mentions
+    titles."""
+    from box_agent.memory import _is_title_generation_query
+
+    # Host prompts (no interrogative) — classified as title-gen.
+    assert _is_title_generation_query("请为这段对话提炼一个简短标题")
+    assert _is_title_generation_query("为会话生成标题：xxx")
+
+    # User questions about titles — interrogative present, not classified.
+    assert not _is_title_generation_query("会话标题怎么提炼")
+    assert not _is_title_generation_query("为什么这个会话要提炼标题？")
+    assert not _is_title_generation_query("how do I generate a title for this chat?")
+
+
+# ── LLM promotion plan ──────────────────────────────────────
+
+
+def _make_planner_llm(payload: dict):
+    llm = MagicMock()
+    response = MagicMock()
+    response.content = json.dumps(payload)
+    llm.generate = AsyncMock(return_value=response)
+    return llm
+
+
+async def test_plan_promotion_returns_plan_on_valid_llm_output(mgr: MemoryManager):
+    from box_agent.memory import _new_entry, write_context_file
+
+    mgr.write_core("- user prefers Chinese\n- workspace: /tmp/x")
+    a = _new_entry("- user likes diagrams")
+    b = _new_entry("- weekly cadence Tuesday")
+    write_context_file(mgr.context_file, [a, b])
+
+    llm = _make_planner_llm(
+        {
+            "new_core": (
+                "- user prefers Chinese\n- workspace: /tmp/x\n"
+                "- user likes diagrams\n- weekly cadence Tuesday"
+            ),
+            "consumed_entry_ids": [a.id, b.id],
+            "rationale": "fold both hot entries",
+        }
+    )
+
+    plan = await mgr.plan_promotion([a, b], llm)
+    assert plan is not None
+    assert "user likes diagrams" in plan.new_core
+    assert set(plan.consumed_entry_ids) == {a.id, b.id}
+    assert llm.generate.await_count == 1
+
+
+async def test_plan_promotion_returns_none_on_bad_json(mgr: MemoryManager):
+    from box_agent.memory import _new_entry, write_context_file
+
+    a = _new_entry("- candidate")
+    write_context_file(mgr.context_file, [a])
+
+    llm = MagicMock()
+    response = MagicMock()
+    response.content = "definitely not json"
+    llm.generate = AsyncMock(return_value=response)
+
+    assert await mgr.plan_promotion([a], llm) is None
+
+
+async def test_plan_promotion_rejects_oversized_core_shrink(mgr: MemoryManager):
+    from box_agent.memory import _new_entry, write_context_file
+
+    mgr.write_core("- " + "lorem ipsum dolor sit amet " * 20)
+    a = _new_entry("- candidate")
+    write_context_file(mgr.context_file, [a])
+
+    llm = _make_planner_llm(
+        {
+            "new_core": "- tiny",
+            "consumed_entry_ids": [a.id],
+            "rationale": "gutting core",
+        }
+    )
+
+    assert await mgr.plan_promotion([a], llm) is None
+
+
+async def test_plan_promotion_filters_non_candidate_ids(mgr: MemoryManager):
+    from box_agent.memory import _new_entry, write_context_file
+
+    a = _new_entry("- candidate")
+    other = _new_entry("- unrelated")
+    write_context_file(mgr.context_file, [a, other])
+
+    llm = _make_planner_llm(
+        {
+            "new_core": "- merged content here that grows core",
+            "consumed_entry_ids": [a.id, other.id, "ctx_fake_id"],
+            "rationale": "ok",
+        }
+    )
+
+    plan = await mgr.plan_promotion([a], llm)
+    assert plan is not None
+    # other.id and fake id must be filtered out — only candidate ids allowed
+    assert plan.consumed_entry_ids == (a.id,)
+
+
+def test_apply_promotion_plan_overwrites_core_and_consumes_entries(mgr: MemoryManager):
+    from box_agent.events import MemoryPromotionPlan
+    from box_agent.memory import _new_entry, write_context_file
+
+    a = _new_entry("- A")
+    b = _new_entry("- B")
+    c = _new_entry("- C")
+    write_context_file(mgr.context_file, [a, b, c])
+    mgr.write_core("- old core")
+
+    plan = MemoryPromotionPlan(
+        current_core="- old core",
+        new_core="- new core\n- A folded in",
+        consumed_entry_ids=(a.id, b.id),
+        rationale="test",
+    )
+
+    result = mgr.apply_promotion_plan(plan)
+    assert result == {"applied": 1, "consumed": 2}
+    assert mgr.read_core() == "- new core\n- A folded in"
+    remaining = mgr._read_context_entries()
+    assert [e.id for e in remaining] == [c.id]
+
+
+def test_reject_promotion_plan_marks_candidates_rejected(mgr: MemoryManager):
+    from box_agent.events import MemoryPromotionPlan
+    from box_agent.memory import _new_entry, write_context_file
+
+    a = _new_entry("- A")
+    b = _new_entry("- B")
+    write_context_file(mgr.context_file, [a, b])
+    mgr.write_core("- core stays")
+
+    plan = MemoryPromotionPlan(
+        current_core="- core stays",
+        new_core="- ignored",
+        consumed_entry_ids=(a.id,),
+        rationale="test",
+    )
+
+    result = mgr.reject_promotion_plan(plan)
+    assert result == {"rejected": 1}
+    # core untouched
+    assert mgr.read_core() == "- core stays"
+    entries = {e.id: e for e in mgr._read_context_entries()}
+    assert entries[a.id].core_status == "rejected"
+    assert entries[b.id].core_status != "rejected"

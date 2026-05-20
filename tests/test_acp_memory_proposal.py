@@ -164,3 +164,157 @@ async def test_memory_proposal_apply_rejects_malformed_payload(tmp_path: Path):
         "memory_proposal_apply", {"sessionId": "", "decisions": "not-a-dict"}
     )
     assert result == {"error": "invalid_decisions"}
+
+
+# ── memory_proposal_apply — plan mode (delayed decision) ───────
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_apply_plan_apply_overwrites_core(tmp_path: Path):
+    agent, mgr = _make_agent(tmp_path)
+    a = _entry("- A", hits=10)
+    b = _entry("- B", hits=10)
+    write_context_file(mgr.context_file, [a, b])
+    mgr.write_core("- old core")
+
+    result = await agent.extMethod(
+        "memory_proposal_apply",
+        {
+            "sessionId": "",
+            "plan": {
+                "currentCore": "- old core",
+                "newCore": "- new core\n- A folded\n- B folded",
+                "consumedEntryIds": [a.id, b.id],
+                "rationale": "fold both",
+            },
+            "decision": "apply",
+        },
+    )
+
+    assert result["applied"] == 1
+    assert result["consumed"] == 2
+    assert result["core"] == "- new core\n- A folded\n- B folded"
+    assert mgr.read_core() == "- new core\n- A folded\n- B folded"
+    assert mgr._read_context_entries() == []
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_apply_plan_reject_marks_candidates(tmp_path: Path):
+    agent, mgr = _make_agent(tmp_path)
+    a = _entry("- A", hits=10)
+    b = _entry("- B", hits=10)
+    write_context_file(mgr.context_file, [a, b])
+    mgr.write_core("- untouched core")
+
+    result = await agent.extMethod(
+        "memory_proposal_apply",
+        {
+            "sessionId": "",
+            "plan": {
+                "currentCore": "- untouched core",
+                "newCore": "- ignored",
+                "consumedEntryIds": [a.id],
+                "rationale": "user says no",
+            },
+            "decision": "reject",
+        },
+    )
+
+    assert result["rejected"] == 1
+    # core unchanged
+    assert result["core"] == "- untouched core"
+    assert mgr.read_core() == "- untouched core"
+    by_id = {e.id: e for e in mgr._read_context_entries()}
+    assert by_id[a.id].core_status == "rejected"
+    assert by_id[b.id].core_status == "none"
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_apply_plan_skip_is_noop(tmp_path: Path):
+    agent, mgr = _make_agent(tmp_path)
+    a = _entry("- A", hits=10)
+    write_context_file(mgr.context_file, [a])
+    mgr.write_core("- core stays")
+    before = {e.id: e.core_status for e in mgr._read_context_entries()}
+
+    result = await agent.extMethod(
+        "memory_proposal_apply",
+        {
+            "sessionId": "",
+            "plan": {
+                "currentCore": "- core stays",
+                "newCore": "- whatever",
+                "consumedEntryIds": [a.id],
+                "rationale": "later",
+            },
+            "decision": "skip",
+        },
+    )
+
+    assert result == {"skipped": 1, "core": "- core stays"}
+    after = {e.id: e.core_status for e in mgr._read_context_entries()}
+    assert before == after
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_apply_plan_invalid_decision(tmp_path: Path):
+    agent, mgr = _make_agent(tmp_path)
+    a = _entry("- A", hits=10)
+    write_context_file(mgr.context_file, [a])
+
+    result = await agent.extMethod(
+        "memory_proposal_apply",
+        {
+            "sessionId": "",
+            "plan": {
+                "currentCore": "",
+                "newCore": "- whatever",
+                "consumedEntryIds": [a.id],
+                "rationale": "",
+            },
+            "decision": "bogus",
+        },
+    )
+
+    assert result == {"error": "invalid_decision"}
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_apply_plan_missing_consumed_ids(tmp_path: Path):
+    agent, _ = _make_agent(tmp_path)
+    result = await agent.extMethod(
+        "memory_proposal_apply",
+        {
+            "sessionId": "",
+            "plan": {
+                "currentCore": "- x",
+                "newCore": "- y",
+                "consumedEntryIds": [],
+                "rationale": "",
+            },
+            "decision": "apply",
+        },
+    )
+    assert result == {"error": "invalid_plan"}
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_apply_plan_apply_with_empty_new_core(tmp_path: Path):
+    agent, mgr = _make_agent(tmp_path)
+    a = _entry("- A", hits=10)
+    write_context_file(mgr.context_file, [a])
+
+    result = await agent.extMethod(
+        "memory_proposal_apply",
+        {
+            "sessionId": "",
+            "plan": {
+                "currentCore": "- x",
+                "newCore": "   ",
+                "consumedEntryIds": [a.id],
+                "rationale": "",
+            },
+            "decision": "apply",
+        },
+    )
+    assert result == {"error": "invalid_plan"}

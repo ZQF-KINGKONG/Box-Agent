@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import mimetypes
 import re
 import traceback
@@ -50,6 +51,8 @@ from .events import (
 from .hooks import HookManager
 from .logger import AgentLogger
 from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
+
+_log = logging.getLogger(__name__)
 from .schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
 from .tools.base import EventEmittingTool, Tool, ToolResult
 
@@ -897,15 +900,31 @@ async def run_agent_loop(
             entries = [
                 e for e in memory_manager._read_context_entries() if e.id in wanted
             ]
-        except Exception:
+        except Exception as exc:
+            _log.warning(
+                "proposal_with_plan: failed to read context entries, falling back to legacy event: %s",
+                exc,
+            )
             return event
         if not entries:
+            _log.warning(
+                "proposal_with_plan: no entries match candidate ids %s, falling back to legacy event",
+                sorted(wanted),
+            )
             return event
         try:
             plan = await memory_manager.plan_promotion(entries, llm)
-        except Exception:
+        except Exception as exc:
+            _log.warning(
+                "proposal_with_plan: plan_promotion raised, falling back to legacy event: %s",
+                exc,
+            )
             return event
         if plan is None:
+            _log.warning(
+                "proposal_with_plan: plan_promotion returned None (see prior warnings), falling back to legacy event for %d candidates",
+                len(entries),
+            )
             return event
         return MemoryProposalEvent(candidates=event.candidates, plan=plan)
 

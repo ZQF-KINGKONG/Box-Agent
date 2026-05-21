@@ -720,17 +720,23 @@ class BoxACPAgent:
             log.info("skills/list", count=len(skills))
             return {"skills": skills}
         if method == "memory_proposal_list":
-            return self._memory_proposal_list(params)
+            return await self._memory_proposal_list(params)
         if method == "memory_proposal_apply":
             return self._memory_proposal_apply(params)
         return {"error": f"unknown_method: {method}"}
 
-    def _memory_proposal_list(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def _memory_proposal_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return CONTEXT.md entries eligible for promotion to core.
 
-        Request: ``{sessionId, includeCooldown?: bool}``. When
-        ``includeCooldown`` is true, cooldown filtering is bypassed
-        (mirrors the CLI ``/memory review`` behaviour).
+        Request: ``{sessionId, includeCooldown?: bool, includePlan?: bool}``.
+        When ``includeCooldown`` is true, cooldown filtering is bypassed
+        (mirrors the CLI ``/memory review`` behaviour). When ``includePlan``
+        is true and there is at least one eligible candidate, the response
+        also carries a ``plan`` field shaped like the reverse-RPC push
+        payload — letting the host's memory review UI render the plan card
+        synchronously without waiting for an auto-push. The plan call is
+        best-effort: any planner failure (LLM error, bad JSON, oversized
+        shrink) is logged and yields a plan-less response.
         """
         session_id = params.get("sessionId", "")
         if session_id and session_id not in self._sessions:
@@ -758,13 +764,58 @@ class BoxACPAgent:
             }
             for e in entries
         ]
+
+        plan_payload: dict[str, Any] | None = None
+        include_plan = bool(params.get("includePlan"))
+        if include_plan and entries:
+            wanted = {e.id for e in entries}
+            try:
+                full_entries = [
+                    e for e in self._memory._read_context_entries() if e.id in wanted
+                ]
+            except Exception as exc:
+                log.warn(
+                    "memory/proposal_list_plan_skipped",
+                    session_id=session_id,
+                    reason=f"read_context_entries failed: {exc}",
+                )
+                full_entries = []
+            if full_entries:
+                try:
+                    plan = await self._memory.plan_promotion(full_entries, self._llm)
+                except Exception as exc:
+                    log.warn(
+                        "memory/proposal_list_plan_skipped",
+                        session_id=session_id,
+                        reason=f"plan_promotion raised: {exc}",
+                    )
+                    plan = None
+                if plan is not None:
+                    plan_payload = {
+                        "currentCore": plan.current_core,
+                        "newCore": plan.new_core,
+                        "consumedEntryIds": list(plan.consumed_entry_ids),
+                        "rationale": plan.rationale,
+                    }
+                else:
+                    log.info(
+                        "memory/proposal_list_plan_skipped",
+                        session_id=session_id,
+                        reason="plan_promotion returned None",
+                    )
+
         log.info(
             "memory/proposal_list",
             session_id=session_id,
             count=len(candidates),
             include_cooldown=bool(params.get("includeCooldown")),
+            include_plan=include_plan,
+            has_plan=plan_payload is not None,
         )
-        return {"candidates": candidates}
+        response: dict[str, Any] = {"candidates": candidates}
+        if plan_payload is not None:
+            response["plan"] = plan_payload
+        return response
 
     def _memory_proposal_apply(self, params: dict[str, Any]) -> dict[str, Any]:
         """Apply user decisions to promotion candidates.

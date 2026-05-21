@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "box_agent_version": "0.8.44",
-  "generated_at": "2026-05-20T19:53:48Z",
+  "box_agent_version": "0.8.45",
+  "generated_at": "2026-05-21T05:46:49Z",
   "skills": [
     {
       "name": "artifacts-builder",
@@ -38,6 +38,10 @@
     {
       "name": "memory-guide",
       "path": "memory-guide/SKILL.md"
+    },
+    {
+      "name": "skill-creator",
+      "path": "skill-creator/SKILL.md"
     },
     {
       "name": "theme-factory",

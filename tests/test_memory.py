@@ -576,3 +576,128 @@ def test_reject_promotion_plan_marks_candidates_rejected(mgr: MemoryManager):
     entries = {e.id: e for e in mgr._read_context_entries()}
     assert entries[a.id].core_status == "rejected"
     assert entries[b.id].core_status != "rejected"
+
+
+# ── Self-citation filter ─────────────────────────────────────
+
+
+def test_auto_match_context_drops_self_citation(mgr: MemoryManager):
+    """A memory line that is essentially the user's own prompt must not surface
+    as 'referenced memory' — that's a self-echo bug."""
+    from box_agent.memory import _new_entry, write_context_file
+
+    user_prompt = "我希望系统支持 PPT 自动生成功能，按需调整页面样式和动画效果"
+    # Extractor distilled the user's own prompt into context — near-duplicate.
+    echoed = _new_entry("- 用户希望系统支持PPT自动生成功能，按需调整页面样式和动画效果")
+    write_context_file(mgr.context_file, [echoed])
+
+    assert mgr.auto_match_context(user_prompt) == []
+
+
+def test_auto_match_context_keeps_substantive_memory_about_same_topic(mgr: MemoryManager):
+    """Self-cite filter must not be so aggressive that it drops every memory
+    sharing topic phrases with the prompt — only near-duplicates."""
+    from box_agent.memory import _new_entry, write_context_file
+
+    fact = _new_entry(
+        "- 用户偏好：PPT 自动生成的页面样式推荐使用蓝白配色"
+    )
+    write_context_file(mgr.context_file, [fact])
+
+    matches = mgr.auto_match_context("我想配置 PPT 自动生成的页面样式")
+    assert len(matches) == 1
+    assert "蓝白配色" in matches[0]["text"]
+
+
+# ── Containment length guard ─────────────────────────────────
+
+
+def test_score_memory_match_short_containment_not_overweighted(mgr: MemoryManager):
+    """Short query strings must not score 10.0 just because they appear
+    inside a longer memory line."""
+    from box_agent.memory import _extract_match_terms, _score_memory_match
+
+    query = "下载"  # 2 chars — too short for containment to fire
+    q_lower = query.lower()
+    q_terms = _extract_match_terms(q_lower)
+    memory = "- 用户偏好把所有产物打包成 zip 提供下载链接给团队成员".lower()
+
+    score = _score_memory_match(q_lower, q_terms, memory)
+    assert score < 10.0  # containment guard must reject short query
+
+
+def test_score_memory_match_long_containment_still_fires():
+    """Substantial query that appears verbatim in memory does score 10.0."""
+    from box_agent.memory import _extract_match_terms, _score_memory_match
+
+    query = "科技公司入职培训 ppt 做好了吗"
+    q_lower = query.lower()
+    q_terms = _extract_match_terms(q_lower)
+    memory = f"- 用户曾追问『{query}』表示关心交付状态".lower()
+
+    assert _score_memory_match(q_lower, q_terms, memory) == 10.0
+
+
+# ── Noise term blacklist ─────────────────────────────────────
+
+
+def test_extract_match_terms_drops_noise_terms():
+    """Common nouns/wildcards must not appear as match terms."""
+    from box_agent.memory import _extract_match_terms
+
+    terms = set(_extract_match_terms("帮我看看 这个 项目 的 功能 模块"))
+    for noise in ("项目", "功能", "模块", "这个", "帮我看看"):
+        assert noise not in terms
+
+
+def test_extract_match_terms_drops_short_chinese_segments():
+    """Chinese segments shorter than 5 characters are no longer emitted."""
+    from box_agent.memory import _extract_match_terms
+
+    # Only 4-char segment present — should produce zero Chinese terms.
+    assert _extract_match_terms("做好了吗") == []
+
+
+# ── Ranked search ────────────────────────────────────────────
+
+
+def test_search_returns_entries_not_individual_lines(mgr: MemoryManager):
+    """Search returns entire entry content blocks, not just matched lines."""
+    from box_agent.memory import _new_entry, write_context_file
+
+    multi_line = _new_entry("- PPT 模板偏好\n- 标题字号 32pt\n- 正文蓝白配色")
+    other = _new_entry("- 完全无关的事实")
+    write_context_file(mgr.context_file, [multi_line, other])
+
+    results = mgr.search("ppt")
+    assert len(results) == 1
+    # Whole entry content, not just the line that contained "ppt".
+    assert "标题字号" in results[0]
+    assert "蓝白配色" in results[0]
+
+
+def test_search_ranks_by_occurrence_count_then_hits(mgr: MemoryManager):
+    """Entries with more matches rank first; ties break on historical hits."""
+    from box_agent.memory import _new_entry, write_context_file
+
+    many = _new_entry("- report A\n- report B\n- report C")  # 3 occurrences
+    few = _new_entry("- report D only")  # 1 occurrence
+    stale = _new_entry("- nothing here")
+    write_context_file(mgr.context_file, [few, stale, many])
+
+    results = mgr.search("report")
+    assert len(results) == 2
+    # `many` ranks first despite being written last in CONTEXT.md.
+    assert "report A" in results[0]
+    assert "report D only" in results[1]
+
+
+def test_search_caps_results_at_limit(mgr: MemoryManager):
+    """High-frequency keywords must not flood the response."""
+    from box_agent.memory import _new_entry, write_context_file
+
+    entries = [_new_entry(f"- entry {i} mentions report") for i in range(10)]
+    write_context_file(mgr.context_file, entries)
+
+    results = mgr.search("report", limit=3)
+    assert len(results) == 3

@@ -379,12 +379,15 @@ class MemoryManager:
 
     # ── Search ──────────────────────────────────────────────────
 
-    def search(self, query: str) -> list[str]:
+    def search(self, query: str, *, limit: int = 5) -> list[str]:
         """Keyword search across CONTEXT.md entries.
 
-        Returns matched lines (case-insensitive). Side effect: increments
-        ``hits`` and refreshes ``last_used`` on each matched entry, then
-        persists the file. Persistence is synchronous (small file, infrequent).
+        Returns entry contents (deduped across multi-line entries) ranked by
+        occurrence count, with historical ``hits`` as a tiebreak.  Capped at
+        ``limit`` so noisy keywords cannot flood the model.
+
+        Side effect: increments ``hits`` and refreshes ``last_used`` on each
+        matched entry, then persists the file.
         """
         if not query:
             return []
@@ -393,26 +396,25 @@ class MemoryManager:
             return []
 
         query_lower = query.lower()
-        matched: list[str] = []
+        scored: list[tuple[int, int, str]] = []  # (occurrences, hits, content)
         changed = False
         now = _now_iso()
 
         for entry in entries:
-            hit = False
-            for line in entry.content.splitlines():
-                stripped = line.strip()
-                if stripped and query_lower in stripped.lower():
-                    matched.append(line)
-                    hit = True
-            if hit:
-                entry.hits += 1
-                entry.last_used = now
-                changed = True
+            content_lower = entry.content.lower()
+            occurrences = content_lower.count(query_lower)
+            if occurrences == 0:
+                continue
+            scored.append((occurrences, entry.hits, entry.content))
+            entry.hits += 1
+            entry.last_used = now
+            changed = True
 
         if changed:
             self._write_context_entries(entries)
 
-        return matched
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [content for _, _, content in scored[:limit]]
 
     def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
         """Return high-confidence context-memory matches for a user prompt.
@@ -449,8 +451,10 @@ class MemoryManager:
                     continue
                 if _should_skip_auto_match_line(query_lower, text.lower()):
                     continue
+                if _is_self_citation(query, text):
+                    continue
                 score = _score_memory_match(query_lower, query_terms, text.lower())
-                if score >= 2.0:
+                if score >= 3.5:
                     scored.append((score, line_no, text, entry_idx))
 
         scored.sort(key=lambda item: (-item[0], item[1]))
@@ -909,9 +913,22 @@ class MemoryManager:
         rationale = str(data.get("rationale", "")).strip()
         raw_ids = data.get("consumed_entry_ids", []) or []
         if not isinstance(raw_ids, list):
+            logger.warning(
+                "plan_promotion: consumed_entry_ids is not a list (got %s)",
+                type(raw_ids).__name__,
+            )
             return None
         consumed_ids = tuple(str(x) for x in raw_ids if str(x) in candidate_ids)
         if not consumed_ids or not new_core:
+            logger.warning(
+                "plan_promotion: empty plan rejected "
+                "(consumed_ids=%d/%d, new_core_len=%d, raw_ids=%s, candidates=%s)",
+                len(consumed_ids),
+                len(raw_ids),
+                len(new_core),
+                raw_ids,
+                sorted(candidate_ids),
+            )
             return None
 
         # Safety: refuse plans that gut more than half of the current core.
@@ -987,6 +1004,8 @@ Rules:
 3. If info is genuinely new, output an addition.
 4. Do NOT record code details, git operations, file paths, or anything derivable from the codebase.
 5. If there is nothing worth remembering, return empty arrays.
+6. Distill to abstract facts, preferences, or constraints. NEVER quote, copy, or near-paraphrase the user's exact sentences — the user must not see their own input echoed back as "memory". If you can only restate what the user just said, return empty arrays.
+7. If the conversation is mostly a one-off task description, request, or in-progress work without a stable cross-session fact emerging, return empty arrays.
 
 Output ONLY valid JSON (no markdown fences):
 {{"additions": ["- bullet point 1", "- bullet point 2"], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
@@ -1080,20 +1099,40 @@ def _strip_json_fences(text: str) -> str:
     return text.strip()
 
 
+_NOISE_TERMS: frozenset[str] = frozenset({
+    # generic nouns that appear in almost any prompt — windowing turns these
+    # into match-everything wildcards when they slip into the term set.
+    "项目", "用户", "功能", "系统", "模块", "文件", "数据",
+    "内容", "信息", "方法", "工具", "需要", "可以", "怎么",
+    "什么", "为什么", "如何", "这个", "那个", "这样", "那样",
+    "今天", "明天", "昨天", "现在", "之前", "之后", "一些",
+    "请帮我", "帮我看看", "请帮忙", "我希望", "请问一下",
+})
+
+
 def _extract_match_terms(text: str) -> list[str]:
     """Extract conservative phrase-like terms from a prompt or memory line."""
     terms: set[str] = set()
 
     for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text):
-        terms.add(token)
+        if token not in _NOISE_TERMS:
+            terms.add(token)
 
     for segment in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+        if len(segment) < 5:
+            # Short Chinese spans (2–4 chars) are too ambiguous as match terms
+            # — they're typically common words ("培训", "公司") that produce
+            # widespread false-positive hits.
+            continue
         if len(segment) <= 6:
-            terms.add(segment)
+            if segment not in _NOISE_TERMS:
+                terms.add(segment)
         else:
-            for size in (6, 5, 4):
+            for size in (6, 5):
                 for idx in range(0, len(segment) - size + 1):
-                    terms.add(segment[idx:idx + size])
+                    candidate = segment[idx:idx + size]
+                    if candidate not in _NOISE_TERMS:
+                        terms.add(candidate)
 
     return sorted(terms, key=lambda term: (-len(term), term))
 
@@ -1179,7 +1218,10 @@ def _should_skip_auto_match_line(query_lower: str, memory_lower: str) -> bool:
 
 def _score_memory_match(query_lower: str, query_terms: list[str], memory_lower: str) -> float:
     """Score prompt/context overlap with a high threshold for auto matching."""
-    if query_lower and query_lower in memory_lower:
+    # Full containment is a strong signal but only when the query is
+    # substantial.  Short queries like "下载" would otherwise score 10 against
+    # any memory line that mentions the word.
+    if query_lower and len(query_lower.strip()) >= 8 and query_lower in memory_lower:
         return 10.0
 
     matched = [term for term in query_terms if term in memory_lower]
@@ -1193,7 +1235,7 @@ def _score_memory_match(query_lower: str, query_terms: list[str], memory_lower: 
             if len(term) >= 6:
                 score += 2.5
                 long_matches += 1
-            elif len(term) >= 4:
+            elif len(term) >= 5:
                 score += 1.25
             else:
                 score += 0.35
@@ -1204,7 +1246,41 @@ def _score_memory_match(query_lower: str, query_terms: list[str], memory_lower: 
     # One short Chinese overlap such as "培训" or "公司" is too weak.
     if score < 2.0 and long_matches == 0 and len(matched) < 2:
         return 0.0
+
+    # Precision factor: when matched terms are a clear minority of the
+    # memory's distinct terms (i.e. the memory is mostly unrelated content
+    # with a small overlap), apply a mild penalty.  Keeps tightly-focused
+    # memories at full score while pushing sprawling lines down the ranking.
+    memory_terms = _extract_match_terms(memory_lower)
+    if memory_terms:
+        matched_in_memory = len(set(matched) & set(memory_terms))
+        if matched_in_memory > 0 and len(memory_terms) > 2 * matched_in_memory:
+            score *= 0.6
+
     return score
+
+
+def _ngrams(text: str, n: int = 4) -> set[str]:
+    """Whitespace-stripped lowercase character n-grams (used for near-duplicate detection)."""
+    cleaned = re.sub(r"\s+", "", text.lower())
+    if len(cleaned) < n:
+        return set()
+    return {cleaned[i:i + n] for i in range(len(cleaned) - n + 1)}
+
+
+def _is_self_citation(query: str, memory: str, *, threshold: float = 0.7) -> bool:
+    """True if *memory* looks like a near-verbatim slice of *query*.
+
+    Compares 4-gram coverage of memory inside query.  When the memory is
+    short and most of its n-grams come from the query, the memory was almost
+    certainly extracted from this same prompt (or a near-duplicate of it) and
+    surfacing it as "referenced memory" would be self-citation.
+    """
+    q = _ngrams(query)
+    m = _ngrams(memory)
+    if not q or not m:
+        return False
+    return len(q & m) / len(m) >= threshold
 
 
 class MemoryExtractor:

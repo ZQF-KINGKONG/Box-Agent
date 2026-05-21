@@ -103,6 +103,105 @@ async def test_memory_proposal_list_unknown_session(tmp_path: Path):
     assert result == {"error": "session_not_found"}
 
 
+# ── memory_proposal_list — includePlan ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_list_include_plan_attaches_plan(
+    tmp_path: Path, monkeypatch
+):
+    agent, mgr = _make_agent(tmp_path)
+    write_context_file(mgr.context_file, [_entry("- promote me", hits=7)])
+
+    from box_agent.events import MemoryPromotionPlan
+
+    async def fake_plan_promotion(entries, llm):
+        ids = tuple(e.id for e in entries)
+        return MemoryPromotionPlan(
+            current_core="",
+            new_core="- promote me",
+            consumed_entry_ids=ids,
+            rationale="hot enough",
+        )
+
+    monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
+
+    result = await agent.extMethod(
+        "memory_proposal_list", {"sessionId": "", "includePlan": True}
+    )
+
+    assert len(result["candidates"]) == 1
+    plan = result["plan"]
+    assert plan["newCore"] == "- promote me"
+    assert plan["rationale"] == "hot enough"
+    assert isinstance(plan["consumedEntryIds"], list)
+    assert plan["consumedEntryIds"] == [result["candidates"][0]["id"]]
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_list_include_plan_default_off(
+    tmp_path: Path, monkeypatch
+):
+    agent, mgr = _make_agent(tmp_path)
+    write_context_file(mgr.context_file, [_entry("- promote me", hits=7)])
+
+    called = False
+
+    async def fake_plan_promotion(entries, llm):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
+
+    result = await agent.extMethod("memory_proposal_list", {"sessionId": ""})
+
+    assert "plan" not in result
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_list_include_plan_planner_failure_yields_no_plan(
+    tmp_path: Path, monkeypatch
+):
+    agent, mgr = _make_agent(tmp_path)
+    write_context_file(mgr.context_file, [_entry("- promote me", hits=7)])
+
+    async def fake_plan_promotion(entries, llm):
+        raise RuntimeError("LLM exploded")
+
+    monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
+
+    result = await agent.extMethod(
+        "memory_proposal_list", {"sessionId": "", "includePlan": True}
+    )
+
+    assert len(result["candidates"]) == 1
+    assert "plan" not in result
+
+
+@pytest.mark.asyncio
+async def test_memory_proposal_list_include_plan_no_candidates_skips_planner(
+    tmp_path: Path, monkeypatch
+):
+    agent, mgr = _make_agent(tmp_path)
+    called = False
+
+    async def fake_plan_promotion(entries, llm):
+        nonlocal called
+        called = True
+        return None
+
+    monkeypatch.setattr(mgr, "plan_promotion", fake_plan_promotion)
+
+    result = await agent.extMethod(
+        "memory_proposal_list", {"sessionId": "", "includePlan": True}
+    )
+
+    assert result == {"candidates": []}
+    assert called is False
+
+
 # ── memory_proposal_apply ──────────────────────────────────────
 
 

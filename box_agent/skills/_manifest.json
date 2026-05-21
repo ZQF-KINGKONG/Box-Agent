@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "box_agent_version": "0.8.45",
-  "generated_at": "2026-05-21T05:46:49Z",
+  "generated_at": "2026-05-21T14:46:57Z",
   "skills": [
     {
       "name": "artifacts-builder",
@@ -10,6 +10,10 @@
     {
       "name": "canvas-design",
       "path": "canvas-design/SKILL.md"
+    },
+    {
+      "name": "data-dashboard",
+      "path": "data-dashboard/SKILL.md"
     },
     {
       "name": "docx",
@@ -26,6 +30,10 @@
     {
       "name": "xlsx",
       "path": "document-skills/xlsx/SKILL.md"
+    },
+    {
+      "name": "email-webmail-playwright",
+      "path": "email-webmail-playwright/SKILL.md"
     },
     {
       "name": "html-templates",

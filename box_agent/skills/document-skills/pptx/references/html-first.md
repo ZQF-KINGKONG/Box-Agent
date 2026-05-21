@@ -54,6 +54,41 @@ is more editable than an image-only deck, but CSS-to-PPTX mapping can drift, so
 render QA is required for full visual validation, but if runtime is unavailable
 or blocked, report `Rendering: BLOCKED` and continue with a clear limitation.
 
+## Data Charts And ECharts
+
+For data-heavy slides, the HTML preview and the final PPTX must preserve the
+same underlying data. Use ECharts in `deck.html` when it helps render a faithful
+browser preview, interactions, or complex analytical styling, but treat it as a
+preview surface, not the final PPT representation.
+
+Required chart authoring pattern:
+
+1. Store the chart data/spec in `assets/data/*.json` or in a local JSON script
+   tag.
+2. Mark the chart root with `data-pptx-chart`.
+3. Link the chart root to recoverable data with `data-chart-spec-src`,
+   `data-chart-spec`, or a child `<script type="application/json"
+   data-chart-spec>`.
+4. When exporting to PPTX, convert available chart data to native PowerPoint
+   charts/tables whenever the user may edit the numbers.
+5. Never let an ECharts canvas/SVG become part of `assets/bg-capture/*.png`.
+   If native chart conversion is unavailable, report chart export as `BLOCKED`
+   or use the confirmed native `PptxGenJS` chart route instead of delivering a
+   screenshot-only chart.
+
+Example:
+
+```html
+<div class="chart-frame"
+     data-pptx-chart
+     data-chart-spec-src="assets/data/revenue-trend.json">
+  <div id="revenue-trend-echarts" class="echarts-for-pptx"></div>
+  <script type="application/json" data-chart-spec>
+    {"type":"line","title":"Revenue Trend","categories":["Q1","Q2"],"series":[{"name":"Revenue","data":[120,156]}]}
+  </script>
+</div>
+```
+
 ## File Layout
 
 Create these files beside the output deck:
@@ -61,6 +96,8 @@ Create these files beside the output deck:
 ```text
 deck.html
 assets/
+  data/
+    chart-01.json
   generated/
     manifest.json
     slide-03-hero.png
@@ -120,13 +157,15 @@ illustrations, product mockups, scene images, textures, photo-like backgrounds,
 and people-heavy visuals that should not be built from PowerPoint shapes.
 
 Default to `generate` for covers, dividers, posters, brand campaigns,
-product launches, and vision/future-state pages; only fall back when the
-image service is unavailable or the user opts out. Avoid generating filler
-images just to dress up text-heavy slides, but never skip a bitmap when one
-would clearly carry the message. Every slide must get an explicit image
-decision in `assets/generated/manifest.json`; pick `generate` whenever a
-bitmap visual would make the message faster to understand or more memorable
-than typography, charts, icons, or HTML/CSS alone.
+product launches, vision/future-state pages, abstract concept pages, and
+emotionally led closing pages; only fall back when the image service is
+unavailable, the user opts out, or the slide requires a real/source-backed
+asset. Avoid generating filler images just to dress up text-heavy slides, but
+do not let generic caution suppress useful visuals. Every slide must get an
+explicit image decision in `assets/generated/manifest.json`; pick `generate`
+whenever a bitmap visual would make the message faster to understand, more
+memorable, or more visually credible than typography, charts, icons, or
+HTML/CSS alone.
 
 ### Image Decision Rules
 
@@ -139,7 +178,8 @@ For each slide, choose exactly one primary visual lane:
   schematic, or shape composition
 - `skip`: no image because text/data/editable composition is stronger
 
-Generate an image when two or more of these are true:
+Generate an image when any strong trigger is true, unless an accuracy or
+editability rule below blocks it:
 
 - the user explicitly asks for an illustration, scene, poster, visual metaphor,
   generated background, or image-rich style
@@ -156,6 +196,10 @@ Generate an image when two or more of these are true:
 - the visual can be placed as a side hero, framed card image, spot
   illustration, or controlled background without making the main text
   unreadable
+
+If only a weak trigger is present, use the scoring rule below. Do not require
+two triggers for covers, dividers, campaign/launch/vision slides, abstract
+concept slides, or user-requested image-rich decks.
 
 Do not generate an image when:
 
@@ -175,7 +219,7 @@ Use this practical scoring rule when unsure:
 - `+2`: cover, divider, closing, poster, launch, campaign, or vision slide
 - `+2`: user requested image-rich, illustration, poster, scene, visual metaphor,
   or generated background
-- `+1`: abstract concept needs a metaphor or atmospheric anchor
+- `+2`: abstract concept needs a metaphor or atmospheric anchor
 - `+1`: realistic object, mockup, environment, texture, or people scene
 - `+1`: bitmap can sit in a clear frame/hero area without covering body text
 - `-2`: primary value is editable data, table, KPI, roadmap, architecture,
@@ -184,10 +228,11 @@ Use this practical scoring rule when unsure:
   logo, or location
 - `-1`: deleting the image would not weaken the message
 
-Choose `generate` at score `2` or higher unless a negative accuracy/editability
-rule applies. Choose `draw_in_html` for editable analytical visuals. Choose
-`use_existing` for real/source-backed visuals. Choose `skip` only when the score
-is low and the slide is stronger without a bitmap.
+Choose `generate` at score `1` or higher unless a negative accuracy/editability
+rule applies; choose it automatically at score `2` or higher. Choose
+`draw_in_html` for editable analytical visuals. Choose `use_existing` for
+real/source-backed visuals. Choose `skip` only when the score is below `1` and
+the slide is stronger without a bitmap.
 
 ### Background vs Local Visual
 
@@ -218,11 +263,17 @@ For content slides, prefer:
 ### Image Plan Manifest
 
 Before generating images, create or update `assets/generated/manifest.json`.
-The manifest has a top-level `style_anchor` reused by every `generate` entry,
-plus an `image_plan` array. Use this shape:
+The manifest has a top-level `deck_context`, a top-level `style_anchor` reused
+by every `generate` entry, plus an `image_plan` array. Use this shape:
 
 ```json
 {
+  "deck_context": {
+    "title": "AI Operating Model Transformation",
+    "theme": "How enterprises can move from isolated AI pilots to governed, repeatable AI workflows",
+    "audience": "executive and product leadership",
+    "narrative": "from fragmented experiments, to unified workflow orchestration, to measurable business impact"
+  },
   "style_anchor": {
     "name": "editorial-vector-soft",
     "style": "Editorial vector illustration, clean linework, soft gradient fills, subtle grain texture",
@@ -240,6 +291,7 @@ plus an `image_plan` array. Use this shape:
       "aspect_ratio": "16:9",
       "target_size": "2848x1600",
       "prompt": {
+        "deck_context": "AI Operating Model Transformation deck for executive and product leadership; theme: moving from isolated AI pilots to governed, repeatable AI workflows; narrative arc: fragmented experiments to unified orchestration to measurable business impact",
         "subject": "Three abstract data streams converging into a central neural core, floating geometric nodes orbit the core, translucent flow lines connect them",
         "composition": "Off-center hero on the right two-thirds, generous negative space on the left for the title overlay, eye-level perspective, balanced rule-of-thirds framing",
         "style": "Editorial vector illustration, clean linework, soft gradient fills, subtle grain texture",
@@ -263,26 +315,33 @@ plus an `image_plan` array. Use this shape:
 
 The `prompt` field may be either a structured object (preferred) or a single
 string. If `generate_image` only accepts a string, flatten the object by
-joining fields in this exact order with `. `: `subject`, `composition`,
-`style`, `palette`, `lighting`, `mood`, `quality`. Keep the structured form
-in the manifest for auditability even when the call site flattens it.
+joining fields in this exact order with `. `: `deck_context`, `subject`,
+`composition`, `style`, `palette`, `lighting`, `mood`, `quality`. Keep the
+structured form in the manifest for auditability even when the call site
+flattens it.
 
 ### Prompt Template
 
 Write every `generate` prompt with structured fields, not a free-form sentence.
 Vague prompts like "modern illustration of AI, blue, professional" are the main
-reason image quality looks generic. Use the seven-field template; keep order
-consistent so the model weights subject before style.
+reason image quality looks generic or unrelated to the deck. Use the eight-field
+template; keep order consistent so the model weights deck context and subject
+before style.
 
 Required fields, in order:
 
-1. **subject** — what the image is *of*. Concrete nouns, objects, action, environment. No style words here.
-2. **composition** — framing, focal point, layout, where text-safe space lives, perspective.
-3. **style** — exactly the `style` clause from the deck `style_anchor`. Do not invent per-slide styles.
-4. **palette** — exactly the `palette` clause from the deck `style_anchor`, or the brand palette when supplied. Use hex codes.
-5. **lighting** — direction, softness, contrast, time of day for scenes; reuse the anchor unless the slide needs a deliberate variation.
-6. **mood** — one or two adjectives tied to the slide message (calm, energetic, optimistic, technical, urgent, premium).
-7. **quality** — rendering descriptors that raise fidelity. Reuse the anchor `rendering` clause plus optional per-kind boosters.
+1. **deck_context** — the whole PPT theme, audience, narrative arc, and business/topic domain. Derive it from the user's original brief and keep it in every generated-image prompt.
+2. **subject** — what the image is *of*. Concrete nouns, objects, action, environment. It must relate directly to the deck context and slide message. No style words here.
+3. **composition** — framing, focal point, layout, where text-safe space lives, perspective.
+4. **style** — exactly the `style` clause from the deck `style_anchor`. Do not invent per-slide styles.
+5. **palette** — exactly the `palette` clause from the deck `style_anchor`, or the brand palette when supplied. Use hex codes.
+6. **lighting** — direction, softness, contrast, time of day for scenes; reuse the anchor unless the slide needs a deliberate variation.
+7. **mood** — one or two adjectives tied to the slide message (calm, energetic, optimistic, technical, urgent, premium).
+8. **quality** — rendering descriptors that raise fidelity. Reuse the anchor `rendering` clause plus optional per-kind boosters.
+
+Do not call `generate_image` with a prompt that only describes the local slide
+object or a generic visual metaphor. The first clause must carry the deck-level
+theme so the generated image stays attached to the presentation topic.
 
 Negatives go in the separate `avoid` field, never inside `prompt`.
 
@@ -482,7 +541,7 @@ background-decoration bitmap (see below), loads
 `html_to_editable_pptx.js` defaults to `--bg-capture always`. For each slide it
 takes a 1920x1080 PNG that contains **only** the slide-level background and
 pure-decoration nodes; every text container, text node, pill / chip / card
-background, and `<img>` is hidden during capture. The captures are written to
+background, `<img>`, and `data-pptx-chart` chart node is hidden during capture. The captures are written to
 `assets/bg-capture/slide-XX.png` next to `deck.html` and inserted into the
 in-memory DOM as `<img class="pptx-bg">` at the back of each slide before
 `dom-to-pptx` runs. After capture the exporter removes every node it marked
@@ -497,7 +556,9 @@ when **all** of these are true:
 
 Plus, regardless of content, these elements are always treated as decoration:
 `<svg>` (including any text/tspan inside it), `<hr>`, `<canvas>`, and CSS
-`::before` / `::after` pseudo-elements.
+`::before` / `::after` pseudo-elements. Exception: ECharts/data-chart nodes
+marked with `data-pptx-chart`, `data-chart-spec`, or ECharts instance metadata
+are treated as non-decoration so they do not enter the background screenshot.
 
 Resulting layer order in PPT:
 

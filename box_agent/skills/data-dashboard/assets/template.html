@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title><!-- FILL: 报告标题 --></title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+/* ========== Design Tokens (translate from references/design-spec.md) ========== */
+:root{
+  /* surface */
+  --bg:        /* FILL */;
+  --surface:   /* FILL */;
+  --surface-2: /* FILL */;
+  --border:    /* FILL */;
+  /* text */
+  --text:      /* FILL */;
+  --text-dim:  /* FILL */;
+  --text-mute: /* FILL */;
+  /* brand & semantic */
+  --brand:     /* FILL */;
+  --accent:    /* FILL */;
+  --success:   /* FILL */;
+  --warning:   /* FILL */;
+  --danger:    /* FILL */;
+  /* type */
+  --font-sans: -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+  --font-mono: ui-monospace,"SF Mono",Menlo,monospace;
+  /* spacing & radius */
+  --sp-1:4px;  --sp-2:8px;  --sp-3:12px;  --sp-4:16px;  --sp-6:24px;  --sp-8:32px;
+  --radius-sm:8px; --radius-md:12px; --radius-lg:16px;
+  --nav-w:220px;
+}
+
+/* ========== Base ========== */
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.5;font-variant-numeric:tabular-nums}
+a{color:inherit;text-decoration:none}
+
+/* ========== Layout ========== */
+.sidebar{position:fixed;left:0;top:0;bottom:0;width:var(--nav-w);background:var(--surface);border-right:1px solid var(--border);overflow-y:auto;z-index:100}
+.sidebar .logo{padding:var(--sp-6) var(--sp-4);border-bottom:1px solid var(--border)}
+.sidebar .nav-group{padding:var(--sp-3) var(--sp-4) var(--sp-2);font-size:11px;color:var(--text-mute);letter-spacing:.08em;text-transform:uppercase}
+.sidebar nav a{display:block;padding:var(--sp-2) var(--sp-4);font-size:14px;color:var(--text-dim);border-left:3px solid transparent;transition:all .15s}
+.sidebar nav a:hover{color:var(--text);background:var(--surface-2)}
+.sidebar nav a.active{color:var(--brand);border-left-color:var(--brand);background:var(--surface-2)}
+
+.main{margin-left:var(--nav-w);padding:var(--sp-8) var(--sp-6);min-height:100vh}
+.page{display:none;animation:fade .25s ease}
+.page.active{display:block}
+@keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+.page-title{font-size:28px;font-weight:600;margin-bottom:var(--sp-2)}
+.page-subtitle{color:var(--text-dim);font-size:14px;margin-bottom:var(--sp-6)}
+
+/* ========== Components ========== */
+.kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:var(--sp-4);margin-bottom:var(--sp-6)}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--sp-4)}
+.kpi .label{font-size:12px;color:var(--text-dim);margin-bottom:var(--sp-2)}
+.kpi .value{font-size:28px;font-weight:600}
+.kpi .delta{font-size:12px;margin-top:var(--sp-1)}
+.kpi .delta.up{color:var(--success)}
+.kpi .delta.down{color:var(--danger)}
+
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);padding:var(--sp-4);margin-bottom:var(--sp-6)}
+.card-title{font-size:15px;font-weight:600;margin-bottom:var(--sp-3)}
+
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);margin-bottom:var(--sp-6)}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--sp-4);margin-bottom:var(--sp-6)}
+
+.chart{width:100%;height:380px}
+.chart-sm{height:280px}
+
+table.t{width:100%;border-collapse:collapse;font-size:13px}
+table.t th{background:var(--surface-2);color:var(--text-dim);padding:var(--sp-2) var(--sp-3);text-align:left;font-weight:500;border-bottom:1px solid var(--border)}
+table.t td{padding:var(--sp-2) var(--sp-3);border-bottom:1px solid var(--border)}
+table.t td.num{text-align:right}
+table.t tbody tr:hover{background:var(--surface-2)}
+
+.insight{padding:var(--sp-4);background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-md);margin-bottom:var(--sp-6)}
+.insight ul{list-style:none}
+.insight li{padding:var(--sp-2) 0;border-bottom:1px solid var(--border);font-size:14px}
+.insight li:last-child{border-bottom:0}
+
+.note{position:fixed;right:var(--sp-4);bottom:var(--sp-4);padding:var(--sp-2) var(--sp-3);background:var(--warning);color:#000;border-radius:var(--radius-sm);font-size:12px;z-index:200}
+
+/* ========== Responsive ========== */
+@media(max-width:1200px){.grid-2,.grid-3{grid-template-columns:1fr}}
+@media(max-width:768px){
+  .sidebar{width:56px}
+  .sidebar nav a{font-size:0;padding:var(--sp-3)}
+  .main{margin-left:56px;padding:var(--sp-4)}
+}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="logo"><!-- FILL: brand --></div>
+  <nav>
+    <!-- FILL: 按 nav-group 分组，a.data-page 对应 page id
+    <div class="nav-group">概览</div>
+    <a href="#" data-page="P1" class="active">总览</a>
+    -->
+  </nav>
+</aside>
+
+<main class="main">
+  <!-- 每页一个 .page，id 形如 page-P1 -->
+  <section class="page active" id="page-P1">
+    <h1 class="page-title"><!-- FILL --></h1>
+    <p class="page-subtitle"><!-- FILL --></p>
+    <div id="P1-kpis"   class="kpi-grid"></div>
+    <div id="P1-insight" class="insight"></div>
+    <div class="card"><div class="card-title">总览图</div><div id="P1-chart-overview" class="chart"></div></div>
+  </section>
+
+  <!-- 继续添加 page-P2, page-P3 ... -->
+</main>
+
+<!-- 如为模拟数据 -->
+<!-- <div class="note">⚠️ 虚拟数据，仅用于演示</div> -->
+
+<script>
+/* ========== 1. Data ========== */
+const D = {
+  P1: {
+    kpis: [], insights: [], overview: { /* echarts option-friendly shape */ }
+  },
+  // P2, P3, ...
+};
+
+/* ========== 2. ECharts theme ========== */
+const theme = {
+  color: [/* FILL: 6-8 色 palette，对应 design-spec.md */],
+  backgroundColor: 'transparent',
+  textStyle: { fontFamily: getComputedStyle(document.body).fontFamily },
+  title:   { textStyle: { color: getCss('--text'), fontSize: 14, fontWeight: 600 } },
+  legend:  { textStyle: { color: getCss('--text-dim') } },
+  tooltip: { backgroundColor: getCss('--surface'), borderColor: getCss('--border'), textStyle: { color: getCss('--text') } },
+  categoryAxis: { axisLine: { lineStyle: { color: getCss('--border') } }, axisLabel: { color: getCss('--text-dim') }, splitLine: { lineStyle: { color: getCss('--border') } } },
+  valueAxis:    { axisLine: { lineStyle: { color: getCss('--border') } }, axisLabel: { color: getCss('--text-dim') }, splitLine: { lineStyle: { color: getCss('--border') } } },
+};
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+echarts.registerTheme('app', theme);
+
+/* ========== 3. Formatters ========== */
+const fmt = {
+  num:   n => Number(n).toLocaleString('zh-CN'),
+  pct:   (n, d=1) => (n*100).toFixed(d) + '%',
+  money: (n, cur='¥') => cur + Number(n).toLocaleString('zh-CN'),
+  short: n => n>=1e8 ? (n/1e8).toFixed(1)+'亿'
+          : n>=1e4 ? (n/1e4).toFixed(1)+'万'
+          : Number(n).toLocaleString('zh-CN'),
+  sec:   s => `${Math.floor(s/60)}分${s%60}秒`,
+};
+
+/* ========== 4. DOM builders ========== */
+const ui = {
+  kpi: (label, value, delta) => {
+    const cls = delta == null ? '' : (delta >= 0 ? 'up' : 'down');
+    const arrow = delta == null ? '' : (delta >= 0 ? '↑ ' : '↓ ');
+    const deltaHtml = delta == null ? '' : `<div class="delta ${cls}">${arrow}${fmt.pct(Math.abs(delta))}</div>`;
+    return `<div class="kpi"><div class="label">${label}</div><div class="value">${value}</div>${deltaHtml}</div>`;
+  },
+  kpis: (id, items) => { document.getElementById(id).innerHTML = items.map(i => ui.kpi(i.label, i.value, i.delta)).join(''); },
+  insight: (id, title, items) => {
+    document.getElementById(id).innerHTML = `<div class="card-title">${title}</div><ul>${items.map(t=>`<li>${t}</li>`).join('')}</ul>`;
+  },
+  table: (id, headers, rows) => {
+    const th = headers.map(h => `<th>${h}</th>`).join('');
+    const tr = rows.map(r => `<tr>${r.map((c,i)=>`<td class="${typeof c==='number'&&i>0?'num':''}">${typeof c==='number'?fmt.num(c):c}</td>`).join('')}</tr>`).join('');
+    document.getElementById(id).innerHTML = `<table class="t"><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
+  },
+};
+
+/* ========== 5. Charts (instance cache + resize) ========== */
+const charts = {};
+function chart(id, option){
+  const dom = document.getElementById(id);
+  if(!dom) return;
+  charts[id] = charts[id] || echarts.init(dom, 'app');
+  charts[id].setOption(option);
+}
+window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+
+/* ========== 6. Renderers (one per page, pure) ========== */
+const renderers = {
+  P1: () => {
+    const d = D.P1;
+    ui.kpis('P1-kpis', d.kpis);
+    ui.insight('P1-insight', '核心发现', d.insights);
+    chart('P1-chart-overview', {
+      title:   { text: '总览' },
+      tooltip: { trigger: 'axis' },
+      grid:    { top: 50, right: 24, bottom: 40, left: 48 },
+      xAxis:   { type: 'category', data: [] },
+      yAxis:   { type: 'value' },
+      series:  [],
+    });
+  },
+  // P2: () => { ... },
+};
+
+/* ========== 7. Routing + lazy render ========== */
+const rendered = {};
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
+  document.getElementById('page-' + id)?.classList.add('active');
+  document.querySelector(`.sidebar nav a[data-page="${id}"]`)?.classList.add('active');
+  if(!rendered[id] && renderers[id]){ renderers[id](); rendered[id] = true; }
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll('.sidebar nav a[data-page]').forEach(a => {
+  a.addEventListener('click', e => { e.preventDefault(); showPage(a.dataset.page); });
+});
+
+/* ========== 8. Boot ========== */
+showPage('P1');
+</script>
+</body>
+</html>

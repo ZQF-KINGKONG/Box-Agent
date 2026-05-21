@@ -1,0 +1,126 @@
+---
+name: data-dashboard
+description: 生成单文件 HTML 数据看板。触发：用户要把数据/分析结果做成网页、dashboard、可视化报告、management demo。
+---
+
+# Data Dashboard Skill
+
+## 0. 何时触发
+
+满足任一即走本规范：
+
+- 用户要求把数据 / 表格 / 分析结果"做成网页 / dashboard / 看板 / 报告 / demo"。
+- 产物以 `.html` 形式交付。
+- 用户提到"可视化"、"图表"、"BI"、"管理层看的"。
+
+## 1. 非协商铁律（违反即重做）
+
+1. **单文件自包含**：CSS / JS / 数据全部 inline。禁止外链 PNG/JPG。
+2. **图表 = ECharts**。所有图表用 ECharts 5.x 渲染，CDN 引入。**禁止** `matplotlib` / `pandas.plot` 出 PNG，**禁止** `pandas.DataFrame.to_html()` 原样输出（识别特征：`class="dataframe"`）。
+3. **不要复杂图就硬上 ECharts，但简单图也不要回退到 Chart.js**——统一栈，便于主题一致。
+4. **无后端**。数据 inline 为 JS 常量，离线可双击打开。
+5. **响应式**：桌面 / 平板 / 手机三档断点都不能裂。
+6. 数字格式化必须本地化：千分位、百分比 1 位小数、货币缩写（K/M/B）、时长人类化。
+
+## 2. 技术栈
+
+| 用途 | 选型 |
+|---|---|
+| 图表 | ECharts 5.5+ via `cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js` |
+| 框架 | 无，vanilla JS |
+| 字体 | 系统栈优先：`-apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif` |
+| 图标 | inline SVG 或 Unicode；不引图标字体库 |
+| 数据 | 全量 inline `const D = {...}`，按页 key 组织 |
+
+## 3. 架构骨架（每次都用这个）
+
+> 📦 **完整可运行骨架见 `assets/template.html`**——200 行左右的脚手架，已包含 ECharts CDN、主题注册占位、路由懒渲染、`fmt/ui` 工具完整版、`D = {}` / `renderers = {}` 空对象。新任务复制该模板，填数据 + 写 renderer 即可。
+
+```
+┌─ <head>  meta + 主题 CSS 变量 + ECharts CDN
+├─ <body>
+│   ├─ .sidebar    侧边栏导航（多页时）
+│   ├─ .main
+│   │   ├─ .page#page-P1.active   首屏：洞察总结
+│   │   ├─ .page#page-P2          ...
+│   │   └─ .page#page-PN
+│   └─ .footnote   数据口径 / 模拟数据声明
+└─ <script>
+    const D = { P1:{...}, P2:{...} };       // 数据
+    const theme = {...};                    // ECharts 全局主题
+    const fmt = {...};                      // 格式化工具
+    const ui  = { mkKPI, mkTable, mkFunnel };// 通用 DOM 组件
+    const renderers = { P1:()=>{}, ... };   // 每页渲染器
+    showPage('P1');                         // 路由 + 懒渲染
+```
+
+**关键模式**：
+
+- **ECharts 实例缓存**：`charts[id] = echarts.init(dom)`，在 `window.resize` 时统一 `charts[id].resize()`。
+- **renderer 是纯函数**：只读 `D[id]`，只写 `#page-{id}` 子树，不互相依赖。
+- **首页强制是"洞察总结"**：3-6 条 bullet + 核心 KPI + 一张总览图。让人 5 秒看完结论。
+
+## 4. ECharts 用法约定
+
+- 注册主题：`echarts.registerTheme('app', themeObj)`，所有 `echarts.init(dom, 'app')`。主题统一了背景、坐标轴、tooltip、palette。
+- **每张图必给**：`title.text`（图名）、`tooltip`（hover 详情）、`grid` 留白（top/bottom/left/right ≥ 40）。
+- **palette 不超过 8 色**，按数据语义映射（正向 / 负向 / 中性 / 高亮）。
+- **复杂图保留给 ECharts 独家能力**：桑基（sankey）、关系（graph）、地图（map）、漏斗（funnel）、热力（heatmap）、雷达（radar）、treemap、parallel。
+- 漏斗：优先用 `series.type='funnel'`；如果想要"宽度按值缩放 + 步骤转化率标注"的横向漏斗，可以用 `series.type='bar'` + `yAxis.type='category'` + 自定义 label。
+- 图表容器：固定高度 `height: 320px`（KPI 行）/ `420px`（主图）。不要用 `height: auto` 否则 ECharts 报 0 size 警告。
+
+## 5. 通用工具（每次都内置）
+
+```js
+// 数字
+const fmt = {
+  num: n => n.toLocaleString('zh-CN'),
+  pct: (n, d=1) => (n*100).toFixed(d)+'%',
+  money: (n, cur='¥') => cur + n.toLocaleString('zh-CN'),
+  short: n => n>=1e8 ? (n/1e8).toFixed(1)+'亿'
+            : n>=1e4 ? (n/1e4).toFixed(1)+'万'
+            : n.toLocaleString('zh-CN'),
+  sec: s => `${Math.floor(s/60)}分${s%60}秒`,
+};
+
+// DOM 组件
+const ui = {
+  kpi: (label, value, delta) => `<div class="kpi">...</div>`,
+  table: (headers, rows) => `<table class="t">...</table>`,
+  insight: (title, items) => `<div class="insight">...</div>`,
+};
+```
+
+## 6. 视觉与设计规范
+
+> ⚠️ **设计规范在 `references/design-spec.md` 中维护。开始渲染前必须完整读取它**，并把里面的 token 翻译为 `:root { --token: value }` CSS 变量与组件样式；ECharts palette 注册为主题 color 字段。全文件只用变量，不写硬编码色值。
+> 如果 design-spec.md 已填写某条目，**完全以它为准**，不要叠加下方兜底规则——避免与设计语言冲突（例如 spec 明确"不用阴影"时，兜底里的"软阴影"必须丢弃）。
+
+**兜底规则（仅当 design-spec.md 对应段落为空白时启用）：**
+
+- 用 8-12 个 CSS 变量收口色彩与间距，禁止散落的 `#xxx` 硬编码。
+- 信息密度：metric grid 用 `repeat(auto-fill, minmax(200px, 1fr))`。
+- 数字字符等宽：`font-variant-numeric: tabular-nums`，表格数字列右对齐。
+- 留白比对比更重要：section 间距 ≥ 24px，卡内 padding ≥ 16px。
+
+## 7. 反模式
+
+- ❌ 浅色 + 默认字体 + Bootstrap 卡片的"通用 AI 感"
+- ❌ 一页到底长滚动，无导航、无分组
+- ❌ 外链 PNG / matplotlib 出图
+- ❌ pandas `to_html()` 直接拼字符串
+- ❌ Chart.js 与 ECharts 混用
+- ❌ 主题色硬编码在 30 个地方
+- ❌ 没有 tooltip / 没有图名 / 没有口径说明的"裸图"
+- ❌ 移动端裂版、表格横向溢出
+- ❌ 数字未格式化（`28500000` 而非 `2,850 万` / `¥28.5M`）
+
+## 8. 交付前 checklist
+
+- [ ] 单文件 < 2MB，双击可开
+- [ ] 移动端宽度 375px 不裂
+- [ ] 所有 ECharts 实例响应 `window.resize`
+- [ ] 所有数字本地化
+- [ ] 每张图有 title + tooltip
+- [ ] 首页 5 秒能读懂核心结论
+- [ ] 如为模拟数据，页面有明显标注

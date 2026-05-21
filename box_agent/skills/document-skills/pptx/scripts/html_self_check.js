@@ -168,6 +168,14 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
       // dom-to-pptx blacklist does not apply to them. Only text-bearing
       // elements remain as live PPTX shapes after the capture step.
       const decorationTags = new Set(["SVG", "HR", "CANVAS"]);
+      const chartSelector = [
+        "[data-pptx-chart]",
+        "[data-chart-spec]",
+        "[data-chart-spec-src]",
+        "[_echarts_instance_]",
+        ".echarts",
+        ".echarts-for-pptx",
+      ].join(",");
       const hasTextContent = el => {
         if (el.querySelector && el.querySelector("img")) return true;
         const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -177,9 +185,14 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         }
         return false;
       };
+      const isChartElement = el =>
+        Boolean(el && el.nodeType === 1 && (el.matches(chartSelector) || el.closest(chartSelector)));
+      const chartRootFor = el =>
+        el.closest("[data-pptx-chart]") || el.closest(chartSelector);
       const isDecorationNode = el => {
         if (!el || el.nodeType !== 1) return false;
         if (el.tagName === "IMG") return false;
+        if (isChartElement(el)) return false;
         if (decorationTags.has(el.tagName)) return true;
         if (el.closest && el.closest("svg")) return true;
         return !hasTextContent(el);
@@ -229,11 +242,27 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
         }
 
         const descendants = Array.from(slide.querySelectorAll("*"));
+        const chartRootsSeen = new Set();
         descendants.forEach(el => {
           const style = getComputedStyle(el);
           const inline = el.getAttribute("style") || "";
           const decoration = isDecorationNode(el);
           if (domToPptx) {
+            const chartRoot = chartRootFor(el);
+            if (chartRoot && !chartRootsSeen.has(chartRoot)) {
+              chartRootsSeen.add(chartRoot);
+              const chartName = labelFor(chartRoot, slideIndex);
+              const hasSpec =
+                chartRoot.hasAttribute("data-chart-spec") ||
+                chartRoot.hasAttribute("data-chart-spec-src") ||
+                Boolean(chartRoot.querySelector("[data-chart-spec]"));
+              if (!chartRoot.hasAttribute("data-pptx-chart")) {
+                issues.push(`${chartName}: ECharts/data chart roots must be marked data-pptx-chart so bg_capture keeps them out of the slide screenshot.`);
+              }
+              if (!hasSpec) {
+                issues.push(`${chartName}: ECharts/data chart must provide recoverable chart data via data-chart-spec, data-chart-spec-src, or a child [data-chart-spec] JSON script before PPTX export.`);
+              }
+            }
             // Transform/clip-path/text-shadow/backdrop-filter/mix-blend-mode/
             // animation/transition/radial-conic gradient/non-blur filter on
             // decoration nodes (or inside SVG) are captured into the
@@ -268,10 +297,11 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
             if (["VIDEO", "AUDIO", "IFRAME"].includes(el.tagName)) {
               issues.push(`${labelFor(el, slideIndex)}: <${el.tagName.toLowerCase()}> is not captured by dom-to-pptx; convert it to an image/SVG first.`);
             }
-            // <canvas> is treated as decoration by bg_capture and ends up
-            // in the slide bitmap; JS-drawn content must be painted before
-            // the capture step, which the exporter already waits for via
-            // network-idle + fonts.ready.
+            // Plain <canvas> is treated as decoration by bg_capture and ends
+            // up in the slide bitmap. ECharts/data-chart canvases are the
+            // exception: they must be marked with chart metadata and kept out
+            // of the screenshot path so data can be preserved as native PPT
+            // chart/table content.
           }
           if (!isVisible(el, style)) return;
           const rect = el.getBoundingClientRect();

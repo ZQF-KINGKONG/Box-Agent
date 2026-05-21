@@ -25,11 +25,14 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable.
 Use this path by default:
 
 1. invoke the `html-templates` skill to fetch the Visual DNA profile (see §3.0)
-2. create `deck.html` using that profile as hard style constraints
-3. run HTML self-check
-4. export with `scripts/html_to_editable_pptx.js`
-5. run structural QA (package validation, text extraction, placeholder scan)
-6. render and inspect only if §4.2 triggers apply
+2. plan slide-level image decisions in `assets/generated/manifest.json`; record the whole deck theme in `deck_context`, and when the image service is available, covers, dividers, campaign/launch/vision pages, and abstract concept pages should normally choose `generate`
+3. call `generate_image` for every `generate` item before writing final slide HTML
+4. for data charts, keep the source dataset/chart spec and use ECharts only as an HTML preview; final PPT must preserve chart data through native PowerPoint chart/table output, not through screenshots
+5. create `deck.html` using the Visual DNA profile and generated local assets as hard constraints
+6. run HTML self-check
+7. export with `scripts/html_to_editable_pptx.js`
+8. run structural QA (package validation, text extraction, placeholder scan)
+9. render and inspect only if §4.2 triggers apply
 
 If browser host preflight blocks HTML export, ask the user to choose one route:
 
@@ -92,14 +95,24 @@ If `html-templates` is unavailable in this session, fall back to authoring the d
 3. For top/middle/bottom layouts, center the main content group in the available middle area. Do not build slides by stacking blocks from the top with repeated `margin-top`; compute the content group's height and balance top/bottom whitespace with flex/grid alignment or explicit `top` values.
 4. Use relative asset paths.
 5. Do not inline large images as data URLs.
-6. Every slide must record an explicit image decision in `assets/generated/manifest.json`; covers, dividers, posters, campaign/launch/vision pages must use `generate` via the `generate_image` tool unless the user opts out.
-7. Keep page numbers on non-cover slides consistent with slide order.
-8. Read `references/html-first.md` and `references/html-editable.md`.
-9. Keep image generation rules in `references/image-assets.md`.
+6. Every slide must record an explicit image decision in `assets/generated/manifest.json`; each `generate` prompt must include the whole deck theme/context before the slide-specific visual subject. Covers, dividers, posters, campaign/launch/vision pages, abstract concept pages, and emotionally led closing pages must use `generate` via the `generate_image` tool unless the user opts out, the image service is unavailable, or a real/source-backed asset is required.
+7. ECharts/canvas charts are allowed only as HTML preview surfaces backed by `data-pptx-chart` and recoverable chart data. They must not be baked into `assets/bg-capture/*.png` or delivered as screenshot-only chart images when the data is available.
+8. Keep page numbers on non-cover slides consistent with slide order.
+9. Read `references/html-first.md` and `references/html-editable.md`.
+10. Keep image generation rules in `references/image-assets.md`.
 
-### 3.2 Visual effects scope (decoration vs text-bearing)
+### 3.2 Data charts and ECharts previews
 
-`html_to_editable_pptx.js` runs `bg_capture` by default (`--bg-capture always`). It screenshots every **decoration node** into a slide-level bitmap and then removes it from the export tree, so any CSS effect on a decoration node ends up as pixels — not as a live PPTX shape. The dom-to-pptx blacklist applies **only to elements that survive capture**.
+For data presentation slides, preserve data first:
+
+1. Store chart/table data in `assets/data/*.json` or an equivalent local source file.
+2. In `deck.html`, ECharts may be used for browser preview and layout tuning, but the chart root must be marked with `data-pptx-chart` and must reference or embed a chart spec via `data-chart-spec`, `data-chart-spec-src`, or a child `<script type="application/json" data-chart-spec>`.
+3. When creating the final PPTX, convert available chart data to native PowerPoint charts/tables whenever the recipient may edit numbers. Do not flatten an ECharts canvas/SVG into a screenshot just because it looks correct in HTML.
+4. If native chart conversion is unavailable, report the chart export as `BLOCKED` or switch to the confirmed native `PptxGenJS` chart route; do not silently deliver screenshot-only chart images.
+
+### 3.3 Visual effects scope (decoration vs text-bearing)
+
+`html_to_editable_pptx.js` runs `bg_capture` by default (`--bg-capture always`). It screenshots every **decoration node** into a slide-level bitmap and then removes it from the export tree, so any CSS effect on a decoration node ends up as pixels — not as a live PPTX shape. The dom-to-pptx blacklist applies **only to elements that survive capture**. ECharts/canvas chart nodes marked with `data-pptx-chart` are not decoration nodes and must stay out of the background screenshot path.
 
 **Decoration nodes (free to use any visual effect):**
 - Empty `<div>` (no text inside, no `<img>` inside)

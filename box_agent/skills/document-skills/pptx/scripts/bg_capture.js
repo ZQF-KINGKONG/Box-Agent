@@ -55,6 +55,14 @@ async function injectCaptureStyles(page) {
 async function markDecorationNodes(page) {
   await page.evaluate(() => {
     const DECORATION_TAGS = new Set(["SVG", "HR", "CANVAS"]);
+    const CHART_SELECTOR = [
+      "[data-pptx-chart]",
+      "[data-chart-spec]",
+      "[data-chart-spec-src]",
+      "[_echarts_instance_]",
+      ".echarts",
+      ".echarts-for-pptx",
+    ].join(",");
 
     function hasContent(el) {
       if (el.querySelector("img")) return true;
@@ -66,11 +74,21 @@ async function markDecorationNodes(page) {
       return false;
     }
 
+    function isChartElement(el) {
+      return Boolean(el.matches(CHART_SELECTOR) || el.closest(CHART_SELECTOR));
+    }
+
     Array.from(document.querySelectorAll(".slide")).forEach(slide => {
       const all = slide.querySelectorAll("*");
       all.forEach(el => {
         if (el === slide) return;
         if (el.classList.contains("pptx-bg")) return;
+        // ECharts/data-chart previews must not be baked into the background
+        // screenshot. They need a separate native-chart/data-preserving path.
+        if (isChartElement(el)) {
+          el.setAttribute("data-pptx-non-decoration", "");
+          return;
+        }
         // <img> is always a native picture (never a decoration node).
         if (el.tagName === "IMG") {
           el.setAttribute("data-pptx-non-decoration", "");

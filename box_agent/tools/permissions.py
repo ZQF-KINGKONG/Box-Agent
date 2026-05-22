@@ -517,6 +517,16 @@ _HOME_VAR_RE = re.compile(r'(\$HOME(?:/[^\s"\'\\;|&]*)?)')
 # the existing whitespace-prefix path regex picks the target up cleanly.
 _REDIRECT_RE = re.compile(r'(^|[\s\d])>{1,2}')
 
+# Balanced quoted segments: `"..."` or `'...'`. Used by the quote-aware
+# pre-pass so paths containing spaces (e.g. `"/Users/me/Box 工作区/x"`,
+# `"C:\Users\foo bar\x"`) get extracted as a single token instead of being
+# truncated at the first space by `_ABS_PATH_RE`'s whitespace-bounded char
+# class. Non-greedy and matches `"` / `'` symmetrically.
+_QUOTED_SEGMENT_RE = re.compile(r'(["\'])([^"\']*?)\1')
+
+# Windows-style absolute path: drive letter + `:` + `\` or `/`.
+_WIN_DRIVE_RE = re.compile(r'^[A-Za-z]:[\\/]')
+
 # sed/perl-style substitution: `s<delim>pattern<delim>replacement<delim>[flags]`.
 # Stripped before path extraction so the regex bodies of `sed 's/.../.../g'`,
 # `perl -pe 's|...|...|'` etc. don't get scanned for absolute paths.
@@ -548,20 +558,71 @@ _SYSTEM_ROOT_NOISE: frozenset[str] = frozenset({
 })
 
 
+def _classify_quoted_path(body: str, home: str) -> str | None:
+    """Return the absolute path a quoted token resolves to, or None.
+
+    Supports POSIX absolute (`/...`), Windows drive letter (`C:\\...`,
+    `C:/...`), bare `~`, `~/...`, bare `$HOME`, and `$HOME/...`. The body
+    may contain spaces — the caller is responsible for having already
+    pulled it from a balanced quoted segment.
+    """
+    if not body:
+        return None
+    if body.startswith("/"):
+        return body
+    if _WIN_DRIVE_RE.match(body):
+        return body
+    if body == "~":
+        return home
+    if body.startswith("~/") or body.startswith("~\\"):
+        return home + body[1:]
+    if body == "$HOME":
+        return home
+    if body.startswith("$HOME/") or body.startswith("$HOME\\"):
+        return home + body[5:]
+    return None
+
+
 def extract_absolute_paths(command: str) -> list[str]:
     """Extract absolute paths from a shell command (best-effort).
 
     Handles literal absolute paths (/...), tilde paths (~/...), and
     $HOME paths ($HOME/...). Tilde and $HOME are expanded to the real
     home directory. Deduplicates results.
+
+    Quoted segments (`"..."`, `'...'`) are handled by a pre-pass so paths
+    containing spaces — e.g. `cat "/Users/me/Box 工作区/file.txt"` or
+    `Get-Content "C:\\Users\\foo bar\\x"` — are kept whole rather than
+    truncated at the first space. Windows drive letter paths are only
+    detected inside quotes.
     """
     seen: set[str] = set()
     paths: list[str] = []
+    home = str(Path.home())
 
     # Strip sed/perl substitution expressions first so the regex bodies don't
     # get mis-parsed as absolute paths (e.g. the `/g` flag at the end of
     # `sed 's|a|b|g'` or the literal `/` delimiters in `s/foo/bar/`).
     sanitized = _SED_SUBST_RE.sub(" ", command)
+
+    # Quote-aware pre-pass: extract absolute paths from `"..."` / `'...'`
+    # bodies, then replace the entire quoted span (including the quote
+    # chars) with whitespace so the downstream regex doesn't double-match
+    # and so the lookbehind `(?<![\w}])["\']` heuristics aren't confused.
+    def _consume_quoted(m: re.Match) -> str:
+        body = m.group(2)
+        expanded = _classify_quoted_path(body, home)
+        if expanded is not None and expanded not in _SYSTEM_ROOT_NOISE \
+                and expanded not in ("/dev/null", "/dev/stdin",
+                                     "/dev/stdout", "/dev/stderr"):
+            if expanded not in seen:
+                seen.add(expanded)
+                paths.append(expanded)
+            return " " * (m.end() - m.start())
+        return m.group(0)
+
+    sanitized = _QUOTED_SEGMENT_RE.sub(_consume_quoted, sanitized)
+
     # Normalize real shell redirects (`>`, `>>`, `2>`) to whitespace so the
     # path immediately following them is picked up via the whitespace-prefix
     # branch of `_ABS_PATH_RE`. We do this only for redirects preceded by
@@ -582,8 +643,6 @@ def extract_absolute_paths(command: str) -> list[str]:
         if p not in seen:
             seen.add(p)
             paths.append(p)
-
-    home = str(Path.home())
 
     for m in _TILDE_PATH_RE.finditer(sanitized):
         raw = m.group(1)  # e.g. "~" or "~/Downloads"

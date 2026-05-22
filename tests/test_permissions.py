@@ -290,7 +290,51 @@ class TestExtractAbsolutePaths:
 
     def test_quoted_path(self):
         result = extract_absolute_paths('cat "/tmp/my file.txt"')
-        assert "/tmp/my" in result or len(result) > 0  # best-effort
+        assert "/tmp/my file.txt" in result
+
+    def test_single_quoted_path_with_space(self):
+        result = extract_absolute_paths("cat '/tmp/my file.txt'")
+        assert "/tmp/my file.txt" in result
+
+    def test_quoted_workspace_path_with_spaces_and_cjk(self):
+        """Workspace paths with spaces + non-ASCII must be kept whole.
+
+        Regression: `/Users/WorkBuddy/02 小浣熊工作区/file.txt` was being
+        truncated to `/Users/WorkBuddy/02` by the whitespace-bounded char
+        class in `_ABS_PATH_RE`, which then failed the workspace check.
+        """
+        result = extract_absolute_paths(
+            'cat "/Users/WorkBuddy/02 小浣熊工作区/file.txt"'
+        )
+        assert "/Users/WorkBuddy/02 小浣熊工作区/file.txt" in result
+        assert "/Users/WorkBuddy/02" not in result
+
+    def test_quoted_windows_drive_letter_with_space(self):
+        """`"C:\\Users\\foo bar\\file.txt"` is extracted whole."""
+        result = extract_absolute_paths(
+            'Get-Content "C:\\Users\\foo bar\\file.txt"'
+        )
+        assert "C:\\Users\\foo bar\\file.txt" in result
+
+    def test_quoted_windows_forward_slash_drive(self):
+        """`"C:/Users/foo bar/file.txt"` (forward slash) is extracted whole."""
+        result = extract_absolute_paths('cat "C:/Users/foo bar/file.txt"')
+        assert "C:/Users/foo bar/file.txt" in result
+
+    def test_quoted_tilde_path_with_space(self):
+        home = str(Path.home())
+        result = extract_absolute_paths('cat "~/Box 工作区/file.txt"')
+        assert f"{home}/Box 工作区/file.txt" in result
+
+    def test_quoted_home_var_path_with_space(self):
+        home = str(Path.home())
+        result = extract_absolute_paths('cat "$HOME/Box 工作区/file.txt"')
+        assert f"{home}/Box 工作区/file.txt" in result
+
+    def test_quoted_dev_null_excluded(self):
+        """Even inside quotes, `/dev/null` is not a real target."""
+        result = extract_absolute_paths('echo hi > "/dev/null"')
+        assert "/dev/null" not in result
 
     def test_dev_null_excluded(self):
         result = extract_absolute_paths("command 2>/dev/null")

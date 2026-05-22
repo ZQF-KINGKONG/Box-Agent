@@ -1355,7 +1355,7 @@ async def run_agent_loop(
                     yield artifact
                 # Diff-based: catch files not referenced in output text
                 post_files = _snapshot_workspace(workspace_dir)
-                already = {a.path for a in regex_artifacts}
+                already = {a.abs_path for a in regex_artifacts}
                 for artifact in _detect_new_files(tc_id, pre_files, post_files, already, workspace_dir):
                     yield artifact
 

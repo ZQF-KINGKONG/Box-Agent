@@ -321,6 +321,37 @@ class TestExtractAbsolutePaths:
         result = extract_absolute_paths('cat "C:/Users/foo bar/file.txt"')
         assert "C:/Users/foo bar/file.txt" in result
 
+    def test_unquoted_windows_drive_backslash(self):
+        """`type C:\\Windows\\System32\\hosts` (no quotes) is extracted.
+
+        Without this, the permission engine would silently miss every
+        unquoted Windows-drive path on Windows hosts.
+        """
+        result = extract_absolute_paths("type C:\\Windows\\System32\\hosts")
+        assert "C:\\Windows\\System32\\hosts" in result
+
+    def test_unquoted_windows_drive_forward_slash(self):
+        """Unquoted `C:/Users/admin/secret.txt` is extracted."""
+        result = extract_absolute_paths("cat C:/Users/admin/secret.txt")
+        assert "C:/Users/admin/secret.txt" in result
+
+    def test_unquoted_windows_drive_stops_at_shell_separator(self):
+        """Unquoted Windows path terminates at `;`, `|`, `&`, whitespace."""
+        result = extract_absolute_paths("cd C:\\tmp; ls")
+        assert "C:\\tmp" in result
+        assert "C:\\tmp;" not in result
+
+    def test_url_scheme_not_treated_as_windows_drive(self):
+        """`https:`, `file:`, `git:` etc. (multi-char schemes) are NOT drives."""
+        assert extract_absolute_paths("curl https://example.com/x.txt") == []
+        assert extract_absolute_paths("open file:///etc/hosts") == []
+        assert extract_absolute_paths("git clone git://host/x.git") == []
+
+    def test_drive_letter_without_path_separator_not_extracted(self):
+        """`D:00:00` (time) and `TODO:` (label) must not be parsed as drives."""
+        assert extract_absolute_paths("echo D:00:00") == []
+        assert extract_absolute_paths("echo TODO: fix") == []
+
     def test_quoted_tilde_path_with_space(self):
         home = str(Path.home())
         result = extract_absolute_paths('cat "~/Box 工作区/file.txt"')

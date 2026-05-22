@@ -527,6 +527,16 @@ _QUOTED_SEGMENT_RE = re.compile(r'(["\'])([^"\']*?)\1')
 # Windows-style absolute path: drive letter + `:` + `\` or `/`.
 _WIN_DRIVE_RE = re.compile(r'^[A-Za-z]:[\\/]')
 
+# Unquoted Windows drive paths: `C:\foo\bar` or `D:/foo/bar`. Must be a single
+# letter (so `https:` / `file:` URL schemes are not mistaken for drives) at a
+# token boundary (SOL or shell separator). Stops at whitespace, shell metachars,
+# or quotes; backslash IS kept (it's a path separator on Windows, not a shell
+# escape inside an unquoted path on cmd/PowerShell). Quoted Windows drive paths
+# are already handled by the `_QUOTED_SEGMENT_RE` pre-pass.
+_WIN_DRIVE_PATH_RE = re.compile(
+    r'(?:^|[\s;|&])([A-Za-z]:[\\/][^\s"\'<>;|&]*)'
+)
+
 # sed/perl-style substitution: `s<delim>pattern<delim>replacement<delim>[flags]`.
 # Stripped before path extraction so the regex bodies of `sed 's/.../.../g'`,
 # `perl -pe 's|...|...|'` etc. don't get scanned for absolute paths.
@@ -659,5 +669,14 @@ def extract_absolute_paths(command: str) -> list[str]:
         if expanded not in seen:
             seen.add(expanded)
             paths.append(expanded)
+
+    # Unquoted Windows drive-letter paths (`C:\…`, `D:/…`). Quoted variants
+    # are already consumed by the quote-aware pre-pass. Backslash-trailing
+    # punctuation that some shells append (e.g. `;`) is stripped.
+    for m in _WIN_DRIVE_PATH_RE.finditer(sanitized):
+        p = m.group(1).rstrip(";")
+        if p not in seen:
+            seen.add(p)
+            paths.append(p)
 
     return paths

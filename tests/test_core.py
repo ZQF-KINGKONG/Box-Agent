@@ -4,7 +4,12 @@ import asyncio
 
 import pytest
 
-from box_agent.core import _detect_artifacts, run_agent_loop
+from box_agent.core import (
+    _detect_artifacts,
+    _detect_new_files,
+    _snapshot_workspace,
+    run_agent_loop,
+)
 from box_agent.events import (
     ArtifactEvent,
     ContentEvent,
@@ -705,6 +710,102 @@ def test_artifact_detect_path_traversal_blocked(tmp_path):
     (tmp_path / "secret.txt").write_text("nope")
     arts = _detect_artifacts("t6", "jupyter", "See [../secret.txt]", str(tmp_path))
     assert arts == []
+
+
+def test_detect_new_files_dedupes_against_regex_artifacts(tmp_path):
+    """Diff-based detection must skip files already emitted by regex detection.
+
+    Regression for the AttributeError ``'ArtifactEvent' object has no attribute
+    'path'`` that surfaced in production whenever a tool produced any artifact:
+    core.py built the dedupe set from ``a.path`` but ArtifactEvent only exposes
+    ``abs_path`` / ``rel_path``. The bug masked every downstream tool failure as
+    a generic ACP "Internal error".
+    """
+    out = tmp_path / "output"
+    out.mkdir()
+    (out / "chart.png").write_bytes(b"\x89PNG")
+
+    pre_files: set = set()
+    regex_arts = _detect_artifacts("tc", "jupyter", "Saved [chart.png]", str(tmp_path))
+    assert len(regex_arts) == 1
+
+    already = {a.abs_path for a in regex_arts}
+    post_files = _snapshot_workspace(str(tmp_path))
+
+    new_arts = _detect_new_files("tc", pre_files, post_files, already, str(tmp_path))
+    assert new_arts == [], "file already emitted by regex pass must not be re-emitted"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_emits_artifact_without_attribute_error(tmp_path):
+    """End-to-end regression for ``ArtifactEvent.path`` AttributeError.
+
+    Before the fix, ``{a.path for a in regex_artifacts}`` raised AttributeError
+    inside the post-tool artifact-detection block whenever a tool produced a
+    file, which surfaced as ACP "Internal error" and masked real tool failures.
+    Drives ``run_agent_loop`` with a tool that writes a PNG under ``output/``
+    and references it in its result; the artifact must be yielded once, no
+    ErrorEvent should fire, and the loop must reach ``DoneEvent``.
+    """
+    from pathlib import Path as _Path
+
+    class WriteAndAnnounceTool(Tool):
+        def __init__(self, workspace_dir: str):
+            self._ws = workspace_dir
+
+        @property
+        def name(self):
+            return "make_chart"
+
+        @property
+        def description(self):
+            return "Writes a PNG under output/ and references it in result"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {}}
+
+        async def execute(self):
+            out = _Path(self._ws) / "output"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            return ToolResult(success=True, content="Saved [chart.png]")
+
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(name="make_chart", arguments={}),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"make_chart": WriteAndAnnounceTool(str(tmp_path))},
+            max_steps=5,
+            workspace_dir=str(tmp_path),
+        )
+    )
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert errors == [], f"unexpected ErrorEvent(s): {errors}"
+
+    artifacts = [e for e in events if isinstance(e, ArtifactEvent)]
+    assert len(artifacts) == 1, f"expected exactly one artifact, got {artifacts}"
+    assert artifacts[0].rel_path == "output/chart.png"
+
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done and done[0].stop_reason == StopReason.END_TURN
 
 
 # ── Micro-compact tests ──────────────────────────────────────────

@@ -243,11 +243,16 @@ Box Agent supports the [Agent Communication Protocol](https://github.com/nichoch
 # Download pre-built binary
 gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
 
-# Or build from source
-uv run box-agent-build-runtime --version 0.8.51
+# Or build from source (current platform)
+uv run python scripts/build_runtime.py
 
 # Build macOS Intel/x64 runtime from Apple Silicon
-arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
+# Requires a separate x86_64 venv because PyInstaller cannot bundle arm64 wheels into an x64 binary.
+# One-time setup:
+#   arch -x86_64 /bin/bash -c 'curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin-x64" sh'
+#   UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv sync
+# Build:
+arch -x86_64 .venv-x64/bin/python scripts/build_runtime.py --target darwin-x64
 ```
 
 The runtime communicates via JSON-RPC over stdio. stdout = protocol only, stderr = diagnostics.

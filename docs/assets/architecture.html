@@ -1,0 +1,655 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Box Agent 架构图</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+
+:root {
+  --bg: #0c0e14;
+  --surface: #12151e;
+  --surface-2: #181c28;
+  --surface-3: #1e2233;
+  --border: #2a2f42;
+  --border-light: #363c54;
+  --text: #e4e7f0;
+  --text-dim: #8890a8;
+  --text-muted: #5a6178;
+  --accent-1: #6ee7b7;
+  --accent-1-dim: rgba(110, 231, 183, 0.12);
+  --accent-2: #93c5fd;
+  --accent-2-dim: rgba(147, 197, 253, 0.1);
+  --accent-3: #fbbf24;
+  --accent-3-dim: rgba(251, 191, 36, 0.1);
+  --accent-4: #f472b6;
+  --accent-4-dim: rgba(244, 114, 182, 0.1);
+  --accent-5: #a78bfa;
+  --accent-5-dim: rgba(167, 139, 250, 0.1);
+  --accent-6: #fb923c;
+  --accent-6-dim: rgba(251, 146, 60, 0.1);
+  --grid: rgba(42, 47, 66, 0.3);
+  --radius: 8px;
+  --radius-lg: 12px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Noto Sans SC', sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+.page {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 48px 32px 80px;
+}
+
+/* Header */
+.header {
+  text-align: center;
+  margin-bottom: 56px;
+  position: relative;
+}
+
+.header::before {
+  content: '';
+  position: absolute;
+  top: -48px; left: 50%;
+  transform: translateX(-50%);
+  width: 600px; height: 300px;
+  background: radial-gradient(ellipse, rgba(110,231,183,0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.header-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: var(--accent-1);
+  margin-bottom: 12px;
+  display: inline-block;
+  padding: 4px 12px;
+  background: var(--accent-1-dim);
+  border-radius: 4px;
+}
+
+.header h1 {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: clamp(28px, 4vw, 40px);
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.5px;
+  margin-bottom: 8px;
+}
+
+.header p {
+  font-size: 14px;
+  color: var(--text-dim);
+  max-width: 560px;
+  margin: 0 auto;
+  line-height: 1.7;
+}
+
+/* Layer system */
+.layer {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.layer-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  padding-left: 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.layer-label::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border), transparent);
+}
+
+.layer-content {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  position: relative;
+  overflow: hidden;
+}
+
+.layer-content::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 24px 24px;
+  pointer-events: none;
+  opacity: 0.4;
+}
+
+/* Nodes */
+.node-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  position: relative;
+  z-index: 1;
+}
+
+.node-grid.center {
+  justify-content: center;
+}
+
+.node {
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  transition: all 0.2s ease;
+  cursor: default;
+  position: relative;
+}
+
+.node:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+  z-index: 2;
+}
+
+.node-icon {
+  font-size: 18px;
+  margin-bottom: 6px;
+  display: block;
+}
+
+.node-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  white-space: nowrap;
+}
+
+.node-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  max-width: 180px;
+}
+
+.node-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-top: 6px;
+}
+
+/* Color variants */
+.node.green { border-color: rgba(110,231,183,0.2); }
+.node.green:hover { border-color: var(--accent-1); background: var(--accent-1-dim); }
+.node.green .node-title { color: var(--accent-1); }
+.node.green .node-tag { background: var(--accent-1-dim); color: var(--accent-1); }
+
+.node.blue { border-color: rgba(147,197,253,0.2); }
+.node.blue:hover { border-color: var(--accent-2); background: var(--accent-2-dim); }
+.node.blue .node-title { color: var(--accent-2); }
+.node.blue .node-tag { background: var(--accent-2-dim); color: var(--accent-2); }
+
+.node.yellow { border-color: rgba(251,191,36,0.2); }
+.node.yellow:hover { border-color: var(--accent-3); background: var(--accent-3-dim); }
+.node.yellow .node-title { color: var(--accent-3); }
+.node.yellow .node-tag { background: var(--accent-3-dim); color: var(--accent-3); }
+
+.node.pink { border-color: rgba(244,114,182,0.2); }
+.node.pink:hover { border-color: var(--accent-4); background: var(--accent-4-dim); }
+.node.pink .node-title { color: var(--accent-4); }
+.node.pink .node-tag { background: var(--accent-4-dim); color: var(--accent-4); }
+
+.node.purple { border-color: rgba(167,139,250,0.2); }
+.node.purple:hover { border-color: var(--accent-5); background: var(--accent-5-dim); }
+.node.purple .node-title { color: var(--accent-5); }
+.node.purple .node-tag { background: var(--accent-5-dim); color: var(--accent-5); }
+
+.node.orange { border-color: rgba(251,146,60,0.2); }
+.node.orange:hover { border-color: var(--accent-6); background: var(--accent-6-dim); }
+.node.orange .node-title { color: var(--accent-6); }
+.node.orange .node-tag { background: var(--accent-6-dim); color: var(--accent-6); }
+
+/* Wide node */
+.node.wide {
+  flex: 1 1 100%;
+}
+
+.node.wide .node-inner {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.node.wide .node-desc {
+  max-width: none;
+}
+
+/* Compact node */
+.node.sm {
+  padding: 10px 14px;
+}
+
+.node.sm .node-title {
+  font-size: 11px;
+  margin-bottom: 0;
+}
+
+/* Flow arrows between layers */
+.flow-arrow {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 36px;
+  position: relative;
+}
+
+.flow-arrow svg {
+  opacity: 0.3;
+}
+
+.flow-arrow .flow-label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  color: var(--text-muted);
+  position: absolute;
+  right: 16px;
+}
+
+/* Central node */
+.node.hero {
+  text-align: center;
+  padding: 20px 40px;
+  border-width: 2px;
+}
+
+.node.hero .node-title {
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.node.hero .node-desc {
+  max-width: 320px;
+  margin: 0 auto;
+}
+
+/* Sub-grid inside a node */
+.sub-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.sub-item {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 6px 8px;
+  background: rgba(0,0,0,0.2);
+  border-radius: 4px;
+  text-align: center;
+  border: 1px solid transparent;
+  transition: all 0.15s;
+}
+
+.sub-item:hover {
+  border-color: var(--border-light);
+  color: var(--text);
+}
+
+/* Legend */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  justify-content: center;
+  margin-top: 40px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+/* Stats bar */
+.stats-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 32px;
+}
+
+.stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  text-align: center;
+}
+
+.stat-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--accent-1);
+}
+
+.stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+/* Data flow animation */
+@keyframes flowDown {
+  0% { opacity: 0; transform: translateY(-4px); }
+  50% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(4px); }
+}
+
+.flow-arrow .dot {
+  width: 3px;
+  height: 3px;
+  background: var(--accent-1);
+  border-radius: 50%;
+  animation: flowDown 1.5s ease-in-out infinite;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .page { padding: 24px 16px 60px; }
+  .node-grid { flex-direction: column; }
+  .node { flex: 1 1 100%; }
+  .node-desc { max-width: none; }
+  .sub-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .flow-arrow .dot { animation: none; opacity: 0.5; }
+  .node:hover { transform: none; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="header">
+    <span class="header-tag">System Architecture</span>
+    <h1>Box Agent</h1>
+    <p>通用 AI Agent 框架 — 沙箱执行 / 子Agent并行 / 多LLM / ACP协议 / 文档技能</p>
+  </header>
+
+  <!-- LAYER 1: User Interface -->
+  <div class="layer">
+    <div class="layer-label">用户接口层</div>
+    <div class="layer-content">
+      <div class="node-grid center">
+        <div class="node green sm" style="flex:1 1 200px">
+          <div class="node-title">CLI 命令行</div>
+        </div>
+        <div class="node blue sm" style="flex:1 1 200px">
+          <div class="node-title">ACP 嵌入式协议</div>
+        </div>
+        <div class="node yellow sm" style="flex:1 1 200px">
+          <div class="node-title">--task 一次性任务</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 L10 16 M5 11 L10 16 L15 11" stroke="currentColor" stroke-width="1.5" fill="none" color="#5a6178"/></svg>
+    <span class="flow-label">用户输入 / 事件流</span>
+  </div>
+
+  <!-- LAYER 2: Agent Core -->
+  <div class="layer">
+    <div class="layer-label">Agent 核心循环</div>
+    <div class="layer-content">
+      <div class="node-grid center">
+        <div class="node hero green">
+          <div class="node-title">Agent Core Loop</div>
+          <div class="node-desc">任务驱动的主执行循环 — 消息处理、工具调度、流式事件、上下文压缩</div>
+        </div>
+      </div>
+      <div class="node-grid center" style="margin-top: 10px">
+        <div class="node sm blue">
+          <div class="node-title">Message</div>
+        </div>
+        <div class="node sm blue">
+          <div class="node-title">ToolCall</div>
+        </div>
+        <div class="node sm blue">
+          <div class="node-title">ToolResult</div>
+        </div>
+        <div class="node sm blue">
+          <div class="node-title">LLMResponse</div>
+        </div>
+        <div class="node sm blue">
+          <div class="node-title">StreamEvent</div>
+        </div>
+        <div class="node sm blue">
+          <div class="node-title">StopReason</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 L10 16 M5 11 L10 16 L15 11" stroke="currentColor" stroke-width="1.5" fill="none" color="#5a6178"/></svg>
+    <span class="flow-label">工具调用 / 结果返回</span>
+  </div>
+
+  <!-- LAYER 3: Services -->
+  <div class="layer">
+    <div class="layer-label">服务层</div>
+    <div class="layer-content">
+      <div class="node-grid">
+        <div class="node purple" style="flex:1 1 220px">
+          <div class="node-title">LLM 协议适配</div>
+          <div class="node-desc">统一接口对接多家模型协议</div>
+          <div class="sub-grid">
+            <div class="sub-item">Anthropic 协议</div>
+            <div class="sub-item">OpenAI 协议</div>
+            <div class="sub-item">自定义 API</div>
+          </div>
+        </div>
+        <div class="node pink" style="flex:1 1 220px">
+          <div class="node-title">记忆系统</div>
+          <div class="node-desc">跨会话持久化，2层自动压缩</div>
+          <div class="sub-grid">
+            <div class="sub-item">核心记忆</div>
+            <div class="sub-item">上下文记忆</div>
+            <div class="sub-item">记忆晋升</div>
+            <div class="sub-item">微压缩</div>
+          </div>
+        </div>
+        <div class="node yellow" style="flex:1 1 220px">
+          <div class="node-title">权限引擎</div>
+          <div class="node-desc">PermissionEngine — 工具调用审批与安全管控</div>
+          <div class="sub-grid" style="grid-template-columns: 1fr 1fr">
+            <div class="sub-item">权限协商</div>
+            <div class="sub-item">命令安全检测</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 L10 16 M5 11 L10 16 L15 11" stroke="currentColor" stroke-width="1.5" fill="none" color="#5a6178"/></svg>
+    <span class="flow-label">加载 / 注册 / 执行</span>
+  </div>
+
+  <!-- LAYER 4: Tools -->
+  <div class="layer">
+    <div class="layer-label">工具层</div>
+    <div class="layer-content">
+      <div class="node-grid">
+        <div class="node green sm" style="flex:1 1 140px">
+          <div class="node-title">Bash 工具</div>
+          <div class="node-desc">后台Shell / 进程管理</div>
+        </div>
+        <div class="node green sm" style="flex:1 1 140px">
+          <div class="node-title">文件工具</div>
+          <div class="node-desc">Read / Write / Edit</div>
+        </div>
+        <div class="node blue sm" style="flex:1 1 140px">
+          <div class="node-title">Jupyter 工具</div>
+          <div class="node-desc">沙箱内核 / 隔离 venv</div>
+        </div>
+        <div class="node purple sm" style="flex:1 1 140px">
+          <div class="node-title">子 Agent 工具</div>
+          <div class="node-desc">并发执行 / 结果汇总</div>
+        </div>
+        <div class="node yellow sm" style="flex:1 1 140px">
+          <div class="node-title">Todo 工具</div>
+          <div class="node-desc">任务跟踪 / 状态管理</div>
+        </div>
+        <div class="node orange sm" style="flex:1 1 140px">
+          <div class="node-title">图片生成</div>
+          <div class="node-desc">Seedream / 自定义端点</div>
+        </div>
+      </div>
+      <div class="node-grid center" style="margin-top: 10px">
+        <div class="node pink" style="flex:1 1 240px">
+          <div class="node-title">MCP Loader</div>
+          <div class="node-desc">动态加载外部 MCP 工具服务器，支持 stdio / SSE 连接</div>
+        </div>
+        <div class="node purple" style="flex:1 1 240px">
+          <div class="node-title">Skill Loader</div>
+          <div class="node-desc">运行时加载技能包，支持 Python / Node.js 运行时</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 L10 16 M5 11 L10 16 L15 11" stroke="currentColor" stroke-width="1.5" fill="none" color="#5a6178"/></svg>
+    <span class="flow-label">技能调用</span>
+  </div>
+
+  <!-- LAYER 5: Skills -->
+  <div class="layer">
+    <div class="layer-label">技能层</div>
+    <div class="layer-content">
+      <div class="node-grid">
+        <div class="node orange" style="flex:1 1 260px">
+          <div class="node-title">文档处理技能</div>
+          <div class="node-desc">四大文档格式全覆盖</div>
+          <div class="sub-grid">
+            <div class="sub-item">PPTX (HTML-first)</div>
+            <div class="sub-item">PDF 提取/填写</div>
+            <div class="sub-item">DOCX 生成/编辑</div>
+            <div class="sub-item">XLSX 导出/重算</div>
+          </div>
+        </div>
+        <div class="node pink" style="flex:1 1 260px">
+          <div class="node-title">前端与设计技能</div>
+          <div class="node-desc">Canvas / 主题 / 数据看板</div>
+          <div class="sub-grid">
+            <div class="sub-item">Canvas 设计</div>
+            <div class="sub-item">主题工厂 (10套)</div>
+            <div class="sub-item">数据看板</div>
+            <div class="sub-item">HTML 模板</div>
+            <div class="sub-item">Artifacts 构建</div>
+          </div>
+        </div>
+        <div class="node blue" style="flex:1 1 260px">
+          <div class="node-title">其他技能</div>
+          <div class="node-desc">测试 / 通讯 / 邮件 / 记忆</div>
+          <div class="sub-grid">
+            <div class="sub-item">Web 测试</div>
+            <div class="sub-item">邮件 Playwright</div>
+            <div class="sub-item">内部通讯</div>
+            <div class="sub-item">记忆指南</div>
+            <div class="sub-item">技能创建器</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="flow-arrow">
+    <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 2 L10 16 M5 11 L10 16 L15 11" stroke="currentColor" stroke-width="1.5" fill="none" color="#5a6178"/></svg>
+    <span class="flow-label">运行环境</span>
+  </div>
+
+  <!-- LAYER 6: Runtime -->
+  <div class="layer">
+    <div class="layer-label">运行时</div>
+    <div class="layer-content">
+      <div class="node-grid center">
+        <div class="node green sm" style="flex:1 1 180px">
+          <div class="node-title">沙箱 Jupyter 内核</div>
+          <div class="node-desc">隔离 venv 执行</div>
+        </div>
+        <div class="node blue sm" style="flex:1 1 180px">
+          <div class="node-title">Node.js 运行时</div>
+          <div class="node-desc">自管理 / 宿主</div>
+        </div>
+        <div class="node yellow sm" style="flex:1 1 180px">
+          <div class="node-title">Playwright 浏览器</div>
+          <div class="node-desc">Chromium 渲染</div>
+        </div>
+        <div class="node purple sm" style="flex:1 1 180px">
+          <div class="node-title">PyInstaller 打包</div>
+          <div class="node-desc">独立二进制发布</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-1)"></div>核心循环 / Bash / 运行时</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-2)"></div>消息模型 / Jupyter / 工具</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-5)"></div>LLM / 子Agent / 技能加载</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-4)"></div>记忆 / MCP / 前端技能</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-3)"></div>权限引擎 / Todo</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent-6)"></div>图片生成 / 文档处理</div>
+  </div>
+
+</div>
+</body>
+</html>

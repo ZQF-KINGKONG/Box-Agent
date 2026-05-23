@@ -26,6 +26,9 @@ ENV/
 env/
 .venv
 
+# graphify
+graphify-out
+
 # IDE
 .vscode/
 .idea/

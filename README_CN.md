@@ -230,8 +230,16 @@ Box Agent 支持 [Agent Communication Protocol](https://github.com/nichochar/age
 # 下载预构建二进制
 gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
 
-# 或从源码构建
+# 或从源码构建（当前平台）
 uv run python scripts/build_runtime.py
+
+# 在 Apple Silicon 上构建 macOS Intel/x64 运行时
+# 需要单独的 x86_64 venv —— PyInstaller 无法把 arm64 wheel 塞进 x64 产物。
+# 一次性准备：
+#   arch -x86_64 /bin/bash -c 'curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin-x64" sh'
+#   UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv sync
+# 打包：
+arch -x86_64 .venv-x64/bin/python scripts/build_runtime.py --target darwin-x64
 ```
 
 运行时通过 JSON-RPC over stdio 通信。stdout = 纯协议数据，stderr = 诊断信息。

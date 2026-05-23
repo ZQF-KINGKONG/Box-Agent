@@ -116,7 +116,7 @@ wheels = [
 
 [[package]]
 name = "box-agent"
-version = "0.8.47"
+version = "0.8.48"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },

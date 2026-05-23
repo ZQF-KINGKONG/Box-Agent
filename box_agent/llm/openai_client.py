@@ -8,7 +8,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from ..retry import RetryConfig, async_retry
+from ..retry import RetryConfig, StreamInterrupted, async_retry, is_retryable_stream_error
 from ..schema import FunctionCall, LLMResponse, Message, StreamEvent, TokenUsage, ToolCall
 from .base import LLMClientBase
 from .debug_logging import (
@@ -397,75 +397,117 @@ class OpenAIClient(LLMClientBase):
         tool_acc: dict[int, dict[str, str]] = {}
         provider_request_id: str | None = None
 
+        async def _open_stream() -> Any:
+            nonlocal provider_request_id
+            try:
+                raw_response = await _await_if_needed(
+                    self.client.chat.completions.with_raw_response.create(**params)
+                )
+                provider_request_id = getattr(raw_response, "request_id", None) or request_id_from_headers(
+                    getattr(raw_response, "headers", None)
+                )
+                log_llm_response_meta(
+                    provider="openai",
+                    mode="stream",
+                    request_id=provider_request_id,
+                    headers=getattr(raw_response, "headers", None),
+                )
+                return await _await_if_needed(raw_response.parse())
+            except AttributeError:
+                return await _await_if_needed(self.client.chat.completions.create(**params))
+
+        max_open_attempts = max(1, self.retry_config.max_retries + 1) if self.retry_config.enabled else 1
+        last_open_exc: Exception | None = None
+        response_stream = None
+        for attempt in range(max_open_attempts):
+            try:
+                response_stream = await _open_stream()
+                break
+            except Exception as exc:
+                last_open_exc = exc
+                log_llm_error_meta(provider="openai", mode="stream", exc=exc)
+                if attempt >= max_open_attempts - 1 or not is_retryable_stream_error(exc):
+                    raise
+                delay = self.retry_config.calculate_delay(attempt)
+                logger.warning(
+                    "openai generate_stream open attempt %d/%d failed: %s; retrying in %.2fs",
+                    attempt + 1, max_open_attempts, exc, delay,
+                )
+                if self.retry_callback:
+                    try:
+                        self.retry_callback(exc, attempt + 1)
+                    except Exception:  # pragma: no cover - callback safety
+                        logger.exception("retry_callback raised")
+                import asyncio as _asyncio
+                await _asyncio.sleep(delay)
+        if response_stream is None:  # pragma: no cover - belt and suspenders
+            raise last_open_exc or RuntimeError("failed to open stream")
+
         try:
-            raw_response = await _await_if_needed(
-                self.client.chat.completions.with_raw_response.create(**params)
-            )
-            provider_request_id = getattr(raw_response, "request_id", None) or request_id_from_headers(
-                getattr(raw_response, "headers", None)
-            )
-            log_llm_response_meta(
-                provider="openai",
-                mode="stream",
-                request_id=provider_request_id,
-                headers=getattr(raw_response, "headers", None),
-            )
-            response_stream = await _await_if_needed(raw_response.parse())
-        except AttributeError:
-            response_stream = await _await_if_needed(self.client.chat.completions.create(**params))
+            async for chunk in response_stream:
+                # Usage info (sent in the final chunk with choices=[])
+                if hasattr(chunk, "usage") and chunk.usage:
+                    usage = TokenUsage(
+                        prompt_tokens=chunk.usage.prompt_tokens or 0,
+                        completion_tokens=chunk.usage.completion_tokens or 0,
+                        total_tokens=chunk.usage.total_tokens or 0,
+                    )
+
+                if not chunk.choices:
+                    continue
+
+                choice = chunk.choices[0]
+
+                # Finish reason
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+
+                delta = choice.delta
+                if delta is None:
+                    continue
+
+                # Reasoning / thinking content (DeepSeek, o1, etc.)
+                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                    thinking_content += delta.reasoning_content
+                    yield StreamEvent(type="thinking", delta=delta.reasoning_content)
+
+                # Text content
+                if delta.content:
+                    text_content += delta.content
+                    yield StreamEvent(type="text", delta=delta.content)
+
+                # Tool call deltas
+                if delta.tool_calls:
+                    for tc_delta in delta.tool_calls:
+                        idx = tc_delta.index
+                        if idx not in tool_acc:
+                            tool_acc[idx] = {
+                                "id": tc_delta.id or "",
+                                "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                                "arguments": "",
+                            }
+                        else:
+                            if tc_delta.id:
+                                tool_acc[idx]["id"] = tc_delta.id
+                            if tc_delta.function and tc_delta.function.name:
+                                tool_acc[idx]["name"] = tc_delta.function.name
+                        if tc_delta.function and tc_delta.function.arguments:
+                            tool_acc[idx]["arguments"] += tc_delta.function.arguments
         except Exception as exc:
             log_llm_error_meta(provider="openai", mode="stream", exc=exc)
-            raise
-
-        async for chunk in response_stream:
-            # Usage info (sent in the final chunk with choices=[])
-            if hasattr(chunk, "usage") and chunk.usage:
-                usage = TokenUsage(
-                    prompt_tokens=chunk.usage.prompt_tokens or 0,
-                    completion_tokens=chunk.usage.completion_tokens or 0,
-                    total_tokens=chunk.usage.total_tokens or 0,
+            if is_retryable_stream_error(exc) and (text_content or thinking_content):
+                logger.warning(
+                    "openai stream interrupted after partial yield "
+                    "(text=%d chars, thinking=%d chars): %s",
+                    len(text_content), len(thinking_content), exc,
                 )
-
-            if not chunk.choices:
-                continue
-
-            choice = chunk.choices[0]
-
-            # Finish reason
-            if choice.finish_reason:
-                finish_reason = choice.finish_reason
-
-            delta = choice.delta
-            if delta is None:
-                continue
-
-            # Reasoning / thinking content (DeepSeek, o1, etc.)
-            if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                thinking_content += delta.reasoning_content
-                yield StreamEvent(type="thinking", delta=delta.reasoning_content)
-
-            # Text content
-            if delta.content:
-                text_content += delta.content
-                yield StreamEvent(type="text", delta=delta.content)
-
-            # Tool call deltas
-            if delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    idx = tc_delta.index
-                    if idx not in tool_acc:
-                        tool_acc[idx] = {
-                            "id": tc_delta.id or "",
-                            "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
-                            "arguments": "",
-                        }
-                    else:
-                        if tc_delta.id:
-                            tool_acc[idx]["id"] = tc_delta.id
-                        if tc_delta.function and tc_delta.function.name:
-                            tool_acc[idx]["name"] = tc_delta.function.name
-                    if tc_delta.function and tc_delta.function.arguments:
-                        tool_acc[idx]["arguments"] += tc_delta.function.arguments
+                raise StreamInterrupted(
+                    last_exception=exc,
+                    partial_text=text_content,
+                    partial_thinking=thinking_content,
+                    provider_request_id=provider_request_id,
+                ) from exc
+            raise
 
         # Build tool calls. If a relay truncates output mid-arguments
         # (`finish_reason="length"`), the accumulated string is invalid JSON

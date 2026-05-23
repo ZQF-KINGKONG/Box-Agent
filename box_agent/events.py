@@ -19,6 +19,7 @@ class StopReason(str, Enum):
     MAX_STEPS = "max_steps"
     MAX_TOKENS = "max_tokens"
     CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
     ERROR = "error"
 
 

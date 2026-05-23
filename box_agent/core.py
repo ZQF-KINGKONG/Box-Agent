@@ -1048,9 +1048,32 @@ async def run_agent_loop(
             )
 
         except Exception as exc:
-            from .retry import RetryExhaustedError
+            from .retry import RetryExhaustedError, StreamInterrupted
 
             provider_request_id = None
+            if isinstance(exc, StreamInterrupted):
+                partial_text = exc.partial_text or ""
+                partial_thinking = exc.partial_thinking or ""
+                if partial_text or partial_thinking:
+                    messages.append(
+                        Message(
+                            role="assistant",
+                            content=partial_text,
+                            thinking=partial_thinking or None,
+                            tool_calls=None,
+                        )
+                    )
+                msg = (
+                    f"LLM stream interrupted: {exc.last_exception!s} "
+                    f"(preserved partial content: {len(partial_text)} chars text, "
+                    f"{len(partial_thinking)} chars thinking)"
+                )
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_error(message=msg, is_fatal=False, exception=exc)
+                    await hook_mgr.fire_done(stop_reason=StopReason.INTERRUPTED, final_content=partial_text)
+                yield ErrorEvent(message=msg, is_fatal=False, exception=exc)
+                yield DoneEvent(stop_reason=StopReason.INTERRUPTED, final_content=partial_text)
+                return
             if isinstance(exc, RetryExhaustedError):
                 msg = f"LLM call failed after {exc.attempts} retries\nLast error: {exc.last_exception!s}"
             else:

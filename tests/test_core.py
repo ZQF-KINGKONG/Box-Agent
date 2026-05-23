@@ -808,6 +808,60 @@ async def test_run_agent_loop_emits_artifact_without_attribute_error(tmp_path):
     assert done and done[0].stop_reason == StopReason.END_TURN
 
 
+# ── Stream interrupted tests ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_stream_interrupted_preserves_partial_assistant_message(tmp_path):
+    """When the upstream LLM closes the chunked HTTP stream mid-response,
+    core.py must NOT mark the error fatal and MUST persist the partial
+    assistant content into history, so user-triggered "继续" has a coherent
+    base to continue from instead of restarting empty.
+    """
+    from box_agent.retry import StreamInterrupted
+
+    class DroppingStreamLLM:
+        async def generate(self, messages, tools=None):  # pragma: no cover
+            raise AssertionError("should not be called")
+
+        async def generate_stream(self, messages, tools=None, **_):
+            yield StreamEvent(type="text", delta="第一篇：")
+            yield StreamEvent(type="text", delta="中国乘用车市场总览")
+            raise StreamInterrupted(
+                last_exception=RuntimeError(
+                    "peer closed connection without sending complete message body "
+                    "(incomplete chunked read)"
+                ),
+                partial_text="第一篇：中国乘用车市场总览",
+                partial_thinking="",
+                provider_request_id="req-x",
+            )
+
+    msgs = _msgs()
+    events = await collect(
+        run_agent_loop(
+            llm=DroppingStreamLLM(),
+            messages=msgs,
+            tools={},
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+        )
+    )
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1, f"expected exactly one ErrorEvent, got {errors}"
+    assert errors[0].is_fatal is False, "stream interruption must not be fatal"
+    assert "interrupted" in errors[0].message.lower()
+
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done and done[0].stop_reason == StopReason.INTERRUPTED
+    assert done[0].final_content == "第一篇：中国乘用车市场总览"
+
+    assistant_msgs = [m for m in msgs if m.role == "assistant"]
+    assert assistant_msgs, "partial assistant message must be appended to history"
+    assert assistant_msgs[-1].content == "第一篇：中国乘用车市场总览"
+
+
 # ── Micro-compact tests ──────────────────────────────────────────
 
 

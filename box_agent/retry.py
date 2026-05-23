@@ -70,6 +70,67 @@ class RetryExhaustedError(Exception):
         super().__init__(f"Retry failed after {attempts} attempts. Last error: {str(last_exception)}")
 
 
+class StreamInterrupted(Exception):
+    """Raised when a streaming LLM call drops mid-stream after partial content was already yielded.
+
+    Carries the partial text/thinking accumulated before the drop so the agent loop can preserve
+    it as a partial assistant message and resume on user request instead of restarting from scratch.
+    """
+
+    def __init__(
+        self,
+        last_exception: Exception,
+        partial_text: str = "",
+        partial_thinking: str = "",
+        provider_request_id: str | None = None,
+    ):
+        self.last_exception = last_exception
+        self.partial_text = partial_text
+        self.partial_thinking = partial_thinking
+        self.provider_request_id = provider_request_id
+        super().__init__(
+            f"LLM stream interrupted mid-response (partial_text={len(partial_text)} chars, "
+            f"partial_thinking={len(partial_thinking)} chars): {last_exception!s}"
+        )
+
+
+def is_retryable_stream_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` looks like a transient network/stream error worth retrying."""
+    import http.client as _http_client
+
+    # Match by class name so we don't hard-import httpx/openai (they're optional).
+    cls_names = {c.__name__ for c in type(exc).__mro__}
+    transient_names = {
+        "RemoteProtocolError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "ConnectError",
+        "WriteError",
+        "ReadError",
+        "PoolTimeout",
+        "IncompleteRead",
+        "ProtocolError",
+        "ChunkedEncodingError",
+        "APIConnectionError",
+        "APITimeoutError",
+    }
+    if cls_names & transient_names:
+        return True
+    if isinstance(exc, (ConnectionError, TimeoutError, _http_client.IncompleteRead)):
+        return True
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "peer closed connection",
+            "incomplete chunked read",
+            "incomplete read",
+            "connection reset",
+            "server disconnected",
+        )
+    )
+
+
 def async_retry(
     config: RetryConfig | None = None,
     on_retry: Callable[[Exception, int], None] | None = None,

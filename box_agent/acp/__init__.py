@@ -723,7 +723,99 @@ class BoxACPAgent:
             return await self._memory_proposal_list(params)
         if method == "memory_proposal_apply":
             return self._memory_proposal_apply(params)
+        if method == "llm/prompt":
+            return await self._llm_prompt(params)
         return {"error": f"unknown_method: {method}"}
+
+    async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Run a single tool-free completion (titles/summaries/classification).
+
+        Bypasses ``newSession``: no MCP wait, no skills metadata, no tools, no
+        memory recall/extraction, no conversation history. Errors are returned
+        as structured ``{"error": {code, message}}`` so callers can fall back
+        without parsing free-form text.
+        """
+        from box_agent.llm.lightweight import (
+            LightweightInvalidArgs,
+            LightweightPromptError,
+            LightweightTimeout,
+            run_lightweight_prompt,
+        )
+
+        prompt = params.get("prompt", "")
+        system_prompt = params.get("systemPrompt") or None
+        timeout_ms = params.get("timeoutMs")
+        purpose = (params.get("_meta") or {}).get("purpose") or params.get("purpose") or ""
+        workspace_label = params.get("workspaceLabel") or ""
+
+        if not isinstance(prompt, str) or not prompt.strip():
+            return {"error": {"code": "invalid_args", "message": "prompt must be a non-empty string"}}
+        if system_prompt is not None and not isinstance(system_prompt, str):
+            return {"error": {"code": "invalid_args", "message": "systemPrompt must be a string"}}
+
+        timeout: float = 30.0
+        if timeout_ms is not None:
+            try:
+                timeout = max(0.001, float(timeout_ms) / 1000.0)
+            except (TypeError, ValueError):
+                return {"error": {"code": "invalid_args", "message": "timeoutMs must be a number"}}
+
+        provider = getattr(self._llm, "provider", None)
+        model = getattr(self._llm, "model", "")
+        try:
+            result = await run_lightweight_prompt(
+                self._llm,
+                prompt,
+                system_prompt=system_prompt,
+                timeout=timeout,
+            )
+        except LightweightInvalidArgs as exc:
+            return {"error": {"code": exc.code, "message": str(exc)}}
+        except LightweightTimeout as exc:
+            log.warn(
+                "llm/prompt_timeout",
+                purpose=purpose,
+                workspace=workspace_label,
+                timeout_ms=int(timeout * 1000),
+                input_chars=len(prompt),
+                provider=str(provider),
+                model=model,
+            )
+            return {"error": {"code": exc.code, "message": str(exc)}}
+        except LightweightPromptError as exc:
+            log.warn(
+                "llm/prompt_error",
+                purpose=purpose,
+                workspace=workspace_label,
+                code=exc.code,
+                message=str(exc),
+                provider=str(provider),
+                model=model,
+            )
+            return {"error": {"code": exc.code, "message": str(exc)}}
+
+        log.info(
+            "llm/prompt_ok",
+            purpose=purpose,
+            workspace=workspace_label,
+            duration_ms=result.duration_ms,
+            input_chars=len(prompt),
+            output_chars=len(result.text),
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            finish_reason=result.finish_reason,
+            provider=str(provider),
+            model=model,
+        )
+        return {
+            "text": result.text,
+            "finishReason": result.finish_reason,
+            "usage": {
+                "inputTokens": result.input_tokens,
+                "outputTokens": result.output_tokens,
+            },
+            "durationMs": result.duration_ms,
+        }
 
     async def _memory_proposal_list(self, params: dict[str, Any]) -> dict[str, Any]:
         """Return CONTEXT.md entries eligible for promotion to core.

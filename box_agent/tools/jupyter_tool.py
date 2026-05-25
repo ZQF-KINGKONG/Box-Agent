@@ -29,14 +29,20 @@ SANDBOX_DEFAULT_PACKAGES = [
     "matplotlib",
     "seaborn",
     "requests",
-    "openpyxl",      # .xlsx support for pandas
-    "xlrd",          # .xls support for pandas
-    "scikit-learn",  # ML/data analysis
-    "python-docx",   # Word (.docx) read/write
-    "pypdf",         # PDF read/merge/split
-    "pdfplumber",    # PDF table/text extraction
-    "reportlab",     # PDF creation
-    "python-pptx",   # PowerPoint (.pptx) read/write
+    "openpyxl",         # .xlsx support for pandas
+    "xlrd",             # .xls support for pandas
+    "scikit-learn",     # ML/data analysis
+    "python-docx",      # Word (.docx) read/write
+    "pypdf",            # PDF read/merge/split
+    "pdfplumber",       # PDF table/text extraction
+    "reportlab",        # PDF creation
+    "python-pptx",      # PowerPoint (.pptx) read/write
+    "beautifulsoup4",   # HTML parsing (scraping, doc cleanup)
+    "lxml",             # fast XML/HTML parser, backend for bs4/pandas
+    "pillow",           # image I/O (matplotlib, pandas plotting deps)
+    "pyyaml",           # YAML config/data parsing
+    "python-dateutil",  # robust date parsing
+    "chardet",          # encoding detection for text/CSV
 ]
 
 SANDBOX_BASE_DIR = Path.home() / ".box-agent" / "sandbox"
@@ -104,7 +110,9 @@ class SandboxEnvironment:
                 if override_path.exists():
                     self.python_path = override_path
                     self._bundled_override = True
-                    self._ready = True
+                    # Do NOT set _ready=True here — let ensure_ready() run
+                    # _verify_packages so we can fall back to RUNTIME_PACKAGES_DIR
+                    # when the bundled python is missing one of our defaults.
 
     @property
     def is_created(self) -> bool:
@@ -126,6 +134,16 @@ class SandboxEnvironment:
         if IS_FROZEN:
             if on_progress:
                 on_progress("Runtime mode: using bundled packages (no venv).")
+            self._ready = True
+            return
+
+        if self._bundled_override:
+            # Bundled python.exe already exists — skip venv/_install_defaults,
+            # but verify required packages and fall back to RUNTIME_PACKAGES_DIR
+            # for any that the bundled interpreter is missing.
+            if on_progress:
+                on_progress("Bundled python: verifying required packages...")
+            await self._verify_packages(on_progress)
             self._ready = True
             return
 
@@ -217,22 +235,47 @@ class SandboxEnvironment:
         if proc.returncode != 0:
             raise RuntimeError(f"Failed to install ipykernel in sandbox: {stderr.decode()}")
 
+    # import-name -> pip-name for every package we expect in the sandbox.
+    # Keys are what `python -c "import X"` would use.
+    _REQUIRED_MODULES = {
+        "ipykernel": "ipykernel",
+        "pandas": "pandas",
+        "numpy": "numpy",
+        "matplotlib": "matplotlib",
+        "openpyxl": "openpyxl",
+        "sklearn": "scikit-learn",
+        "bs4": "beautifulsoup4",
+        "lxml": "lxml",
+        "PIL": "pillow",
+        "yaml": "pyyaml",
+        "dateutil": "python-dateutil",
+        "chardet": "chardet",
+    }
+
+    def _subprocess_env(self) -> dict[str, str] | None:
+        """Build env for subprocess pip/import checks.
+
+        When a bundled python override is in use we prepend RUNTIME_PACKAGES_DIR
+        to PYTHONPATH so fallback-installed packages are importable.
+        """
+        if not self._bundled_override:
+            return None
+        env = os.environ.copy()
+        extra = str(RUNTIME_PACKAGES_DIR)
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
+        return env
+
     async def _verify_packages(self, on_progress: Any = None) -> None:
         """Verify required packages are importable and auto-install missing ones."""
-        required_modules = {
-            "ipykernel": "ipykernel",
-            "pandas": "pandas",
-            "numpy": "numpy",
-            "matplotlib": "matplotlib",
-            "openpyxl": "openpyxl",
-            "sklearn": "scikit-learn",
-        }
+        env = self._subprocess_env()
         missing = []
-        for module_name, pip_name in required_modules.items():
+        for module_name, pip_name in self._REQUIRED_MODULES.items():
             proc = await asyncio.create_subprocess_exec(
                 str(self.python_path), "-c", f"import {module_name}",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             await proc.communicate()
             if proc.returncode != 0:
@@ -244,11 +287,19 @@ class SandboxEnvironment:
         if on_progress:
             on_progress(f"Re-installing missing packages: {', '.join(missing)}...")
 
+        # In bundled-override mode the bundled python may live in a read-only
+        # location, so install to RUNTIME_PACKAGES_DIR via --target instead.
+        pip_args = ["-m", "pip", "install", "--quiet", "--disable-pip-version-check"]
+        if self._bundled_override:
+            RUNTIME_PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
+            pip_args += ["--target", str(RUNTIME_PACKAGES_DIR), "--no-warn-script-location"]
+        pip_args += missing
+
         proc = await asyncio.create_subprocess_exec(
-            str(self.python_path), "-m", "pip", "install",
-            "--quiet", *missing,
+            str(self.python_path), *pip_args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
@@ -260,7 +311,7 @@ class SandboxEnvironment:
 
     def get_kernel_spec(self) -> dict:
         """Get kernel spec that uses the sandbox venv Python."""
-        return {
+        spec: dict = {
             "argv": [
                 str(self.python_path),
                 "-m", "ipykernel_launcher",
@@ -269,6 +320,12 @@ class SandboxEnvironment:
             "display_name": "Box-Agent Sandbox",
             "language": "python",
         }
+        # In bundled-override mode the kernel subprocess won't inherit our
+        # patched sys.path, so expose RUNTIME_PACKAGES_DIR via PYTHONPATH on
+        # the kernel spec instead.
+        if self._bundled_override and RUNTIME_PACKAGES_DIR.exists():
+            spec["env"] = {"PYTHONPATH": str(RUNTIME_PACKAGES_DIR)}
+        return spec
 
     def get_kernel_spec_dir(self) -> Path:
         """Get path to the kernel spec directory, creating it if needed."""
@@ -888,22 +945,26 @@ class JupyterSandboxTool(Tool):
 
 This tool runs Python code in a **real Jupyter kernel** with its own isolated environment:
 - Variables, functions, classes, imports all persist between calls
-- Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests, openpyxl
-- Missing packages are auto-installed on first use (no need to %pip install common packages)
+- Pre-installed packages: pandas, numpy, matplotlib, seaborn, scikit-learn, requests,
+  openpyxl, xlrd, python-docx, pypdf, pdfplumber, reportlab, python-pptx,
+  beautifulsoup4, lxml, pillow, pyyaml, python-dateutil, chardet
+- Do NOT %pip install any pre-installed package — it just wastes time and can hit the timeout
+- Only %pip install when you hit an actual ModuleNotFoundError for a non-listed package
 - Ideal for data analysis: load once, analyze many times
 
 Example workflow:
   1. execute_code(code="import pandas as pd\\ndf = pd.read_csv('data.csv')")
   2. execute_code(code="print(df.describe())")
-  3. execute_code(code="%pip install scikit-learn")  # Install on demand
-  4. execute_code(code="from sklearn.cluster import KMeans")
+  3. execute_code(code="from bs4 import BeautifulSoup  # already installed")
+  4. execute_code(code="%pip install some_uncommon_pkg")  # only if truly missing
 
 **Full Python state persists in the same session!**
 
 Best practices:
 - Break complex analysis into steps
 - Use print() to see intermediate results
-- Use %pip install for any missing packages
+- Never use the bash tool's `pip install` for sandbox packages — bash runs against the
+  host Python and the sandbox kernel will not see those packages
 
 Output formats:
 - Text output (print statements, repr)

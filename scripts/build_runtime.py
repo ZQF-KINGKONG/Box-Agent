@@ -32,6 +32,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from box_agent.tools.runtime import DEFAULT_NODE_VERSION, NodeRuntimeManager
+from box_agent.tools.jupyter_tool import SANDBOX_DEFAULT_PACKAGES
 
 # ── Win-only bundled tool versions ────────────────────────────
 # bash + coreutils. PortableGit ships as a 7-Zip self-extracting .exe.
@@ -284,6 +285,16 @@ def build_runtime(version: str, output_dir: Path, *, target: str | None = None) 
         "reportlab.lib",
         "pptx",  # python-pptx imports as 'pptx'
         "sklearn.preprocessing",
+        # HTML / XML / image / config / encoding (sandbox defaults)
+        "bs4",  # beautifulsoup4 imports as 'bs4'
+        "lxml",
+        "lxml.etree",
+        "lxml.html",
+        "PIL",  # pillow imports as 'PIL'
+        "PIL.Image",
+        "dateutil",  # python-dateutil imports as 'dateutil'
+        "dateutil.parser",
+        "chardet",
         # pip (used as library in frozen mode for runtime package installs)
         "pip",
         "pip._internal",
@@ -561,15 +572,10 @@ def _install_portable_python_win(runtime_dir: Path) -> None:
 # Pre-installed into the bundled Python's site-packages so that the frozen
 # Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
 # etc. without spawning pip at first run. Mirrors
+# Win build's ``execute_code`` (InProcessKernelSession) can ``import pandas``
+# only if the underlying portable Python already has these wheels. Mirror
 # ``box_agent.tools.jupyter_tool.SANDBOX_DEFAULT_PACKAGES`` + ``ipykernel``.
-_SANDBOX_BUNDLED_PACKAGES = (
-    "pandas",
-    "numpy",
-    "matplotlib",
-    "openpyxl",
-    "scikit-learn",
-    "ipykernel",
-)
+_SANDBOX_BUNDLED_PACKAGES = (*SANDBOX_DEFAULT_PACKAGES, "ipykernel")
 
 
 def _install_sandbox_packages_win(python_exe: Path) -> None:

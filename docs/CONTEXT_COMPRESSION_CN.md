@@ -206,8 +206,10 @@ if estimated <= token_limit and api_total_tokens <= token_limit:
 ```
 context_token_limit = int((context_window - max_output_tokens) * 0.9)
 ```
-对 Claude Sonnet 200k 窗口、32k 最大输出 → 约 **151k**。10% 的预留空间
-用来吸收 token 估算漂移与摘要请求本身的开销。
+Box-Agent 默认 `context_window = 180_000`、`max_output_tokens = 80_000`，
+推导出 `context_token_limit = 90_000`（约 **90k**）。两个值都可以在
+`config.yaml` 里覆盖。10% 的预留空间用来吸收 token 估算漂移与摘要请求
+本身的开销。
 
 ### 算法
 

@@ -727,6 +727,8 @@ class BoxACPAgent:
             return await self._llm_prompt(params)
         return {"error": f"unknown_method: {method}"}
 
+    ext_method = extMethod
+
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
         """Run a single tool-free completion (titles/summaries/classification).
 

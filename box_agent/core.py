@@ -635,7 +635,12 @@ async def _create_summary(
     messages: list[Message],
     round_num: int,
 ) -> str:
-    """Summarize one execution round via an LLM call."""
+    """Summarize one execution round via an LLM call.
+
+    Raises on LLM failure rather than returning the un-summarized concatenation,
+    which would *increase* token usage (the original bloat bug). Callers should
+    degrade gracefully — typically by dropping the round's exec messages.
+    """
     if not messages:
         return ""
 
@@ -651,26 +656,25 @@ async def _create_summary(
             preview = msg.content if isinstance(msg.content, str) else str(msg.content)
             summary_content += f"  ← Tool returned: {preview}...\n"
 
-    try:
-        prompt = (
-            f"Please provide a concise summary of the following Agent execution process:\n\n"
-            f"{summary_content}\n\n"
-            "Requirements:\n"
-            "1. Focus on what tasks were completed and which tools were called\n"
-            "2. Keep key execution results and important findings\n"
-            "3. Be concise and clear, within 1000 words\n"
-            "4. Use English\n"
-            "5. Do not include \"user\" related content, only summarize the Agent's execution process"
-        )
-        response: LLMResponse = await llm.generate(
-            messages=[
-                Message(role="system", content="You are an assistant skilled at summarizing Agent execution processes."),
-                Message(role="user", content=prompt),
-            ]
-        )
-        return response.content
-    except Exception:
-        return summary_content
+    prompt = (
+        "Summarize the following Agent execution process concisely.\n\n"
+        f"{summary_content}\n\n"
+        "Requirements:\n"
+        "1. Focus on what tasks were completed and which tools were called\n"
+        "2. Keep key execution results and important findings\n"
+        "3. Keep the summary under ~800 tokens\n"
+        "4. Use the same language as the input content above\n"
+        "5. Do not include \"user\" related content, only summarize the Agent's execution process"
+    )
+    response: LLMResponse = await llm.generate(
+        messages=[
+            Message(role="system", content="You are an assistant skilled at summarizing Agent execution processes."),
+            Message(role="user", content=prompt),
+        ],
+        tools=None,
+        thinking_enabled=False,
+    )
+    return response.content
 
 
 async def _maybe_summarize(
@@ -700,27 +704,89 @@ async def _maybe_summarize(
     new_messages: list[Message] = [messages[0]]  # system prompt
 
     for idx, user_idx in enumerate(user_indices):
-        new_messages.append(messages[user_idx])
+        user_msg = messages[user_idx]
 
         next_boundary = user_indices[idx + 1] if idx < len(user_indices) - 1 else len(messages)
         exec_msgs = messages[user_idx + 1 : next_boundary]
 
+        # If this user message is itself a prior summary marker and there is
+        # no fresh exec after it, drop it — keeps stale summaries from piling
+        # up across many compaction cycles.
+        if _is_summary_marker(user_msg) and not exec_msgs:
+            continue
+
+        new_messages.append(user_msg)
+
         if exec_msgs:
-            summary = await _create_summary(llm, exec_msgs, idx + 1)
+            try:
+                summary = await _create_summary(llm, exec_msgs, idx + 1)
+            except Exception as exc:
+                _log.warning(
+                    "summarization failed for round %d: %s — dropping exec_msgs",
+                    idx + 1, exc,
+                )
+                summary = ""
             if summary:
                 new_messages.append(
-                    Message(role="user", content=f"[Assistant Execution Summary]\n\n{summary}")
+                    Message(role="user", content=f"{_SUMMARY_MARKER}\n\n{summary}")
                 )
+            # On failure: drop exec_msgs entirely. Token usage strictly
+            # decreases, never increases. The user message itself is kept,
+            # so the conversation flow stays intact.
 
     return new_messages, True, estimated
 
 
+# ── Summarization helpers ───────────────────────────────────
+
+
+# Marker prefix on a user-role message that signals "this is an
+# already-summarized round, do not re-summarize". Kept stable across releases
+# because it is also visible to the model and used as a re-entry guard.
+_SUMMARY_MARKER = "[Assistant Execution Summary]"
+
+
+def _is_summary_marker(msg: Message) -> bool:
+    """Return True when ``msg`` is a synthetic summary placeholder."""
+    if msg.role != "user":
+        return False
+    content = msg.content if isinstance(msg.content, str) else ""
+    return content.startswith(_SUMMARY_MARKER)
+
+
 # ── Micro-compact (Layer 1) ─────────────────────────────────
 
-# Number of recent tool messages to keep intact.
+# Number of recent tool messages to keep intact (lower bound).
 _KEEP_RECENT_TOOL_RESULTS = 3
 # Tool results shorter than this are not worth compacting.
 _MIN_COMPACT_LEN = 200
+# Soft cap on cumulative tokens spent by the "recent kept" tool results.
+# When the last ``_KEEP_RECENT_TOOL_RESULTS`` messages alone exceed this
+# budget, we shrink the keep-window from the oldest side so a few
+# very-large tool outputs cannot bypass micro-compaction entirely.
+# Calibrated against tiktoken cl100k_base — provider-agnostic enough that
+# the same threshold is safe across Anthropic/OpenAI/DeepSeek/Qwen paths.
+_KEEP_RECENT_TOOL_TOKEN_BUDGET = 12_000
+
+
+def _approx_tokens_for_content(content: Any) -> int:
+    """Cheap per-message token estimate for the Layer-1 keep window.
+
+    Uses tiktoken when available, falls back to char/4 — matches the
+    behavior of ``_estimate_tokens_fallback`` so single-platform absence
+    of tiktoken does not break compaction.
+    """
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        text = "".join(str(b) for b in content)
+    else:
+        text = str(content)
+    try:
+        encoding = tiktoken.get_encoding("cl100k_base")
+        return len(encoding.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
 
 
 def _micro_compact(messages: list[Message]) -> int:
@@ -730,18 +796,38 @@ def _micro_compact(messages: list[Message]) -> int:
     ``_KEEP_RECENT_TOOL_RESULTS`` intact, and replaces earlier ones
     whose content exceeds ``_MIN_COMPACT_LEN`` with a one-liner.
 
+    Additionally, if the cumulative token cost of the "kept" recent
+    messages exceeds ``_KEEP_RECENT_TOOL_TOKEN_BUDGET``, the keep window
+    is shrunk from the oldest side (but always preserves at least the
+    most recent tool message) so a few very-large outputs cannot bypass
+    Layer 1 entirely.
+
     This is a cheap, zero-LLM-call operation that runs every step.
 
     Returns:
         Number of messages compacted.
     """
-    # Collect indices of tool messages
     tool_indices = [i for i, m in enumerate(messages) if m.role == "tool"]
-    if len(tool_indices) <= _KEEP_RECENT_TOOL_RESULTS:
+    if len(tool_indices) <= 1:
+        return 0
+
+    # Start with the conservative N-recent keep window.
+    keep_count = min(_KEEP_RECENT_TOOL_RESULTS, len(tool_indices))
+
+    # Shrink keep window if the recent block alone busts the budget.
+    # Always preserve at least one message (the latest tool result).
+    while keep_count > 1:
+        recent_indices = tool_indices[-keep_count:]
+        cum_tokens = sum(_approx_tokens_for_content(messages[i].content) for i in recent_indices)
+        if cum_tokens <= _KEEP_RECENT_TOOL_TOKEN_BUDGET:
+            break
+        keep_count -= 1
+
+    if len(tool_indices) <= keep_count:
         return 0
 
     compacted = 0
-    for idx in tool_indices[:-_KEEP_RECENT_TOOL_RESULTS]:
+    for idx in tool_indices[:-keep_count]:
         msg = messages[idx]
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
         if len(content) <= _MIN_COMPACT_LEN:
@@ -764,16 +850,49 @@ def _micro_compact(messages: list[Message]) -> int:
 
 
 def _cleanup_incomplete_messages(messages: list[Message]) -> int:
-    """Remove trailing incomplete assistant + tool messages. Returns removed count."""
-    last_idx = -1
+    """Remove trailing incomplete assistant + tool messages. Returns removed count.
+
+    Called from abort paths (cancel / max_tokens / error / no-output) to leave
+    the message list in a state safe to resend to the LLM on the next turn.
+
+    A trailing assistant turn is considered *incomplete* when:
+      - It has ``tool_calls`` but the number of trailing tool messages does
+        not match (some tool responses are missing).
+      - Its content is empty AND it has no tool_calls (an LLM that was cut
+        off before emitting anything).
+
+    A trailing assistant turn that has no tool_calls AND has content is
+    treated as complete and left in place — deleting it would discard a
+    fully-formed answer the LLM already produced.
+    """
+    last_assistant_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].role == "assistant":
-            last_idx = i
+            last_assistant_idx = i
             break
-    if last_idx == -1:
+    if last_assistant_idx == -1:
         return 0
-    removed = len(messages) - last_idx
-    del messages[last_idx:]
+
+    last = messages[last_assistant_idx]
+    trailing_tool_count = len(messages) - last_assistant_idx - 1
+
+    expected_tool_count = len(last.tool_calls or [])
+    has_content = bool(last.content) or bool(last.thinking)
+
+    is_incomplete = False
+    if expected_tool_count > 0:
+        # tool_calls present — incomplete unless every call has a tool response
+        if trailing_tool_count < expected_tool_count:
+            is_incomplete = True
+    elif not has_content:
+        # Empty assistant turn with no tool_calls → cut off before output
+        is_incomplete = True
+
+    if not is_incomplete:
+        return 0
+
+    removed = len(messages) - last_assistant_idx
+    del messages[last_assistant_idx:]
     return removed
 
 

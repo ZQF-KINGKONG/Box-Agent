@@ -1005,3 +1005,262 @@ def test_artifact_envelope_shape(tmp_path):
     assert "mime_type" not in env
     assert "size_bytes" not in env
     assert "sandbox_workspace" not in env
+
+
+# ── Summarization (_maybe_summarize / _create_summary) ───────
+
+
+class _FakeSummaryLLM:
+    """Records calls and returns a canned summary."""
+
+    def __init__(self, response: str = "concise summary", *, raise_exc: Exception | None = None):
+        self._response = response
+        self._raise = raise_exc
+        self.calls: list[dict] = []
+
+    async def generate(self, messages, tools=None, *, thinking_enabled: bool = False):
+        self.calls.append({
+            "n_messages": len(messages),
+            "tools": tools,
+            "thinking_enabled": thinking_enabled,
+        })
+        if self._raise is not None:
+            raise self._raise
+        return LLMResponse(content=self._response, thinking=None, tool_calls=None, finish_reason="stop")
+
+    async def generate_stream(self, messages, tools=None, **_):
+        raise NotImplementedError
+
+
+@pytest.mark.asyncio
+async def test_create_summary_passes_thinking_disabled_and_no_tools():
+    """_create_summary must explicitly disable thinking and omit tools (cross-provider safety)."""
+    from box_agent.core import _create_summary
+    llm = _FakeSummaryLLM("ok")
+    out = await _create_summary(llm, [Message(role="assistant", content="did something")], 1)
+    assert out == "ok"
+    assert len(llm.calls) == 1
+    assert llm.calls[0]["thinking_enabled"] is False
+    assert llm.calls[0]["tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_summary_propagates_exceptions():
+    """Failure path must raise — old behavior returned the un-summarized input (bloat bug)."""
+    from box_agent.core import _create_summary
+    llm = _FakeSummaryLLM(raise_exc=RuntimeError("provider down"))
+    with pytest.raises(RuntimeError):
+        await _create_summary(llm, [Message(role="assistant", content="x")], 1)
+
+
+@pytest.mark.asyncio
+async def test_maybe_summarize_drops_exec_msgs_on_llm_failure():
+    """When _create_summary raises, exec_msgs should be DROPPED, never returned verbatim."""
+    from box_agent.core import _maybe_summarize
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="please do X"),
+        Message(role="assistant", content="A" * 5000),  # bulk content
+        Message(role="tool", content="B" * 5000, tool_call_id="t1", name="bash"),
+    ]
+    llm = _FakeSummaryLLM(raise_exc=RuntimeError("network"))
+    new_msgs, skip_next, _est = await _maybe_summarize(llm, msgs, token_limit=10, api_total_tokens=0, skip_check=False)
+    assert new_msgs is not None
+    assert skip_next is True
+    # System + user kept; exec_msgs (assistant+tool) dropped because summary failed
+    assert [m.role for m in new_msgs] == ["system", "user"]
+    # Token count strictly less than original
+    assert sum(len(str(m.content)) for m in new_msgs) < sum(len(str(m.content)) for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_maybe_summarize_inserts_summary_marker():
+    from box_agent.core import _maybe_summarize, _SUMMARY_MARKER
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="task"),
+        Message(role="assistant", content="x" * 5000),
+    ]
+    llm = _FakeSummaryLLM("brief")
+    new_msgs, _, _ = await _maybe_summarize(llm, msgs, token_limit=10, api_total_tokens=0, skip_check=False)
+    assert new_msgs is not None
+    # Last message is the summary marker as a user-role replacement
+    assert new_msgs[-1].role == "user"
+    assert new_msgs[-1].content.startswith(_SUMMARY_MARKER)
+    assert "brief" in new_msgs[-1].content
+
+
+@pytest.mark.asyncio
+async def test_maybe_summarize_collapses_orphan_summary_markers():
+    """Stale summary markers with no exec_msgs after them should be dropped on next compaction."""
+    from box_agent.core import _maybe_summarize, _SUMMARY_MARKER
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="round 0 prompt"),
+        Message(role="user", content=f"{_SUMMARY_MARKER}\n\nold summary 1"),
+        Message(role="user", content=f"{_SUMMARY_MARKER}\n\nold summary 2"),  # orphan
+        Message(role="user", content="round 3 prompt"),
+        Message(role="assistant", content="z" * 5000),
+    ]
+    llm = _FakeSummaryLLM("new sum")
+    new_msgs, _, _ = await _maybe_summarize(llm, msgs, token_limit=10, api_total_tokens=0, skip_check=False)
+    assert new_msgs is not None
+    # The orphan stale markers (no exec after) are dropped; only the active
+    # round (round 3 prompt + new summary) plus the initial user msg remain.
+    summary_count = sum(1 for m in new_msgs if m.role == "user" and isinstance(m.content, str) and m.content.startswith(_SUMMARY_MARKER))
+    # At most one summary marker (the freshly created one for round 3)
+    assert summary_count == 1
+
+
+@pytest.mark.asyncio
+async def test_maybe_summarize_skip_check_short_circuits():
+    from box_agent.core import _maybe_summarize
+    llm = _FakeSummaryLLM("never called")
+    new_msgs, skip_next, est = await _maybe_summarize(llm, [Message(role="user", content="x")], token_limit=1000, api_total_tokens=0, skip_check=True)
+    assert new_msgs is None
+    assert skip_next is False
+    assert est == 0
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_maybe_summarize_below_threshold_noop():
+    from box_agent.core import _maybe_summarize
+    msgs = [Message(role="system", content="s"), Message(role="user", content="x")]
+    llm = _FakeSummaryLLM("never called")
+    new_msgs, skip_next, _est = await _maybe_summarize(llm, msgs, token_limit=10_000, api_total_tokens=100, skip_check=False)
+    assert new_msgs is None
+    assert skip_next is False
+    assert llm.calls == []
+
+
+def test_micro_compact_token_budget_shrinks_keep_window_when_recent_oversized():
+    """If the recent N tool results exceed the token budget, keep window shrinks
+    so a few enormous outputs cannot bypass Layer 1 compaction."""
+    from box_agent.core import (
+        _micro_compact,
+        _KEEP_RECENT_TOOL_RESULTS,
+        _KEEP_RECENT_TOOL_TOKEN_BUDGET,
+        _approx_tokens_for_content,
+    )
+
+    # Build incompressible-ish content (varied tokens). Each ~7000+ tokens so
+    # 3 of them blow past the 12k budget regardless of tokenizer.
+    import string
+    import random
+    rng = random.Random(0)
+    big_payload = " ".join(
+        "".join(rng.choices(string.ascii_letters + string.digits, k=6))
+        for _ in range(7000)
+    )
+    assert _approx_tokens_for_content(big_payload) > _KEEP_RECENT_TOOL_TOKEN_BUDGET // 2
+
+    msgs: list[Message] = [Message(role="system", content="sys")]
+    for i in range(_KEEP_RECENT_TOOL_RESULTS + 1):  # 4 tool messages
+        msgs.append(Message(role="assistant", content="", tool_calls=None))
+        msgs.append(Message(role="tool", content=big_payload, tool_call_id=f"t{i}", name="bash"))
+
+    compacted = _micro_compact(msgs)
+    # Strict-N keep would compact 4 - 3 = 1. Token-aware keep should compact more.
+    assert compacted >= 2, f"token-aware keep should compact more than the strict N-recent baseline; got {compacted}"
+
+    # The most recent tool message must always be preserved verbatim.
+    last_tool = [m for m in msgs if m.role == "tool"][-1]
+    assert last_tool.content == big_payload
+
+
+def test_micro_compact_preserves_at_least_one_recent_when_single_giant():
+    """Single giant tool result must not be compacted (keep_count never < 1)."""
+    from box_agent.core import _micro_compact
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="assistant", content=""),
+        Message(role="tool", content="y" * 100_000, tool_call_id="t0", name="bash"),
+    ]
+    n = _micro_compact(msgs)
+    assert n == 0
+    assert len(msgs[-1].content) == 100_000
+
+
+# ── _cleanup_incomplete_messages ─────────────────────────────
+
+
+def test_cleanup_keeps_complete_assistant_turn():
+    """A trailing assistant turn with content and no tool_calls is complete."""
+    from box_agent.core import _cleanup_incomplete_messages
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="hello there"),
+    ]
+    n = _cleanup_incomplete_messages(msgs)
+    assert n == 0
+    assert msgs[-1].content == "hello there"
+
+
+def test_cleanup_removes_empty_assistant_turn():
+    """An assistant turn with no content and no tool_calls is incomplete (LLM cut off)."""
+    from box_agent.core import _cleanup_incomplete_messages
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content=""),
+    ]
+    n = _cleanup_incomplete_messages(msgs)
+    assert n == 1
+    assert msgs[-1].role == "user"
+
+
+def test_cleanup_removes_partial_tool_call_turn():
+    """Assistant has 2 tool_calls but only 1 tool response → incomplete."""
+    from box_agent.core import _cleanup_incomplete_messages
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="", tool_calls=[
+            ToolCall(id="t1", type="function", function=FunctionCall(name="echo", arguments={})),
+            ToolCall(id="t2", type="function", function=FunctionCall(name="echo", arguments={})),
+        ]),
+        Message(role="tool", content="result1", tool_call_id="t1", name="echo"),
+    ]
+    n = _cleanup_incomplete_messages(msgs)
+    assert n == 2  # removed assistant + 1 tool
+    assert msgs[-1].role == "user"
+
+
+def test_cleanup_keeps_complete_tool_call_turn():
+    """Assistant with N tool_calls and N tool responses is complete — don't touch."""
+    from box_agent.core import _cleanup_incomplete_messages
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="", tool_calls=[
+            ToolCall(id="t1", type="function", function=FunctionCall(name="echo", arguments={})),
+        ]),
+        Message(role="tool", content="result1", tool_call_id="t1", name="echo"),
+    ]
+    before = list(msgs)
+    n = _cleanup_incomplete_messages(msgs)
+    assert n == 0
+    assert msgs == before
+
+
+def test_cleanup_keeps_thinking_only_assistant():
+    """Assistant with only thinking (no content, no tool_calls) — treat as having output."""
+    from box_agent.core import _cleanup_incomplete_messages
+    msgs = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hi"),
+        Message(role="assistant", content="", thinking="I was thinking..."),
+    ]
+    n = _cleanup_incomplete_messages(msgs)
+    assert n == 0
+
+
+def test_cleanup_noop_when_no_assistant_turn():
+    from box_agent.core import _cleanup_incomplete_messages
+    msgs = [Message(role="system", content="sys"), Message(role="user", content="hi")]
+    before = list(msgs)
+    n = _cleanup_incomplete_messages(msgs)
+    assert n == 0
+    assert msgs == before

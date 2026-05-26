@@ -30,6 +30,32 @@ def _warn(msg: str) -> None:
     sys.stderr.write(msg + "\n")
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9]+|[\u4e00-\u9fff]+")
+
+
+def _tokenize(text: str) -> Set[str]:
+    """Tokenize mixed zh/en text into a set of matchable tokens.
+
+    English: lowercased word chunks, length >= 2.
+    Chinese: the full run plus every 2-char sliding window
+    (so "邮件" matches "发邮件" and "邮件草稿").
+    """
+    if not text:
+        return set()
+    tokens: Set[str] = set()
+    for chunk in _TOKEN_RE.findall(text.lower()):
+        if "\u4e00" <= chunk[0] <= "\u9fff":
+            tokens.add(chunk)
+            for i in range(len(chunk) - 1):
+                tokens.add(chunk[i : i + 2])
+        elif len(chunk) >= 2:
+            tokens.add(chunk)
+    return tokens
+
+
+SKILL_SLOT_SENTINEL = "__BOX_AGENT_SKILLS_SLOT__"
+
+
 @dataclass
 class Skill:
     """Skill data structure"""
@@ -42,6 +68,7 @@ class Skill:
     allowed_tools: Optional[List[str]] = None
     metadata: Optional[Dict[str, str]] = None
     skill_path: Optional[Path] = None
+    keywords: Optional[List[str]] = None
 
     def to_prompt(self) -> str:
         """Convert skill to prompt format"""
@@ -148,6 +175,14 @@ class SkillLoader:
             skill_dir = skill_path.parent
             processed_content = self._process_skill_paths(skill_content, skill_dir)
 
+            raw_keywords = frontmatter.get("keywords")
+            if isinstance(raw_keywords, str):
+                keywords_list = [k.strip() for k in re.split(r"[,，\s]+", raw_keywords) if k.strip()]
+            elif isinstance(raw_keywords, list):
+                keywords_list = [str(k).strip() for k in raw_keywords if str(k).strip()]
+            else:
+                keywords_list = None
+
             return Skill(
                 name=frontmatter["name"],
                 description=frontmatter["description"],
@@ -157,6 +192,7 @@ class SkillLoader:
                 allowed_tools=frontmatter.get("allowed-tools"),
                 metadata=frontmatter.get("metadata"),
                 skill_path=skill_path,
+                keywords=keywords_list,
             )
 
         except Exception as e:
@@ -418,10 +454,63 @@ class SkillLoader:
         """
         return [skill.to_metadata_dict() for skill in self.loaded_skills.values()]
 
-    def get_skills_metadata_prompt(self) -> str:
-        """Generate a metadata-only prompt for Progressive Disclosure Level 1."""
+    def filter_by_query(
+        self,
+        query: Optional[str],
+        *,
+        always_on: frozenset[str] = frozenset({"memory-guide"}),
+        max_skills: int = 8,
+    ) -> List[Skill]:
+        """Return skills relevant to ``query`` plus the always_on set.
+
+        Matching strategy: tokenize query and each skill's (name, keywords,
+        description) via :func:`_tokenize`. Score = name_overlap*5 +
+        keywords_overlap*3 + description_overlap*1. Top ``max_skills`` by
+        score (score > 0) plus always_on are returned.
+
+        Empty / whitespace-only / no-overlap query → only always_on skills.
+        This is intentional: greetings like "hi" / "你好" should NOT trigger
+        the full skill catalog injection.
+        """
+        always_skills = [s for s in self.loaded_skills.values() if s.name in always_on]
+
+        if not query or not query.strip():
+            return always_skills
+
+        query_tokens = _tokenize(query)
+        if not query_tokens:
+            return always_skills
+
+        scored: List[Tuple[int, Skill]] = []
+        for skill in self.loaded_skills.values():
+            if skill.name in always_on:
+                continue
+            name_overlap = len(query_tokens & _tokenize(skill.name))
+            kw_overlap = len(query_tokens & _tokenize(" ".join(skill.keywords or [])))
+            desc_overlap = len(query_tokens & _tokenize(skill.description))
+            score = name_overlap * 5 + kw_overlap * 3 + desc_overlap
+            if score > 0:
+                scored.append((score, skill))
+
+        scored.sort(key=lambda x: (-x[0], x[1].name))
+        matched = [s for _, s in scored[:max_skills]]
+        return matched + always_skills
+
+    def get_skills_metadata_prompt(self, query: Optional[str] = None) -> str:
+        """Generate a metadata-only prompt for Progressive Disclosure Level 1.
+
+        When ``query`` is provided, only skills matched by
+        :meth:`filter_by_query` (plus always_on) are listed. When ``query`` is
+        ``None``, all loaded skills are listed (legacy behavior — kept so
+        callers that have not adopted filtering still work).
+        """
         if not self.loaded_skills:
             return ""
+
+        if query is None:
+            skills_to_render = list(self.loaded_skills.values())
+        else:
+            skills_to_render = self.filter_by_query(query)
 
         prompt_parts = ["## Available Skills\n"]
         prompt_parts.append(
@@ -431,9 +520,6 @@ class SkillLoader:
             "Load a skill's full content using the appropriate skill tool when needed.\n"
         )
 
-        # Tell the model the canonical skill directories so it does not invent
-        # paths or scan unrelated parts of the disk when the user asks where
-        # skills live.
         if self._sources:
             prompt_parts.append("**Skill source directories (the ONLY places skills are loaded from):**")
             for entry in self._sources:
@@ -445,8 +531,90 @@ class SkillLoader:
             )
             prompt_parts.append("")
 
-        prompt_parts.append("**Skill catalog:**")
-        for skill in self.loaded_skills.values():
-            prompt_parts.append(f"- `{skill.name}` ({skill.source}): {skill.description}")
+        if not skills_to_render:
+            prompt_parts.append(
+                "**Skill catalog:** (no skills matched the current request; "
+                "call `list_skills` if you need to discover available skills.)"
+            )
+        else:
+            prompt_parts.append("**Skill catalog:**")
+            for skill in skills_to_render:
+                prompt_parts.append(f"- `{skill.name}` ({skill.source}): {skill.description}")
 
         return "\n".join(prompt_parts)
+
+
+class SkillSelector:
+    """Stateful helper that filters skill metadata in the system prompt
+    based on the cumulative user query.
+
+    Use:
+        selector = SkillSelector(skill_loader)
+        # After Agent() has finalized its system message:
+        selector.bind(agent.messages[0].content)
+        # Before each turn:
+        new_prompt = selector.update(user_input)
+        if new_prompt is not None:
+            agent.messages[0].content = new_prompt
+
+    Cumulative semantics: each call to ``update`` appends the new user
+    input to the running query string. Filtered skill set grows
+    monotonically across turns — once a skill is matched, it stays.
+    Returns ``None`` when nothing changed so the caller can preserve
+    cache-friendly prompt stability.
+    """
+
+    SLOT = SKILL_SLOT_SENTINEL
+
+    def __init__(self, skill_loader: "SkillLoader") -> None:
+        self._loader = skill_loader
+        self._prefix: Optional[str] = None
+        self._suffix: Optional[str] = None
+        self._cumulative: List[str] = []
+        self._last_sig: Tuple[str, ...] = ()
+
+    @property
+    def bound(self) -> bool:
+        return self._prefix is not None
+
+    def bind(self, system_prompt_text: str) -> None:
+        """Capture the prefix and suffix around the skill slot sentinel.
+
+        Always resets ``_last_sig`` so the next ``update()`` call is
+        guaranteed to materialize a real catalog (replacing the sentinel)
+        even if the skill set has not changed since the previous turn.
+        """
+        if self.SLOT not in system_prompt_text:
+            self._prefix = None
+            self._suffix = None
+            return
+        head, _, tail = system_prompt_text.partition(self.SLOT)
+        self._prefix = head
+        self._suffix = tail
+        self._last_sig = ()
+
+    def update(self, user_input: str) -> Optional[str]:
+        """Update cumulative query and return new system prompt text.
+
+        Returns ``None`` when the helper is not bound or the resulting
+        skill set is identical to the previous turn.
+        """
+        if self._prefix is None or self._suffix is None:
+            return None
+        if user_input and user_input.strip():
+            self._cumulative.append(user_input.strip())
+        query = " ".join(self._cumulative)
+        if not query:
+            skills_md = ""
+            sig: Tuple[str, ...] = ()
+        else:
+            skills = self._loader.filter_by_query(query)
+            sig = tuple(sorted(s.name for s in skills))
+            if skills:
+                skills_md = self._loader.get_skills_metadata_prompt(query=query)
+            else:
+                skills_md = ""
+        if sig == self._last_sig:
+            return None
+        self._last_sig = sig
+        return self._prefix + skills_md + self._suffix

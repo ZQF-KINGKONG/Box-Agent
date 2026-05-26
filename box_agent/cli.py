@@ -1025,15 +1025,16 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         print(f"{Colors.YELLOW}⚠️  System prompt not found, using default{Colors.RESET}")
 
     # 6. Inject Skills Metadata into System Prompt (Progressive Disclosure - Level 1)
+    # NOTE: actual skill list is injected per-turn via SkillSelector below
+    # (keyword-filtered against the cumulative user query). Here we just
+    # replace the placeholder with a sentinel that the selector can find.
     if skill_loader:
-        skills_metadata = skill_loader.get_skills_metadata_prompt()
-        if skills_metadata:
-            # Replace placeholder with actual metadata
-            system_prompt = system_prompt.replace("{SKILLS_METADATA}", skills_metadata)
-            print(f"{Colors.GREEN}✅ Injected {len(skill_loader.loaded_skills)} skills metadata into system prompt{Colors.RESET}")
-        else:
-            # Remove placeholder if no skills
-            system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
+        from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
+        system_prompt = system_prompt.replace("{SKILLS_METADATA}", SKILL_SLOT_SENTINEL)
+        print(
+            f"{Colors.GREEN}✅ {len(skill_loader.loaded_skills)} skills available "
+            f"(injected per-turn via keyword filter){Colors.RESET}"
+        )
     else:
         # Remove placeholder if skills not enabled
         system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
@@ -1086,6 +1087,20 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         from box_agent.cli_memory_proposal import CLIMemoryProposalNegotiator
         agent._proposal_negotiator = CLIMemoryProposalNegotiator(memory_mgr)
 
+    # 7.5 Skill selector: filter skill metadata per turn based on cumulative user query
+    skill_selector = None
+    if skill_loader:
+        from box_agent.tools.skill_loader import SkillSelector
+        skill_selector = SkillSelector(skill_loader)
+        skill_selector.bind(agent.messages[0].content)
+
+    def _apply_skill_filter(user_input: str) -> None:
+        if skill_selector is None:
+            return
+        new_prompt = skill_selector.update(user_input)
+        if new_prompt is not None:
+            agent.messages[0].content = new_prompt
+
     # 8. Display welcome information
     if not task:
         print_banner()
@@ -1096,6 +1111,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         print(f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} {Colors.DIM}Executing task...{Colors.RESET}\n")
         # Block on MCP only when user is actually about to run
         register_mcp_tools(agent.tools, await await_mcp_tools(mcp_task))
+        _apply_skill_filter(task)
         agent.add_user_message(task)
         try:
             await agent.run()
@@ -1313,6 +1329,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                 f"\n{Colors.BRIGHT_BLUE}Agent{Colors.RESET} {Colors.DIM}›{Colors.RESET} "
                 f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
             )
+            _apply_skill_filter(user_input)
             agent.add_user_message(user_input)
 
             # Create cancellation event

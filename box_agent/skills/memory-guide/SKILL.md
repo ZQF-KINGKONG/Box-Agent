@@ -1,6 +1,7 @@
 ---
 name: memory-guide
 description: Guides the agent to proactively save user information to long-term memory and search context when needed. Load this skill to understand when and how to use memory_write, memory_read, and memory_search.
+keywords: [memory, remember, 记忆, 记住, 保存, 长期记忆, 偏好]
 ---
 
 # Memory Guide

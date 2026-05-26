@@ -173,6 +173,7 @@ class SessionState:
     thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
     env_context: "EnvContext | None" = None  # cached env_context, re-applied when mode switches
     skill_runtime_context: "SkillRuntimeContext | None" = None
+    skill_selector: Any | None = None  # SkillSelector — filters skill metadata per turn
 
 
 class BoxACPAgent:
@@ -450,6 +451,15 @@ class BoxACPAgent:
             skill_runtime_context=skill_runtime_context,
         )
 
+        # Skill selector: per-turn keyword-based filter on the skill catalog.
+        # Bound after Agent.__init__ has appended the workspace footer so the
+        # captured prefix/suffix include all surrounding system-prompt content.
+        if self._skill_loader:
+            from box_agent.tools.skill_loader import SkillSelector
+            selector = SkillSelector(self._skill_loader)
+            selector.bind(agent.messages[0].content)
+            self._sessions[session_id].skill_selector = selector
+
         tool_names = [t.name for t in tools]
         log.info("session/new", session_id=session_id, message=f"Session ready, {len(tools)} tools: {', '.join(tool_names)}")
 
@@ -663,6 +673,24 @@ class BoxACPAgent:
                 mode=state.session_mode or "general",
                 source="auto",
             )
+
+        # Per-turn skill metadata filter. Keep this AFTER any session-mode
+        # rewrite so the selector binds to the final prompt template.
+        if state.skill_selector is not None:
+            try:
+                from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
+                current_system = state.agent.messages[0].content
+                # Re-bind on each turn — handles the case where
+                # _apply_session_mode replaced messages[0] (e.g. after
+                # auto-classification on the first prompt).
+                if SKILL_SLOT_SENTINEL in current_system:
+                    state.skill_selector.bind(current_system)
+                new_prompt = state.skill_selector.update(user_text)
+                if new_prompt is not None:
+                    state.agent.messages[0] = Message(role="system", content=new_prompt)
+                    state.agent.system_prompt = new_prompt
+            except Exception as exc:
+                log.warn("skills/filter_error", session_id=session_id, message=str(exc))
 
         state.agent.messages.append(Message(role="user", content=user_text))
 
@@ -1656,9 +1684,12 @@ async def run_acp_server(config: Config | None = None) -> None:
         # Inject SANDBOX_INFO (ACP always enables sandbox)
         system_prompt = system_prompt.replace("{SANDBOX_INFO}", SANDBOX_INFO_PROMPT)
 
+        # NOTE: actual skill list is injected per-turn via SkillSelector
+        # (keyword-filtered against the cumulative user query). Here we keep a
+        # sentinel that the selector replaces with a filtered catalog.
         if skill_loader:
-            meta = skill_loader.get_skills_metadata_prompt()
-            system_prompt = system_prompt.replace("{SKILLS_METADATA}", meta or "")
+            from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
+            system_prompt = system_prompt.replace("{SKILLS_METADATA}", SKILL_SLOT_SENTINEL)
         else:
             system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 

@@ -1,6 +1,7 @@
 ---
 name: data-dashboard
 description: 生成单文件 HTML 数据看板。触发：用户要把数据/分析结果做成网页、dashboard、可视化报告、management demo。
+keywords: [dashboard, 数据看板, 看板, 仪表盘, demo, 可视化报告, html报告, management demo, 数据可视化]
 ---
 
 # Data Dashboard Skill

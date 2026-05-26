@@ -1,6 +1,7 @@
 ---
 name: email-webmail-playwright
 description: Use when the user asks to send, draft, reply to, forward, search, read, summarize, organize, or triage email through a generic webmail UI when no provider-specific mail tool is available. Uses Playwright/browser automation to open webmail, fill recipients/subject/body, inspect inboxes, and perform explicit user-authorized sends.
+keywords: [email, mail, webmail, 邮件, 邮箱, 收件箱, 发邮件, 草稿]
 ---
 
 # Email Webmail Playwright

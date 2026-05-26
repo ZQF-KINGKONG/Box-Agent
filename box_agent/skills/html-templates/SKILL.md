@@ -1,6 +1,7 @@
 ---
 name: html-templates
 description: Use when generating HTML pages, slide decks, posters, or reports that should adopt a specific visual style — whether invoked directly by the user OR called by another skill (e.g. pptx, poster, report skills) that has already decided the structure but needs to pick and apply a visual identity. Matches the brief's mood / industry / density against 32 pre-extracted design "Visual DNA" profiles, then injects the chosen profile's color, typography, and decoration rules as hard constraints into the generation prompt. The caller writes HTML inside their own structural conventions; this skill only governs the look.
+keywords: [html, template, visual, mood, style, identity, 模板, 网页风格, 视觉风格, 网页设计]
 ---
 
 # HTML Templates — Visual DNA Library

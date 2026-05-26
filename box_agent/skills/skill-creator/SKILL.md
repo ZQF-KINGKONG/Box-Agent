@@ -1,6 +1,7 @@
 ---
 name: skill-creator
 description: Create and refine Codex skills. Use when designing a new skill, rewriting an existing skill, choosing trigger wording, deciding folder structure, adding references or scripts, or validating that a skill is concise, discoverable, and portable across macOS, Windows, and Linux.
+keywords: [skill, codex skill, 创建skill, 技能开发, 写skill]
 ---
 
 # Skill Creator

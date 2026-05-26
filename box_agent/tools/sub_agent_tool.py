@@ -160,6 +160,12 @@ class SubAgentTool(EventEmittingTool):
         sub_agent_id = f"subagent-{uuid4().hex}"
 
         final_content = ""
+        # Track child tool_call_ids that we forwarded a Start for but have
+        # not yet seen a matching Result for. If the child loop raises mid-
+        # flight, we synthesize a stub Result event for each so the host
+        # UI doesn't show perpetually-running tool tiles and any consumer
+        # building model history sees a balanced start/result pair.
+        pending_child_tc: dict[str, str] = {}  # tc_id → tool_name
         try:
             async for event in run_agent_loop(
                 llm=self._llm,
@@ -169,6 +175,11 @@ class SubAgentTool(EventEmittingTool):
                 token_limit=self._token_limit,
                 workspace_dir=self._workspace_dir,
             ):
+                if isinstance(event, ToolCallStart):
+                    pending_child_tc[event.tool_call_id] = event.tool_name
+                elif isinstance(event, ToolCallResult):
+                    pending_child_tc.pop(event.tool_call_id, None)
+
                 if isinstance(event, DoneEvent):
                     final_content = event.final_content
                 elif queue is not None and isinstance(event, self._FORWARD_TYPES):
@@ -181,6 +192,25 @@ class SubAgentTool(EventEmittingTool):
                         )
                     )
         except Exception as exc:
+            if queue is not None and pending_child_tc:
+                for tc_id, tool_name in pending_child_tc.items():
+                    queue.put_nowait(
+                        SubAgentEvent(
+                            parent_tool_call_id=self._parent_tool_call_id,
+                            task_preview=task_preview,
+                            event=ToolCallResult(
+                                tool_call_id=tc_id,
+                                tool_name=tool_name,
+                                success=False,
+                                content="",
+                                error=(
+                                    f"Sub-agent interrupted before tool completed: "
+                                    f"{type(exc).__name__}: {exc}"
+                                ),
+                            ),
+                            sub_agent_id=sub_agent_id,
+                        )
+                    )
             return ToolResult(
                 success=False,
                 content="",

@@ -849,6 +849,53 @@ def _micro_compact(messages: list[Message]) -> int:
 # ── Cleanup helper ──────────────────────────────────────────────
 
 
+_INTERRUPTED_TOOL_STUB = (
+    "[Tool execution interrupted — no result available. "
+    "The previous run was terminated before this tool produced output.]"
+)
+
+
+def _sanitize_dangling_tool_calls(messages: list[Message]) -> int:
+    """Synthesize stub tool replies for any assistant.tool_calls lacking a response.
+
+    Heals message histories where a previous turn's tool execution was
+    interrupted (process crash, SIGKILL, mid-flight cancellation that skipped
+    the result-append path) before every tool response was recorded. Without
+    this, the next LLM request would fail with the OpenAI/Anthropic protocol
+    error ``assistant message with tool_calls must be followed by tool
+    messages``. Returns count of synthesized stubs.
+    """
+    synthesized = 0
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        if msg.role != "assistant" or not msg.tool_calls:
+            i += 1
+            continue
+        seen_ids: set[str] = set()
+        j = i + 1
+        while j < len(messages) and messages[j].role == "tool":
+            if messages[j].tool_call_id:
+                seen_ids.add(messages[j].tool_call_id)
+            j += 1
+        insert_at = j
+        for tc in msg.tool_calls:
+            if tc.id and tc.id not in seen_ids:
+                messages.insert(
+                    insert_at,
+                    Message(
+                        role="tool",
+                        content=_INTERRUPTED_TOOL_STUB,
+                        tool_call_id=tc.id,
+                        name=tc.function.name,
+                    ),
+                )
+                insert_at += 1
+                synthesized += 1
+        i = insert_at if insert_at > i else i + 1
+    return synthesized
+
+
 def _cleanup_incomplete_messages(messages: list[Message]) -> int:
     """Remove trailing incomplete assistant + tool messages. Returns removed count.
 
@@ -976,6 +1023,17 @@ async def run_agent_loop(
     api_total_tokens = 0
     skip_next_token_check = False
     run_start = perf_counter()
+
+    # Defensive: heal any dangling assistant.tool_calls from a prior interrupted
+    # turn (process crash, SIGKILL) before the first LLM request, so the
+    # protocol-state precondition holds.
+    healed = _sanitize_dangling_tool_calls(messages)
+    if healed:
+        logging.getLogger(__name__).warning(
+            "Healed %d dangling assistant tool_call(s) on loop entry — "
+            "synthesized interrupted-stub tool responses.",
+            healed,
+        )
 
     def _build_proposal_event() -> MemoryProposalEvent | None:
         """Read promotion candidates from memory and bump their last_proposed."""
@@ -1556,27 +1614,75 @@ async def run_agent_loop(
             # Run gather in a background task; drain the queue in the
             # foreground generator loop so events are yielded in real-time.
             gather_done = asyncio.Event()
+            per_tc_tasks: dict[str, asyncio.Task] = {}
 
             async def _gather_wrapper():
                 try:
-                    return await asyncio.gather(*[_run_parallel(tc) for tc in parallel_calls])
+                    coros = []
+                    for tc in parallel_calls:
+                        t = asyncio.ensure_future(_run_parallel(tc))
+                        per_tc_tasks[tc.id] = t
+                        coros.append(t)
+                    return await asyncio.gather(*coros, return_exceptions=True)
                 finally:
                     gather_done.set()
 
             gather_task = asyncio.create_task(_gather_wrapper())
 
-            # Yield progress events as they arrive (real-time)
+            # Yield progress events as they arrive (real-time). Bail out early
+            # on cooperative cancellation so the in-flight tools don't block
+            # progress reporting back to the host.
+            cancel_observed = False
             while not gather_done.is_set() or not par_event_queue.empty():
                 try:
                     evt = await asyncio.wait_for(par_event_queue.get(), timeout=0.1)
                     yield evt
                 except (asyncio.TimeoutError, TimeoutError):
+                    if cancelled() and not cancel_observed:
+                        cancel_observed = True
+                        for t in per_tc_tasks.values():
+                            if not t.done():
+                                t.cancel()
                     continue
             # Drain any stragglers enqueued between the last get() and now
             while not par_event_queue.empty():
                 yield par_event_queue.get_nowait()
 
-            gathered = await gather_task  # already done
+            try:
+                gathered_raw = await gather_task  # already done
+            except Exception:
+                gathered_raw = []
+
+            # Build {tc_id: (tc, ToolResult)} mapping from gather output.
+            # asyncio.gather(..., return_exceptions=True) hands back the
+            # exception object for any task that raised — including
+            # CancelledError from cooperative cancellation above.
+            results_by_id: dict[str, tuple[Any, ToolResult]] = {}
+            for tc_obj, raw in zip(parallel_calls, gathered_raw or []):
+                if isinstance(raw, BaseException):
+                    if isinstance(raw, asyncio.CancelledError):
+                        err = "Tool execution cancelled before completion."
+                    else:
+                        err = f"Tool execution failed: {type(raw).__name__}: {raw!s}"
+                    results_by_id[tc_obj.id] = (tc_obj, ToolResult(success=False, content="", error=err))
+                elif isinstance(raw, tuple) and len(raw) == 2:
+                    results_by_id[raw[0].id] = (raw[0], raw[1])
+
+            # Ensure every parallel tc has a result entry — synthesize a stub
+            # if gather returned short for any reason. This guarantees one
+            # ToolCallResult event + one tool message per ToolCallStart event.
+            for tc_obj in parallel_calls:
+                if tc_obj.id not in results_by_id:
+                    results_by_id[tc_obj.id] = (
+                        tc_obj,
+                        ToolResult(
+                            success=False,
+                            content="",
+                            error="Tool execution interrupted — no result returned.",
+                        ),
+                    )
+
+            gathered = [results_by_id[tc.id] for tc in parallel_calls]
 
             # Clean up queue references
             for tool in emitting_tools:
@@ -1667,6 +1773,16 @@ async def run_agent_loop(
                 if not result.success and result.permission_request and not permission_negotiator:
                     pr = {k: v for k, v in result.permission_request.items() if k != "type"}
                     yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
+
+            # Cancellation check after all parallel results emitted — every
+            # tool message is now appended, so the message list is in a
+            # protocol-valid state for the next turn.
+            if cancelled():
+                _cleanup_incomplete_messages(messages)
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+                yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
+                return
 
         # ── Step end ────────────────────────────────────────
         elapsed = perf_counter() - step_start

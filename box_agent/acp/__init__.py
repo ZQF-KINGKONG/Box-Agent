@@ -702,11 +702,14 @@ class BoxACPAgent:
                 from box_agent.tools.mcp_loader import ensure_lazy_mcp_loaded
                 new_tools = await ensure_lazy_mcp_loaded(state.skill_selector.cumulative_query)
                 if new_tools:
-                    register_mcp_tools(state.agent.tools, new_tools)
+                    merge_mcp_tools(self._base_tools, new_tools)
+                    for other in self._sessions.values():
+                        register_mcp_tools(other.agent.tools, new_tools)
                     log.info(
                         "mcp/lazy_loaded",
                         session_id=session_id,
                         count=len(new_tools),
+                        tools=",".join(t.name for t in new_tools),
                     )
             except Exception as exc:
                 log.warn("mcp/lazy_load_error", session_id=session_id, message=str(exc))

@@ -280,6 +280,82 @@ async def test_explicit_lazy_false_overrides_auto(monkeypatch):
     assert get_pending_lazy_mcp_servers() == {}
 
 
+async def test_failed_connect_stays_pending_for_retry(monkeypatch):
+    """If a lazy server's connect fails, it stays in _lazy_mcp_pending so a
+    later session can retry — preventing a single transient failure (or an
+    ephemeral title-gen session) from permanently blinding the agent."""
+    cfg = _write_config(
+        {
+            "browser": {
+                "command": "noop",
+                "args": [],
+                "lazy": True,
+                "keywords": ["browser", "浏览器"],
+            }
+        }
+    )
+
+    attempts: list[str] = []
+
+    async def flaky_connect(self):
+        attempts.append(self.name)
+        if len(attempts) == 1:
+            return False  # first attempt fails
+        self.tools = [_StubMCPTool("browser_open")]
+        return True
+
+    monkeypatch.setattr(
+        "box_agent.tools.mcp_loader.MCPServerConnection.connect",
+        flaky_connect,
+    )
+
+    await load_mcp_tools_async(str(cfg))
+
+    first = await ensure_lazy_mcp_loaded("打开浏览器")
+    assert first == []
+    assert "browser" in get_pending_lazy_mcp_servers()
+
+    second = await ensure_lazy_mcp_loaded("再试一次浏览器")
+    assert [t.name for t in second] == ["browser_open"]
+    assert get_pending_lazy_mcp_servers() == {}
+
+
+async def test_raising_connect_stays_pending_for_retry(monkeypatch):
+    cfg = _write_config(
+        {
+            "browser": {
+                "command": "noop",
+                "args": [],
+                "lazy": True,
+                "keywords": ["browser", "浏览器"],
+            }
+        }
+    )
+
+    attempts: list[str] = []
+
+    async def flaky_connect(self):
+        attempts.append(self.name)
+        if len(attempts) == 1:
+            raise RuntimeError("transient")
+        self.tools = [_StubMCPTool("browser_open")]
+        return True
+
+    monkeypatch.setattr(
+        "box_agent.tools.mcp_loader.MCPServerConnection.connect",
+        flaky_connect,
+    )
+
+    await load_mcp_tools_async(str(cfg))
+
+    first = await ensure_lazy_mcp_loaded("打开浏览器")
+    assert first == []
+    assert "browser" in get_pending_lazy_mcp_servers()
+
+    second = await ensure_lazy_mcp_loaded("再试一次浏览器")
+    assert [t.name for t in second] == ["browser_open"]
+
+
 async def test_playwright_loads_on_chinese_browser_query(monkeypatch):
     cfg = _write_config(
         {

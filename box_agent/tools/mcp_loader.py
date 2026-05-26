@@ -184,7 +184,10 @@ class MCPTool(Tool):
 
             is_error = result.isError if hasattr(result, "isError") else False
 
-            return ToolResult(success=not is_error, content=content_str, error=None if not is_error else "Tool returned error")
+            if is_error:
+                err_msg = content_str.strip() or "Tool returned error"
+                return ToolResult(success=False, content=content_str, error=err_msg)
+            return ToolResult(success=True, content=content_str, error=None)
 
         except TimeoutError:
             return ToolResult(
@@ -670,16 +673,22 @@ async def ensure_lazy_mcp_loaded(query: str) -> list[Tool]:
 
     new_tools: list[Tool] = []
     for conn, success in zip(matched, results):
-        # Always remove from pending — either succeeded (now live) or failed
-        # (avoid retry storms; user can restart to retry).
-        _lazy_mcp_pending.pop(conn.name, None)
         if isinstance(success, BaseException):
+            # Connection raised — keep in _lazy_mcp_pending so a later session
+            # (or the same session on a later turn) can retry. Without this,
+            # a transient failure (or a title-gen session burning the slot)
+            # would permanently blind the agent to this MCP server.
             _warn(f"✗ Lazy MCP server '{conn.name}' raised during connect: {success}")
             continue
-        if success:
-            _mcp_connections.append(conn)
-            new_tools.extend(conn.tools)
-            _warn(f"✓ Lazy MCP server '{conn.name}' loaded ({len(conn.tools)} tools)")
+        if not success:
+            # Connect returned False — same reasoning: leave pending for retry.
+            _warn(f"✗ Lazy MCP server '{conn.name}' failed to connect")
+            continue
+        # Success: move from pending to live registry.
+        _lazy_mcp_pending.pop(conn.name, None)
+        _mcp_connections.append(conn)
+        new_tools.extend(conn.tools)
+        _warn(f"✓ Lazy MCP server '{conn.name}' loaded ({len(conn.tools)} tools)")
 
     return new_tools
 

@@ -1101,6 +1101,21 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         if new_prompt is not None:
             agent.messages[0].content = new_prompt
 
+    async def _apply_mcp_lazy() -> None:
+        """Load lazy MCP servers matching the cumulative skill-selector query.
+
+        Re-uses ``SkillSelector.cumulative_query`` so the lazy-MCP gating
+        decision tracks the same intent signal as skill filtering. Newly
+        loaded tools are merged into ``agent.tools`` via the existing
+        ``register_mcp_tools`` helper (same semantics as the startup load).
+        """
+        if skill_selector is None:
+            return
+        from box_agent.tools.mcp_loader import ensure_lazy_mcp_loaded
+        new_tools = await ensure_lazy_mcp_loaded(skill_selector.cumulative_query)
+        if new_tools:
+            register_mcp_tools(agent.tools, new_tools)
+
     # 8. Display welcome information
     if not task:
         print_banner()
@@ -1112,6 +1127,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         # Block on MCP only when user is actually about to run
         register_mcp_tools(agent.tools, await await_mcp_tools(mcp_task))
         _apply_skill_filter(task)
+        await _apply_mcp_lazy()
         agent.add_user_message(task)
         try:
             await agent.run()
@@ -1330,6 +1346,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                 f"{Colors.DIM}Thinking... (Esc to cancel){Colors.RESET}\n"
             )
             _apply_skill_filter(user_input)
+            await _apply_mcp_lazy()
             agent.add_user_message(user_input)
 
             # Create cancellation event

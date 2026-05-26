@@ -692,6 +692,19 @@ class BoxACPAgent:
             except Exception as exc:
                 log.warn("skills/filter_error", session_id=session_id, message=str(exc))
 
+            try:
+                from box_agent.tools.mcp_loader import ensure_lazy_mcp_loaded
+                new_tools = await ensure_lazy_mcp_loaded(state.skill_selector.cumulative_query)
+                if new_tools:
+                    register_mcp_tools(state.agent.tools, new_tools)
+                    log.info(
+                        "mcp/lazy_loaded",
+                        session_id=session_id,
+                        count=len(new_tools),
+                    )
+            except Exception as exc:
+                log.warn("mcp/lazy_load_error", session_id=session_id, message=str(exc))
+
         state.agent.messages.append(Message(role="user", content=user_text))
 
         # Drain any stale injections from a previous turn

@@ -215,6 +215,9 @@ class MCPServerConnection:
         connect_timeout: float | None = None,
         execute_timeout: float | None = None,
         sse_read_timeout: float | None = None,
+        # Lazy loading: skip connect at startup; load on query match
+        lazy: bool = False,
+        keywords: list[str] | None = None,
     ):
         self.name = name
         self.connection_type = connection_type
@@ -230,6 +233,9 @@ class MCPServerConnection:
         self.connect_timeout = connect_timeout
         self.execute_timeout = execute_timeout
         self.sse_read_timeout = sse_read_timeout
+        # Lazy loading state
+        self.lazy = lazy
+        self.keywords = keywords or []
         # Connection state
         self.session: ClientSession | None = None
         self.exit_stack: AsyncExitStack | None = None
@@ -370,6 +376,10 @@ class MCPServerConnection:
 
 # Global connections registry
 _mcp_connections: list[MCPServerConnection] = []
+# Lazy MCP servers parsed at startup but NOT yet connected. Keyed by server
+# name. ``ensure_lazy_mcp_loaded(query)`` connects matching servers on demand
+# and pops them out of this dict.
+_lazy_mcp_pending: dict[str, MCPServerConnection] = {}
 
 
 def _determine_connection_type(server_config: dict) -> ConnectionType:
@@ -521,18 +531,31 @@ async def load_mcp_tools_async(
                     connect_timeout=server_config.get("connect_timeout"),
                     execute_timeout=server_config.get("execute_timeout"),
                     sse_read_timeout=server_config.get("sse_read_timeout"),
+                    lazy=bool(server_config.get("lazy", False)),
+                    keywords=list(server_config.get("keywords", []) or []),
                 )
             )
 
-        # Connect to all servers in parallel — one slow/broken server no longer
-        # blocks the others. Each connection has its own timeout (connect()).
+        # Split eager vs lazy. Lazy servers are deferred to
+        # ``ensure_lazy_mcp_loaded(query)`` — they keep their config but skip
+        # the connect() round-trip.
+        eager_connections: list[MCPServerConnection] = []
+        for conn in connections:
+            if conn.lazy:
+                _lazy_mcp_pending[conn.name] = conn
+                _warn(f"Deferred lazy MCP server: {conn.name} (keywords={conn.keywords})")
+            else:
+                eager_connections.append(conn)
+
+        # Connect to all eager servers in parallel — one slow/broken server no
+        # longer blocks the others. Each connection has its own timeout.
         results = await asyncio.gather(
-            *(conn.connect() for conn in connections),
+            *(conn.connect() for conn in eager_connections),
             return_exceptions=True,
         )
 
         all_tools = []
-        for conn, success in zip(connections, results):
+        for conn, success in zip(eager_connections, results):
             if isinstance(success, BaseException):
                 _warn(f"✗ MCP server '{conn.name}' raised during connect: {success}")
                 continue
@@ -558,3 +581,70 @@ async def cleanup_mcp_connections():
     for connection in _mcp_connections:
         await connection.disconnect()
     _mcp_connections.clear()
+    _lazy_mcp_pending.clear()
+
+
+def get_pending_lazy_mcp_servers() -> dict[str, list[str]]:
+    """Return ``{server_name: keywords}`` for lazy MCP servers not yet loaded.
+
+    Useful for diagnostics / tests. The dict is a snapshot; mutating it has no
+    effect on the underlying registry.
+    """
+    return {name: list(conn.keywords) for name, conn in _lazy_mcp_pending.items()}
+
+
+async def ensure_lazy_mcp_loaded(query: str) -> list[Tool]:
+    """Connect lazy MCP servers whose keywords overlap the cumulative query.
+
+    Tokenizes ``query`` the same way ``SkillSelector`` does (English length>=2
+    + Chinese 2-char sliding window) so callers can pass the cumulative query
+    string straight through. A lazy server matches when ANY of its declared
+    keywords token-overlaps the query. Matched servers are connected and
+    moved from ``_lazy_mcp_pending`` into ``_mcp_connections``.
+
+    Returns the list of newly-loaded MCPTool instances (empty if no match).
+    Caller is responsible for merging them into the agent's tool list.
+    """
+    if not _lazy_mcp_pending or not query or not query.strip():
+        return []
+
+    # Reuse the skill loader's tokenizer for consistent semantics.
+    from box_agent.tools.skill_loader import _tokenize
+
+    query_tokens = _tokenize(query)
+    if not query_tokens:
+        return []
+
+    matched: list[MCPServerConnection] = []
+    for name, conn in list(_lazy_mcp_pending.items()):
+        if not conn.keywords:
+            continue
+        kw_tokens: set[str] = set()
+        for kw in conn.keywords:
+            kw_tokens |= _tokenize(kw)
+        if kw_tokens & query_tokens:
+            matched.append(conn)
+
+    if not matched:
+        return []
+
+    results = await asyncio.gather(
+        *(conn.connect() for conn in matched),
+        return_exceptions=True,
+    )
+
+    new_tools: list[Tool] = []
+    for conn, success in zip(matched, results):
+        # Always remove from pending — either succeeded (now live) or failed
+        # (avoid retry storms; user can restart to retry).
+        _lazy_mcp_pending.pop(conn.name, None)
+        if isinstance(success, BaseException):
+            _warn(f"✗ Lazy MCP server '{conn.name}' raised during connect: {success}")
+            continue
+        if success:
+            _mcp_connections.append(conn)
+            new_tools.extend(conn.tools)
+            _warn(f"✓ Lazy MCP server '{conn.name}' loaded ({len(conn.tools)} tools)")
+
+    return new_tools
+

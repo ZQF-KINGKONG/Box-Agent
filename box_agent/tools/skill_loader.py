@@ -577,6 +577,15 @@ class SkillSelector:
     def bound(self) -> bool:
         return self._prefix is not None
 
+    @property
+    def cumulative_query(self) -> str:
+        """Accumulated user-input query joined with spaces.
+
+        Other selectors (e.g. lazy MCP gating) can reuse this so they share a
+        single source of truth for what the session has been about.
+        """
+        return " ".join(self._cumulative)
+
     def bind(self, system_prompt_text: str) -> None:
         """Capture the prefix and suffix around the skill slot sentinel.
 

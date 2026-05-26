@@ -24,12 +24,7 @@
             ],
             "disabled": true,
             "connect_timeout": 15.0,
-            "execute_timeout": 60.0,
-            "lazy": true,
-            "keywords": [
-                "browser", "playwright", "chromium", "screenshot", "scrape", "crawl", "automation",
-                "浏览器", "网页", "截图", "抓取", "爬虫", "自动化", "打开网址", "访问网页"
-            ]
+            "execute_timeout": 60.0
         }
     }
 }

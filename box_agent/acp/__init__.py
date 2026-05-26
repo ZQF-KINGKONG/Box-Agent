@@ -689,6 +689,12 @@ class BoxACPAgent:
                 if new_prompt is not None:
                     state.agent.messages[0] = Message(role="system", content=new_prompt)
                     state.agent.system_prompt = new_prompt
+                    log.info(
+                        "skills/filtered",
+                        session_id=session_id,
+                        query_chars=len(state.skill_selector.cumulative_query),
+                        prompt_chars=len(new_prompt),
+                    )
             except Exception as exc:
                 log.warn("skills/filter_error", session_id=session_id, message=str(exc))
 

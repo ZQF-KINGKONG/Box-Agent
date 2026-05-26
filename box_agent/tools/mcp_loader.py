@@ -381,6 +381,24 @@ _mcp_connections: list[MCPServerConnection] = []
 # and pops them out of this dict.
 _lazy_mcp_pending: dict[str, MCPServerConnection] = {}
 
+# Built-in keyword presets for well-known heavy MCP servers. Used when an
+# mcp.json entry omits the ``keywords`` field — the server name is looked up
+# here and the preset is applied. This lets hosts ship a stock mcp.json (no
+# keywords field) and still get smart lazy gating for the big-ticket servers.
+# Keywords are bilingual on purpose so Chinese queries can match.
+DEFAULT_MCP_KEYWORDS: dict[str, list[str]] = {
+    "playwright": [
+        "browser", "playwright", "chromium", "screenshot", "scrape", "crawl",
+        "automation", "url", "html", "dom",
+        "浏览器", "网页", "截图", "抓取", "爬虫", "自动化",
+        "打开网址", "访问网页", "网址", "链接",
+    ],
+    "puppeteer": [
+        "browser", "puppeteer", "chromium", "screenshot", "scrape", "automation",
+        "浏览器", "网页", "截图", "抓取", "自动化",
+    ],
+}
+
 
 def _determine_connection_type(server_config: dict) -> ConnectionType:
     """Determine connection type from server config."""
@@ -531,10 +549,27 @@ async def load_mcp_tools_async(
                     connect_timeout=server_config.get("connect_timeout"),
                     execute_timeout=server_config.get("execute_timeout"),
                     sse_read_timeout=server_config.get("sse_read_timeout"),
-                    lazy=bool(server_config.get("lazy", False)),
+                    lazy=False,  # final lazy decision applied below
                     keywords=list(server_config.get("keywords", []) or []),
                 )
             )
+
+        # Resolve final lazy + keywords for each connection.
+        #   1. If mcp.json sets explicit ``keywords``, use them as-is.
+        #   2. Else fall back to ``DEFAULT_MCP_KEYWORDS`` by server name.
+        #   3. Lazy default: explicit ``lazy`` wins; otherwise auto-lazy when
+        #      the server ends up with non-empty keywords. Servers with no
+        #      keywords stay eager so they don't get silently stranded.
+        for conn, server_config in zip(connections, [
+            config["mcpServers"][c.name] for c in connections
+        ]):
+            if not conn.keywords:
+                conn.keywords = list(DEFAULT_MCP_KEYWORDS.get(conn.name.lower(), []))
+            explicit_lazy = server_config.get("lazy")
+            if explicit_lazy is None:
+                conn.lazy = bool(conn.keywords)
+            else:
+                conn.lazy = bool(explicit_lazy)
 
         # Split eager vs lazy. Lazy servers are deferred to
         # ``ensure_lazy_mcp_loaded(query)`` — they keep their config but skip

@@ -189,3 +189,119 @@ async def test_skillselector_cumulative_query_accumulates():
     sel.update("再导出飞书")
     assert "PPT" in sel.cumulative_query
     assert "飞书" in sel.cumulative_query
+
+
+async def test_playwright_auto_lazy_without_explicit_keywords(monkeypatch):
+    """Server named 'playwright' falls back to DEFAULT_MCP_KEYWORDS and goes
+    lazy without any keywords/lazy fields in mcp.json."""
+    cfg = _write_config(
+        {
+            "playwright": {
+                "command": "noop",
+                "args": [],
+            }
+        }
+    )
+
+    connect_calls: list[str] = []
+
+    async def fake_connect(self):
+        connect_calls.append(self.name)
+        self.tools = [_StubMCPTool("browser_navigate")]
+        return True
+
+    monkeypatch.setattr(
+        "box_agent.tools.mcp_loader.MCPServerConnection.connect",
+        fake_connect,
+    )
+
+    tools = await load_mcp_tools_async(str(cfg))
+    assert tools == []
+    assert connect_calls == []
+    pending = get_pending_lazy_mcp_servers()
+    assert "playwright" in pending
+    assert "浏览器" in pending["playwright"]  # bilingual preset
+
+
+async def test_no_keywords_stays_eager(monkeypatch):
+    """Unknown server without keywords stays eager (back-compat)."""
+    cfg = _write_config(
+        {
+            "askecho": {
+                "url": "https://example.com/mcp",
+            }
+        }
+    )
+
+    connect_calls: list[str] = []
+
+    async def fake_connect(self):
+        connect_calls.append(self.name)
+        self.tools = [_StubMCPTool("search")]
+        return True
+
+    monkeypatch.setattr(
+        "box_agent.tools.mcp_loader.MCPServerConnection.connect",
+        fake_connect,
+    )
+
+    tools = await load_mcp_tools_async(str(cfg))
+    assert connect_calls == ["askecho"]
+    assert [t.name for t in tools] == ["search"]
+    assert get_pending_lazy_mcp_servers() == {}
+
+
+async def test_explicit_lazy_false_overrides_auto(monkeypatch):
+    """Explicit ``lazy: false`` keeps a known server eager."""
+    cfg = _write_config(
+        {
+            "playwright": {
+                "command": "noop",
+                "args": [],
+                "lazy": False,
+            }
+        }
+    )
+
+    connect_calls: list[str] = []
+
+    async def fake_connect(self):
+        connect_calls.append(self.name)
+        self.tools = [_StubMCPTool("browser_navigate")]
+        return True
+
+    monkeypatch.setattr(
+        "box_agent.tools.mcp_loader.MCPServerConnection.connect",
+        fake_connect,
+    )
+
+    await load_mcp_tools_async(str(cfg))
+    assert connect_calls == ["playwright"]
+    assert get_pending_lazy_mcp_servers() == {}
+
+
+async def test_playwright_loads_on_chinese_browser_query(monkeypatch):
+    cfg = _write_config(
+        {
+            "playwright": {
+                "command": "noop",
+                "args": [],
+            }
+        }
+    )
+
+    async def fake_connect(self):
+        self.tools = [_StubMCPTool("browser_navigate")]
+        return True
+
+    monkeypatch.setattr(
+        "box_agent.tools.mcp_loader.MCPServerConnection.connect",
+        fake_connect,
+    )
+
+    await load_mcp_tools_async(str(cfg))
+    assert "playwright" in get_pending_lazy_mcp_servers()
+
+    new_tools = await ensure_lazy_mcp_loaded("帮我打开浏览器截图一下")
+    assert [t.name for t in new_tools] == ["browser_navigate"]
+    assert get_pending_lazy_mcp_servers() == {}

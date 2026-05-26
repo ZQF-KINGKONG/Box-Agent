@@ -297,9 +297,8 @@ async def test_acp_prompt_includes_skill_runtime_context(tmp_path, monkeypatch):
 
     assert "## Skill Runtime Context" in prompt
     assert "$BOX_AGENT_PYTHON" in prompt
-    assert "Node runtime:" in prompt
-    assert "available: false" in prompt
-    assert "provider: missing" in prompt
+    assert "- Node:" in prompt
+    assert "不可用" in prompt
     assert "npm install -g" in prompt
     assert "npx --yes" in prompt
 
@@ -349,9 +348,9 @@ async def test_acp_prompt_and_bash_env_include_self_managed_node_runtime(tmp_pat
     prompt = state.agent.system_prompt
     bash_tool = state.agent.tools["bash"]
 
-    assert "Node runtime:" in prompt
-    assert "available: true" in prompt
-    assert "provider: box_agent" in prompt
+    assert "- Node:" in prompt
+    assert "via `$BOX_AGENT_NODE`" in prompt
+    assert "box_agent" in prompt
     assert "$BOX_AGENT_NODE" in prompt
     assert bash_tool._subprocess_env["BOX_AGENT_NODE"] == str(node)
     assert bash_tool._subprocess_env["BOX_AGENT_NPM"] == str(npm)
@@ -402,8 +401,8 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
     )
     state = agent._sessions[session.sessionId]
 
-    assert "provider: box_agent" in state.agent.system_prompt
-    assert "shell command: unavailable" in state.agent.system_prompt
+    assert "box_agent" in state.agent.system_prompt
+    assert "execute_code" in state.agent.system_prompt or "shell python" in state.agent.system_prompt
     assert state.agent.tools["bash"]._subprocess_env["BOX_AGENT_NODE"] == str(node)
 
 

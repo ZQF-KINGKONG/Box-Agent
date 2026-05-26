@@ -40,26 +40,25 @@ if TYPE_CHECKING:
 SANDBOX_INFO_PROMPT = """
 ## Python Sandbox (execute_code)
 
-Python 代码通过 `execute_code` 工具在**隔离的 Jupyter kernel**（沙箱）中运行，和 host Python 相互独立：
+Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 host Python 独立：
 
-- **运行位置**：沙箱 kernel 持有自己的 `sys.executable`。沙箱 cwd 已是 `{workspace}/output/`，保存文件用相对路径（如 `plt.savefig("chart.png")`），禁止写 `/mnt/data/`、`sandbox:` 前缀；如需读取用户上传文件，用 `../<name>` 回到 workspace 根。
-- **状态持久**：同一会话中变量、import、已加载数据保留到下一次 `execute_code` 调用；
-- **分步执行**：保持清晰逻辑，一步一步执行以防止出错。
-- **预装包**：`pandas`、`numpy`、`matplotlib`、`seaborn`、`requests`、`scikit-learn`、`openpyxl`、`xlrd`、`python-docx`、`pypdf`、`pdfplumber`、`reportlab`、`python-pptx`、`beautifulsoup4`、`lxml`、`pillow`、`pyyaml`、`python-dateutil`、`chardet`，以及标准库。常用库默认就有，**不要再 `%pip install` 重装**，会拖慢首次执行并可能触发超时。
-- **安装额外包**：只在确认缺失时，在 `execute_code` 里用 `%pip install <pkg>` 或 `!pip install <pkg>`（Jupyter magic 会走当前 kernel 的 pip，落到沙箱 venv）。**绝对禁止**用 `bash` 跑 `pip install` / `uv pip install`——bash 走的是 host 解释器，装到 host 后沙箱依然 `ModuleNotFoundError`。
-- **何时用 execute_code**：数据分析与可视化、读写 CSV/Excel/JSON/图片、处理 Word/PDF/PPT、多步计算、需要保留状态的脚本。
-- **何时用 bash**：仓库代码编辑、跑测试/构建、系统命令、git 操作——这些和沙箱无关。
+- **运行位置**：沙箱有独立 `sys.executable`，cwd 已是 `{workspace}/output/`，存盘用相对路径（如 `plt.savefig("chart.png")`）；禁写 `/mnt/data/`、`sandbox:` 前缀；读用户上传文件用 `../<name>` 回 workspace 根。
+- **状态持久**：同会话内变量、import、已加载数据保留到下一次调用；保持分步执行避免错误。
+- **预装包**：pandas、numpy、matplotlib、seaborn、scikit-learn、openpyxl、xlrd、python-docx、pypdf、pdfplumber、reportlab、python-pptx、beautifulsoup4、lxml、pillow、requests、pyyaml、python-dateutil、chardet + 标准库——**不要重装**，会拖慢首次执行。
+- **装新包**：仅在确认缺失时，在 `execute_code` 内用 `%pip install <pkg>` / `!pip install <pkg>`（走当前 kernel 的 pip，落沙箱 venv）。**绝对禁止** `bash` 跑 `pip install`——会装到 host，沙箱仍 `ModuleNotFoundError`。
+- **用 execute_code**：数据分析、可视化、CSV/Excel/JSON/图片读写、Word/PDF/PPT 处理、多步计算、需保留状态的脚本。
+- **用 bash**：仓库代码编辑、测试/构建、系统命令、git——与沙箱无关。
 
-### 文档处理优先级（沙箱包优先）
+### 文档处理优先级
 
-对 Excel / Word / PDF / PowerPoint 文件，优先在沙箱里用 Python 包，避免外部命令行工具：
+Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 
-- **Excel (.xlsx/.xls)**：`pandas` + `openpyxl` 读写，`xlrd` 读 `.xls`。只有需要公式重算时再考虑 LibreOffice。
-- **Word (.docx)**：`python-docx` 读写；只有需要跨格式转换时才用 `pandoc`。
+- **Excel**：`pandas`+`openpyxl` 读写，`xlrd` 读 `.xls`；仅公式重算才考虑 LibreOffice。
+- **Word**：`python-docx` 读写；跨格式转换才用 `pandoc`。
 - **PDF**：`pypdf`（合并/拆分）、`pdfplumber`（文本/表格抽取）、`reportlab`（生成）。
-- **PowerPoint (.pptx)**：`python-pptx` 可用于读取、抽取、检查或窄范围编辑已有文件；新建/生成 PPT/PPTX/deck 时必须先走对应 skill。不要用 `execute_code` + `python-pptx` 直接创建新的交付 PPT。
+- **PowerPoint**：`python-pptx` 用于读取/抽取/检查/窄范围编辑；新建 PPT/PPTX 必须走 skill，不要直接用 `execute_code`+`python-pptx` 创建交付 PPT。
 
-**Skill vs Sandbox**：数据抽取、格式转换、表格处理 → 沙箱；复杂版式、OOXML 精细操作、模板化生成、公式重算 → 先加载对应 skill。
+**Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
 """
 
 

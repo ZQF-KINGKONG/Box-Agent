@@ -66,6 +66,6 @@ def test_cli_workspace_tools_receive_self_managed_node_runtime(tmp_path: Path) -
     assert bash_tool._subprocess_env["npm_config_prefix"] == str(node_root / "sandbox" / "npm-prefix")
 
     prompt = build_skill_runtime_prompt(runtime_context)
-    assert "Node runtime:" in prompt
-    assert "available: true" in prompt
+    assert "- Node:" in prompt
+    assert "via `$BOX_AGENT_NODE`" in prompt
     assert "$BOX_AGENT_NODE" in prompt

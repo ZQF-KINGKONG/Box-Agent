@@ -76,44 +76,26 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
     python = ctx.get("python")
     node = ctx.get("node")
 
-    lines = ["## Skill Runtime Context", ""]
+    lines = ["## Skill Runtime Context"]
 
-    lines.append("Python runtime:")
-    lines.append(f"- available: {str(python.available).lower()}")
-    lines.append(f"- provider: {python.provider}")
     if python.available:
-        lines.append("- command: `$BOX_AGENT_PYTHON`")
-        lines.append("- Do not use system `python` or `python3` when `$BOX_AGENT_PYTHON` is available.")
+        py_line = f"- Python: {python.provider} via `$BOX_AGENT_PYTHON`（不要用裸 `python`/`python3`）"
     else:
-        lines.append("- shell command: unavailable")
-        lines.append("- Python code execution may still be available through `execute_code` when the sandbox tool is present.")
-    for note in python.notes:
-        lines.append(f"- note: {note}")
+        py_line = "- Python: 仅 `execute_code` 沙箱可用，无 shell python"
+    if python.notes:
+        py_line += f" — {'; '.join(python.notes)}"
+    lines.append(py_line)
 
-    lines.append("")
-    lines.append("Node runtime:")
-    lines.append(f"- available: {str(node.available).lower()}")
-    lines.append(f"- provider: {node.provider}")
     if node.available:
-        lines.append("- command: `$BOX_AGENT_NODE`")
-        lines.append("- npm command: `$BOX_AGENT_NPM` when listed")
-        lines.append("- npx command: `$BOX_AGENT_NPX` when listed")
+        node_line = f"- Node: {node.provider} via `$BOX_AGENT_NODE` / `$BOX_AGENT_NPM` / `$BOX_AGENT_NPX`"
     else:
-        lines.append("- unavailable: `node`, `npm`, and `npx` are not available in this session unless explicitly listed above.")
-    for note in node.notes:
-        lines.append(f"- note: {note}")
+        node_line = "- Node: 不可用——skill 若依赖 Node 应直接报告依赖缺失，不要回退系统 node"
+    if node.notes:
+        node_line += f" — {'; '.join(node.notes)}"
+    lines.append(node_line)
 
-    lines.extend(
-        [
-            "",
-            "Rules:",
-            "- Python skills must use `$BOX_AGENT_PYTHON` when it is available.",
-            "- Node skills must use `$BOX_AGENT_NODE` only when available.",
-            "- If Node runtime is missing, report that the skill requires a Node runtime instead of trying system Node.",
-            "- Do not run `npm install -g`.",
-            "- Do not run `npx --yes`.",
-            "- Do not assume system `node`, `npm`, `npx`, `python`, or `python3`.",
-        ]
+    lines.append(
+        "- Rules: 优先 `$BOX_AGENT_*` 环境变量；禁用 `npm install -g`、`npx --yes`、裸 `python`/`python3`/`node`/`npm`/`npx`。"
     )
     return "\n".join(lines)
 

@@ -454,16 +454,13 @@ def test_runtime_prompt_mentions_python_node_and_npm_rules(tmp_path: Path) -> No
     out = build_skill_runtime_prompt(ctx)
 
     assert "## Skill Runtime Context" in out
-    assert "Python runtime:" in out
-    assert "available: true" in out
+    assert "- Python:" in out
     assert "$BOX_AGENT_PYTHON" in out
-    assert "Node runtime:" in out
-    assert "available: false" in out
-    assert "provider: missing" in out
-    assert "unavailable" in out
+    assert "- Node:" in out
+    assert "不可用" in out
     assert "npm install -g" in out
     assert "npx --yes" in out
-    assert "system `node`, `npm`, `npx`, `python`, or `python3`" in out
+    assert "`python`/`python3`/`node`/`npm`/`npx`" in out
 
 
 def test_runtime_prompt_mentions_available_self_managed_node(tmp_path: Path) -> None:
@@ -478,9 +475,8 @@ def test_runtime_prompt_mentions_available_self_managed_node(tmp_path: Path) -> 
     ctx = build_skill_runtime_context(sandbox_mode=False, node_runtime_root=root)
     out = build_skill_runtime_prompt(ctx)
 
-    assert "Node runtime:" in out
-    assert "available: true" in out
-    assert "provider: box_agent" in out
+    assert "- Node:" in out
+    assert "box_agent" in out
     assert "$BOX_AGENT_NODE" in out
     assert "$BOX_AGENT_NPM" in out
     assert "$BOX_AGENT_NPX" in out

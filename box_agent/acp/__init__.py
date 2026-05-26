@@ -51,7 +51,6 @@ from acp import (
     PromptResponse,
     session_notification,
     start_tool_call,
-    stdio_streams,
     text_block,
     tool_content,
     update_agent_message,
@@ -62,6 +61,7 @@ from pydantic import field_validator
 from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
+from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.agent import Agent
 from box_agent.tools.setup import (
     SANDBOX_INFO_PROMPT,
@@ -1667,7 +1667,7 @@ async def run_acp_server(config: Config | None = None) -> None:
 
         # Restore real stdout for ACP transport, then re-guard sys.stdout
         sys.stdout = _real_stdout
-        reader, writer = await stdio_streams()
+        reader, writer = await stdio_streams_largebuf()
 
         # Windows fix: the ACP dependency's _StdoutTransport.write() resolves
         # sys.stdout.buffer dynamically at each call.  After re-guarding

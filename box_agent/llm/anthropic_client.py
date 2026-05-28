@@ -388,7 +388,7 @@ class AnthropicClient(LLMClientBase):
 
         log_llm_request(provider="anthropic", mode="stream", api_base=self.api_base, params=params)
 
-        # Accumulators for the finish event
+        # Accumulators for the finish event (reset per retry attempt below)
         text_content = ""
         thinking_content = ""
         tool_calls: list[ToolCall] = []
@@ -406,95 +406,133 @@ class AnthropicClient(LLMClientBase):
         current_tool_json = ""
         provider_request_id: str | None = None
 
-        try:
-            stream_context = self.client.messages.stream(**params)
-        except Exception as exc:
-            log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
-            raise
+        import asyncio as _asyncio
 
-        try:
-            async with stream_context as stream:
-                response_headers = getattr(getattr(stream, "response", None), "headers", None)
-                provider_request_id = request_id_from_headers(response_headers)
-                log_llm_response_meta(
-                    provider="anthropic",
-                    mode="stream",
-                    request_id=provider_request_id,
-                    headers=response_headers,
-                )
-                async for event in stream:
-                    # ── Message start (input token usage) ──
-                    if event.type == "message_start":
-                        msg = event.message
-                        if hasattr(msg, "usage") and msg.usage:
-                            input_tokens = msg.usage.input_tokens or 0
-                            cache_read_tokens = getattr(msg.usage, "cache_read_input_tokens", 0) or 0
-                            cache_create_tokens = getattr(msg.usage, "cache_creation_input_tokens", 0) or 0
+        max_attempts = max(1, self.retry_config.max_retries + 1) if self.retry_config.enabled else 1
+        any_user_yield = False
 
-                    # ── Content block start ──
-                    elif event.type == "content_block_start":
-                        block = event.content_block
-                        if block.type == "tool_use":
-                            current_tool_id = block.id
-                            current_tool_name = block.name
-                            current_tool_json = ""
+        for attempt in range(max_attempts):
+            # Reset per-attempt accumulators
+            text_content = ""
+            thinking_content = ""
+            tool_calls = []
+            finish_reason = "stop"
+            input_tokens = 0
+            output_tokens = 0
+            cache_read_tokens = 0
+            cache_create_tokens = 0
+            current_tool_id = None
+            current_tool_name = None
+            current_tool_json = ""
 
-                    # ── Content block delta ──
-                    elif event.type == "content_block_delta":
-                        delta = event.delta
-                        if delta.type == "thinking_delta":
-                            thinking_content += delta.thinking
-                            yield StreamEvent(type="thinking", delta=delta.thinking)
-                        elif delta.type == "text_delta":
-                            text_content += delta.text
-                            yield StreamEvent(type="text", delta=delta.text)
-                        elif delta.type == "input_json_delta":
-                            current_tool_json += delta.partial_json
+            try:
+                stream_context = self.client.messages.stream(**params)
+            except Exception as exc:
+                log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
+                raise
 
-                    # ── Content block stop ──
-                    elif event.type == "content_block_stop":
-                        if current_tool_id is not None:
-                            import json
+            try:
+                async with stream_context as stream:
+                    response_headers = getattr(getattr(stream, "response", None), "headers", None)
+                    provider_request_id = request_id_from_headers(response_headers)
+                    log_llm_response_meta(
+                        provider="anthropic",
+                        mode="stream",
+                        request_id=provider_request_id,
+                        headers=response_headers,
+                    )
+                    async for event in stream:
+                        # ── Message start (input token usage) ──
+                        if event.type == "message_start":
+                            msg = event.message
+                            if hasattr(msg, "usage") and msg.usage:
+                                input_tokens = msg.usage.input_tokens or 0
+                                cache_read_tokens = getattr(msg.usage, "cache_read_input_tokens", 0) or 0
+                                cache_create_tokens = getattr(msg.usage, "cache_creation_input_tokens", 0) or 0
 
-                            try:
-                                arguments = json.loads(current_tool_json) if current_tool_json else {}
-                            except json.JSONDecodeError:
-                                arguments = {}
-                            tool_calls.append(
-                                ToolCall(
-                                    id=current_tool_id,
-                                    type="function",
-                                    function=FunctionCall(
-                                        name=current_tool_name or "",
-                                        arguments=arguments,
-                                    ),
+                        # ── Content block start ──
+                        elif event.type == "content_block_start":
+                            block = event.content_block
+                            if block.type == "tool_use":
+                                current_tool_id = block.id
+                                current_tool_name = block.name
+                                current_tool_json = ""
+
+                        # ── Content block delta ──
+                        elif event.type == "content_block_delta":
+                            delta = event.delta
+                            if delta.type == "thinking_delta":
+                                thinking_content += delta.thinking
+                                any_user_yield = True
+                                yield StreamEvent(type="thinking", delta=delta.thinking)
+                            elif delta.type == "text_delta":
+                                text_content += delta.text
+                                any_user_yield = True
+                                yield StreamEvent(type="text", delta=delta.text)
+                            elif delta.type == "input_json_delta":
+                                current_tool_json += delta.partial_json
+
+                        # ── Content block stop ──
+                        elif event.type == "content_block_stop":
+                            if current_tool_id is not None:
+                                import json
+
+                                try:
+                                    arguments = json.loads(current_tool_json) if current_tool_json else {}
+                                except json.JSONDecodeError:
+                                    arguments = {}
+                                tool_calls.append(
+                                    ToolCall(
+                                        id=current_tool_id,
+                                        type="function",
+                                        function=FunctionCall(
+                                            name=current_tool_name or "",
+                                            arguments=arguments,
+                                        ),
+                                    )
                                 )
-                            )
-                            current_tool_id = None
-                            current_tool_name = None
-                            current_tool_json = ""
+                                current_tool_id = None
+                                current_tool_name = None
+                                current_tool_json = ""
 
-                    # ── Message delta (stop reason + output tokens) ──
-                    elif event.type == "message_delta":
-                        if hasattr(event, "delta") and hasattr(event.delta, "stop_reason"):
-                            finish_reason = event.delta.stop_reason or "stop"
-                        if hasattr(event, "usage") and event.usage:
-                            output_tokens = getattr(event.usage, "output_tokens", 0) or 0
-        except Exception as exc:
-            log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
-            if is_retryable_stream_error(exc) and (text_content or thinking_content):
-                logger.warning(
-                    "anthropic stream interrupted after partial yield "
-                    "(text=%d chars, thinking=%d chars): %s",
-                    len(text_content), len(thinking_content), exc,
-                )
-                raise StreamInterrupted(
-                    last_exception=exc,
-                    partial_text=text_content,
-                    partial_thinking=thinking_content,
-                    provider_request_id=provider_request_id,
-                ) from exc
-            raise
+                        # ── Message delta (stop reason + output tokens) ──
+                        elif event.type == "message_delta":
+                            if hasattr(event, "delta") and hasattr(event.delta, "stop_reason"):
+                                finish_reason = event.delta.stop_reason or "stop"
+                            if hasattr(event, "usage") and event.usage:
+                                output_tokens = getattr(event.usage, "output_tokens", 0) or 0
+            except Exception as exc:
+                log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
+                if is_retryable_stream_error(exc):
+                    if any_user_yield:
+                        logger.warning(
+                            "anthropic stream interrupted after partial yield "
+                            "(text=%d chars, thinking=%d chars): %s",
+                            len(text_content), len(thinking_content), exc,
+                        )
+                        raise StreamInterrupted(
+                            last_exception=exc,
+                            partial_text=text_content,
+                            partial_thinking=thinking_content,
+                            provider_request_id=provider_request_id,
+                        ) from exc
+                    if attempt < max_attempts - 1:
+                        delay = self.retry_config.calculate_delay(attempt)
+                        logger.warning(
+                            "anthropic generate_stream attempt %d/%d dropped before any yield: %s; "
+                            "retrying from scratch in %.2fs",
+                            attempt + 1, max_attempts, exc, delay,
+                        )
+                        if self.retry_callback:
+                            try:
+                                self.retry_callback(exc, attempt + 1)
+                            except Exception:  # pragma: no cover - callback safety
+                                logger.exception("retry_callback raised")
+                        await _asyncio.sleep(delay)
+                        continue
+                raise
+            else:
+                break
 
         # Build final usage
         total_input = input_tokens + cache_read_tokens + cache_create_tokens

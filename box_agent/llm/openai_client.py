@@ -416,98 +416,126 @@ class OpenAIClient(LLMClientBase):
             except AttributeError:
                 return await _await_if_needed(self.client.chat.completions.create(**params))
 
-        max_open_attempts = max(1, self.retry_config.max_retries + 1) if self.retry_config.enabled else 1
-        last_open_exc: Exception | None = None
-        response_stream = None
-        for attempt in range(max_open_attempts):
+        import asyncio as _asyncio
+
+        max_attempts = max(1, self.retry_config.max_retries + 1) if self.retry_config.enabled else 1
+        any_user_yield = False
+
+        for attempt in range(max_attempts):
+            # Reset per-attempt accumulators so a retry doesn't leak state from
+            # a half-consumed prior attempt.
+            text_content = ""
+            thinking_content = ""
+            usage = None
+            finish_reason = "stop"
+            tool_acc = {}
+
             try:
                 response_stream = await _open_stream()
-                break
             except Exception as exc:
-                last_open_exc = exc
                 log_llm_error_meta(provider="openai", mode="stream", exc=exc)
-                if attempt >= max_open_attempts - 1 or not is_retryable_stream_error(exc):
-                    raise
-                delay = self.retry_config.calculate_delay(attempt)
-                logger.warning(
-                    "openai generate_stream open attempt %d/%d failed: %s; retrying in %.2fs",
-                    attempt + 1, max_open_attempts, exc, delay,
-                )
-                if self.retry_callback:
-                    try:
-                        self.retry_callback(exc, attempt + 1)
-                    except Exception:  # pragma: no cover - callback safety
-                        logger.exception("retry_callback raised")
-                import asyncio as _asyncio
-                await _asyncio.sleep(delay)
-        if response_stream is None:  # pragma: no cover - belt and suspenders
-            raise last_open_exc or RuntimeError("failed to open stream")
-
-        try:
-            async for chunk in response_stream:
-                # Usage info (sent in the final chunk with choices=[])
-                if hasattr(chunk, "usage") and chunk.usage:
-                    usage = TokenUsage(
-                        prompt_tokens=chunk.usage.prompt_tokens or 0,
-                        completion_tokens=chunk.usage.completion_tokens or 0,
-                        total_tokens=chunk.usage.total_tokens or 0,
+                if attempt < max_attempts - 1 and is_retryable_stream_error(exc):
+                    delay = self.retry_config.calculate_delay(attempt)
+                    logger.warning(
+                        "openai generate_stream open attempt %d/%d failed: %s; retrying in %.2fs",
+                        attempt + 1, max_attempts, exc, delay,
                     )
-
-                if not chunk.choices:
+                    if self.retry_callback:
+                        try:
+                            self.retry_callback(exc, attempt + 1)
+                        except Exception:  # pragma: no cover - callback safety
+                            logger.exception("retry_callback raised")
+                    await _asyncio.sleep(delay)
                     continue
+                raise
 
-                choice = chunk.choices[0]
+            try:
+                async for chunk in response_stream:
+                    # Usage info (sent in the final chunk with choices=[])
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        usage = TokenUsage(
+                            prompt_tokens=chunk.usage.prompt_tokens or 0,
+                            completion_tokens=chunk.usage.completion_tokens or 0,
+                            total_tokens=chunk.usage.total_tokens or 0,
+                        )
 
-                # Finish reason
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
+                    if not chunk.choices:
+                        continue
 
-                delta = choice.delta
-                if delta is None:
-                    continue
+                    choice = chunk.choices[0]
 
-                # Reasoning / thinking content (DeepSeek, o1, etc.)
-                if hasattr(delta, "reasoning_content") and delta.reasoning_content:
-                    thinking_content += delta.reasoning_content
-                    yield StreamEvent(type="thinking", delta=delta.reasoning_content)
+                    # Finish reason
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
 
-                # Text content
-                if delta.content:
-                    text_content += delta.content
-                    yield StreamEvent(type="text", delta=delta.content)
+                    delta = choice.delta
+                    if delta is None:
+                        continue
 
-                # Tool call deltas
-                if delta.tool_calls:
-                    for tc_delta in delta.tool_calls:
-                        idx = tc_delta.index
-                        if idx not in tool_acc:
-                            tool_acc[idx] = {
-                                "id": tc_delta.id or "",
-                                "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
-                                "arguments": "",
-                            }
-                        else:
-                            if tc_delta.id:
-                                tool_acc[idx]["id"] = tc_delta.id
-                            if tc_delta.function and tc_delta.function.name:
-                                tool_acc[idx]["name"] = tc_delta.function.name
-                        if tc_delta.function and tc_delta.function.arguments:
-                            tool_acc[idx]["arguments"] += tc_delta.function.arguments
-        except Exception as exc:
-            log_llm_error_meta(provider="openai", mode="stream", exc=exc)
-            if is_retryable_stream_error(exc) and (text_content or thinking_content):
-                logger.warning(
-                    "openai stream interrupted after partial yield "
-                    "(text=%d chars, thinking=%d chars): %s",
-                    len(text_content), len(thinking_content), exc,
-                )
-                raise StreamInterrupted(
-                    last_exception=exc,
-                    partial_text=text_content,
-                    partial_thinking=thinking_content,
-                    provider_request_id=provider_request_id,
-                ) from exc
-            raise
+                    # Reasoning / thinking content (DeepSeek, o1, etc.)
+                    if hasattr(delta, "reasoning_content") and delta.reasoning_content:
+                        thinking_content += delta.reasoning_content
+                        any_user_yield = True
+                        yield StreamEvent(type="thinking", delta=delta.reasoning_content)
+
+                    # Text content
+                    if delta.content:
+                        text_content += delta.content
+                        any_user_yield = True
+                        yield StreamEvent(type="text", delta=delta.content)
+
+                    # Tool call deltas
+                    if delta.tool_calls:
+                        for tc_delta in delta.tool_calls:
+                            idx = tc_delta.index
+                            if idx not in tool_acc:
+                                tool_acc[idx] = {
+                                    "id": tc_delta.id or "",
+                                    "name": tc_delta.function.name if tc_delta.function and tc_delta.function.name else "",
+                                    "arguments": "",
+                                }
+                            else:
+                                if tc_delta.id:
+                                    tool_acc[idx]["id"] = tc_delta.id
+                                if tc_delta.function and tc_delta.function.name:
+                                    tool_acc[idx]["name"] = tc_delta.function.name
+                            if tc_delta.function and tc_delta.function.arguments:
+                                tool_acc[idx]["arguments"] += tc_delta.function.arguments
+            except Exception as exc:
+                log_llm_error_meta(provider="openai", mode="stream", exc=exc)
+                if is_retryable_stream_error(exc):
+                    if any_user_yield:
+                        # Once we've yielded deltas to the consumer we cannot
+                        # rewind — surface partial content instead of retrying.
+                        logger.warning(
+                            "openai stream interrupted after partial yield "
+                            "(text=%d chars, thinking=%d chars): %s",
+                            len(text_content), len(thinking_content), exc,
+                        )
+                        raise StreamInterrupted(
+                            last_exception=exc,
+                            partial_text=text_content,
+                            partial_thinking=thinking_content,
+                            provider_request_id=provider_request_id,
+                        ) from exc
+                    if attempt < max_attempts - 1:
+                        delay = self.retry_config.calculate_delay(attempt)
+                        logger.warning(
+                            "openai generate_stream consume attempt %d/%d dropped before any yield: %s; "
+                            "retrying from scratch in %.2fs",
+                            attempt + 1, max_attempts, exc, delay,
+                        )
+                        if self.retry_callback:
+                            try:
+                                self.retry_callback(exc, attempt + 1)
+                            except Exception:  # pragma: no cover - callback safety
+                                logger.exception("retry_callback raised")
+                        await _asyncio.sleep(delay)
+                        continue
+                raise
+            else:
+                # Successful consume — break out of the retry loop.
+                break
 
         # Build tool calls. If a relay truncates output mid-arguments
         # (`finish_reason="length"`), the accumulated string is invalid JSON

@@ -183,3 +183,67 @@ async def test_stream_propagates_non_transient_mid_stream_error_unchanged():
     with pytest.raises(RuntimeError):
         async for _ in client.generate_stream([Message(role="user", content="hi")]):
             pass
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_when_dropped_before_any_yield():
+    """Mid-stream drop with NO content delivered → silently retry from scratch."""
+    bad_stream = _AsyncIter([
+        httpx.RemoteProtocolError(
+            "peer closed connection without sending complete message body (incomplete chunked read)"
+        ),
+    ])
+    good_stream = _AsyncIter([
+        _chunk(content="recovered "),
+        _chunk(content="output", finish_reason="stop"),
+    ])
+    attempts = {"n": 0}
+
+    async def factory(**kwargs):
+        attempts["n"] += 1
+        return _raw_response(bad_stream if attempts["n"] == 1 else good_stream)
+
+    client, _ = _build_client(factory, retries=2)
+    out = []
+    async for ev in client.generate_stream([Message(role="user", content="hi")]):
+        out.append(ev)
+    assert attempts["n"] == 2
+    text = "".join(e.delta for e in out if e.type == "text")
+    assert text == "recovered output"
+    finish = [e for e in out if e.type == "finish"]
+    assert len(finish) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_gives_up_no_yield_retry_after_max_attempts():
+    """All attempts drop before any yield → propagate the underlying error."""
+
+    def _new_bad():
+        return _AsyncIter([
+            httpx.RemoteProtocolError("peer closed connection (incomplete chunked read)"),
+        ])
+
+    async def factory(**kwargs):
+        return _raw_response(_new_bad())
+
+    client, create = _build_client(factory, retries=2)
+    with pytest.raises(httpx.RemoteProtocolError):
+        async for _ in client.generate_stream([Message(role="user", content="hi")]):
+            pass
+    # 1 initial + 2 retries = 3 attempts; each opens then drops during consume.
+    assert create.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_retry_no_yield_drop_for_non_transient_error():
+    """Non-retryable mid-stream error with no yield → propagate, no retry."""
+    bad_stream = _AsyncIter([RuntimeError("bad")])
+
+    async def factory(**kwargs):
+        return _raw_response(bad_stream)
+
+    client, create = _build_client(factory, retries=2)
+    with pytest.raises(RuntimeError):
+        async for _ in client.generate_stream([Message(role="user", content="hi")]):
+            pass
+    assert create.await_count == 1

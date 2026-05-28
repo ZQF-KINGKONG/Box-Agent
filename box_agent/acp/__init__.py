@@ -195,10 +195,13 @@ class BoxACPAgent:
         hooks: list | None = None,
         skill_loader: Any | None = None,
         mcp_task: asyncio.Task | None = None,
+        *,
+        lite_llm: LLMClient | None = None,
     ):
         self._conn = conn
         self._config = config
         self._llm = llm
+        self._lite_llm = lite_llm or llm
         self._base_tools = base_tools
         self._system_prompt = system_prompt
         self._sessions: dict[str, SessionState] = {}
@@ -664,7 +667,7 @@ class BoxACPAgent:
         # general agent — never blocks the turn.
         if state.auto_classify_pending and user_text.strip():
             from .intent_classifier import classify_session_mode
-            classified = await classify_session_mode(self._llm, user_text)
+            classified = await classify_session_mode(self._lite_llm, user_text)
             self._apply_session_mode(state, classified)
             state.auto_classify_pending = False
             log.info(
@@ -812,11 +815,11 @@ class BoxACPAgent:
             except (TypeError, ValueError):
                 return {"error": {"code": "invalid_args", "message": "timeoutMs must be a number"}}
 
-        provider = getattr(self._llm, "provider", None)
-        model = getattr(self._llm, "model", "")
+        provider = getattr(self._lite_llm, "provider", None)
+        model = getattr(self._lite_llm, "model", "")
         try:
             result = await run_lightweight_prompt(
-                self._llm,
+                self._lite_llm,
                 prompt,
                 system_prompt=system_prompt,
                 timeout=timeout,
@@ -1665,6 +1668,34 @@ async def run_acp_server(config: Config | None = None) -> None:
             auth_file=config.llm.auth_file,
         )
 
+        # Lite LLM client for tool-free small tasks (titles / summaries /
+        # session_mode classification). When `lite_llm:` is absent from
+        # config, fall back to the main client so call sites stay uniform.
+        if config.lite_llm._present:
+            lite_rcfg = config.lite_llm.retry
+            lite_provider = (
+                LLMProvider.ANTHROPIC
+                if config.lite_llm.provider.lower() == "anthropic"
+                else LLMProvider.OPENAI
+            )
+            lite_llm = LLMClient(
+                api_key=config.lite_llm.api_key,
+                provider=lite_provider,
+                api_base=config.lite_llm.api_base,
+                model=config.lite_llm.model,
+                retry_config=RetryConfigBase(
+                    enabled=lite_rcfg.enabled,
+                    max_retries=lite_rcfg.max_retries,
+                    initial_delay=lite_rcfg.initial_delay,
+                    max_delay=lite_rcfg.max_delay,
+                    exponential_base=lite_rcfg.exponential_base,
+                ),
+                max_output_tokens=config.lite_llm.max_output_tokens,
+                auth_file=config.lite_llm.auth_file,
+            )
+        else:
+            lite_llm = llm
+
         # Create memory manager if enabled
         memory_mgr = None
         if config.agent.enable_memory:
@@ -1717,6 +1748,13 @@ async def run_acp_server(config: Config | None = None) -> None:
             system_prompt = system_prompt.replace("{SKILLS_METADATA}", "")
 
         log.info("server/start", message=f"LLM: {config.llm.model}, provider: {config.llm.provider}")
+        if config.lite_llm._present:
+            log.info(
+                "server/start",
+                message=f"Lite LLM: {config.lite_llm.model or '<server-default>'}, provider: {config.lite_llm.provider}, base: {config.lite_llm.api_base}",
+            )
+        else:
+            log.info("server/start", message="Lite LLM: <fallback to main>")
         log.info("server/start", message=f"Tools loaded: {len(base_tools)} base tools")
 
         # Restore real stdout for ACP transport, then re-guard sys.stdout
@@ -1747,7 +1785,7 @@ async def run_acp_server(config: Config | None = None) -> None:
         _hooks = load_hooks(config.hooks.hooks) if config.hooks.hooks else None
 
         sys.stdout = sys.stderr
-        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader, mcp_task=mcp_task), writer, reader)
+        AgentSideConnection(lambda conn: BoxACPAgent(conn, config, llm, base_tools, system_prompt, memory_manager=memory_mgr, hooks=_hooks, skill_loader=skill_loader, mcp_task=mcp_task, lite_llm=lite_llm), writer, reader)
 
         log.info("server/ready", message="ACP server ready, listening on stdio")
         await asyncio.Event().wait()

@@ -49,6 +49,29 @@ class LLMConfig(BaseModel):
         return int((self.context_window - self.max_output_tokens) * 0.9)
 
 
+class LiteLLMConfig(BaseModel):
+    """Lightweight LLM for small tool-free tasks (titles, summaries, classification).
+
+    When the ``lite_llm:`` block is absent from ``config.yaml``, ``_present``
+    stays ``False`` and the ACP layer aliases the lite client to the main
+    LLM. Auth follows the same hosted-gateway rules as the main block:
+    empty ``api_key`` against a hosted ``api_base`` falls back to ``auth.json``.
+
+    ``max_output_tokens`` is deliberately distinct from the main model: many
+    lightweight endpoints reject values above ~65k. The default of ``63999``
+    sits just under the common 65536 ceiling.
+    """
+
+    _present: bool = PrivateAttr(default=False)
+    api_key: str = ""
+    api_base: str = ""
+    model: str = ""
+    provider: str = "openai"
+    auth_file: str = ""
+    max_output_tokens: int = 63999
+    retry: RetryConfig = Field(default_factory=RetryConfig)
+
+
 class ImageGenerationConfig(BaseModel):
     """Image generation service configuration."""
 
@@ -177,6 +200,7 @@ class Config(BaseModel):
     """Main configuration class"""
 
     llm: LLMConfig
+    lite_llm: LiteLLMConfig = Field(default_factory=LiteLLMConfig)
     image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
     agent: AgentConfig
     tools: ToolsConfig
@@ -258,6 +282,57 @@ class Config(BaseModel):
             max_output_tokens=data.get("max_output_tokens", 80000),
             retry=retry_config,
         )
+
+        # Parse optional lite_llm block. Mirrors the main LLM auth rules:
+        # hosted gateways (matched by api_base) accept an empty api_key and
+        # fall through to auth.json. When the block is absent, _present stays
+        # False and the ACP layer aliases the lite client to the main LLM.
+        lite_llm_data = data.get("lite_llm")
+        lite_llm_config = LiteLLMConfig()
+        if isinstance(lite_llm_data, dict) and lite_llm_data:
+            lite_api_base = str(lite_llm_data.get("api_base", "")).strip()
+            if not lite_api_base:
+                raise ValueError("lite_llm.api_base is required when the lite_llm block is present")
+            lite_uses_hosted = should_attach_auth_header(lite_api_base)
+            lite_raw_key = str(lite_llm_data.get("api_key", "")).strip()
+            if not lite_uses_hosted and (not lite_raw_key or lite_raw_key == DEFAULT_API_KEY_PLACEHOLDER):
+                raise ValueError("lite_llm.api_key is required for non-hosted endpoints")
+            if lite_uses_hosted and (not lite_raw_key or lite_raw_key == DEFAULT_API_KEY_PLACEHOLDER):
+                lite_api_key = HOSTED_GATEWAY_API_KEY_PLACEHOLDER
+            else:
+                lite_api_key = lite_raw_key
+            lite_model_raw = lite_llm_data.get("model")
+            lite_model = str(lite_model_raw).strip() if lite_model_raw is not None else ""
+            if not lite_uses_hosted and not lite_model:
+                raise ValueError("lite_llm.model is required for non-hosted endpoints")
+            lite_retry_data = lite_llm_data.get("retry")
+            if isinstance(lite_retry_data, dict):
+                lite_retry = RetryConfig(
+                    enabled=lite_retry_data.get("enabled", True),
+                    max_retries=lite_retry_data.get("max_retries", 3),
+                    initial_delay=lite_retry_data.get("initial_delay", 1.0),
+                    max_delay=lite_retry_data.get("max_delay", 60.0),
+                    exponential_base=lite_retry_data.get("exponential_base", 2.0),
+                )
+            else:
+                lite_retry = retry_config
+            lite_max_output_tokens = int(lite_llm_data.get("max_output_tokens", 63999) or 63999)
+            if lite_max_output_tokens <= 0:
+                raise ValueError("lite_llm.max_output_tokens must be positive")
+            if lite_max_output_tokens > 65536:
+                raise ValueError(
+                    f"lite_llm.max_output_tokens={lite_max_output_tokens} exceeds the 65536 ceiling; common lite endpoints reject larger values"
+                )
+            lite_llm_config = LiteLLMConfig(
+                api_key=lite_api_key,
+                api_base=lite_api_base,
+                model=lite_model,
+                provider=str(lite_llm_data.get("provider", "openai")).strip() or "openai",
+                auth_file=lite_llm_data.get("auth_file") or str(config_path.parent / "auth.json"),
+                max_output_tokens=lite_max_output_tokens,
+                retry=lite_retry,
+            )
+            lite_llm_config._present = True
 
         # Parse image generation configuration. This mirrors LLM auth behavior:
         # by default it reads auth.json next to config.yaml before each hosted
@@ -368,6 +443,7 @@ class Config(BaseModel):
 
         return cls(
             llm=llm_config,
+            lite_llm=lite_llm_config,
             image_generation=image_generation_config,
             agent=agent_config,
             tools=tools_config,

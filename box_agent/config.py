@@ -82,6 +82,9 @@ class AgentConfig(BaseModel):
     memory_compaction_enabled: bool = True  # LLM topic-cluster compaction in maintainer
     memory_context_max_entries: int = 50  # compaction triggers above this
     memory_context_max_tokens: int = 8000  # compaction triggers above this (estimated)
+    memory_conflict_resolution_enabled: bool = True  # LLM-arbitrated semantic conflict pass
+    memory_conflict_cluster_threshold: float = 0.3  # Jaccard for clustering conflict candidates
+    memory_conflict_max_clusters_per_run: int = 5  # cap LLM calls per maintainer run
     memory_promotion_proposal_enabled: bool = True  # auto-suggest CONTEXT → core
     memory_promotion_hit_threshold: int = 5  # min hits before suggesting promotion
     memory_promotion_cooldown_days: int = 14  # skip re-proposing for this long
@@ -288,6 +291,9 @@ class Config(BaseModel):
             memory_compaction_enabled=data.get("memory_compaction_enabled", True),
             memory_context_max_entries=data.get("memory_context_max_entries", 50),
             memory_context_max_tokens=data.get("memory_context_max_tokens", 8000),
+            memory_conflict_resolution_enabled=data.get("memory_conflict_resolution_enabled", True),
+            memory_conflict_cluster_threshold=data.get("memory_conflict_cluster_threshold", 0.3),
+            memory_conflict_max_clusters_per_run=data.get("memory_conflict_max_clusters_per_run", 5),
             memory_promotion_proposal_enabled=data.get("memory_promotion_proposal_enabled", True),
             memory_promotion_hit_threshold=data.get("memory_promotion_hit_threshold", 5),
             memory_promotion_cooldown_days=data.get("memory_promotion_cooldown_days", 14),

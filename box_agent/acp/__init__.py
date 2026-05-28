@@ -1103,6 +1103,7 @@ class BoxACPAgent:
                     case ThinkingEvent() if event._streaming:
                         # Stream thinking deltas in real-time
                         if not event._header and event.content:
+                            log.debug("thinking_stream", session_id=session_id, chars=len(event.content))
                             await self._send(session_id, update_agent_thought(text_block(event.content)))
 
                     case ThinkingEvent(content=text):

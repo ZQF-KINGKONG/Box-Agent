@@ -12,6 +12,7 @@ from ..schema import LLMProvider, LLMResponse, Message, StreamEvent
 from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .openai_client import OpenAIClient
+from .think_tag_splitter import split_inline_think, unwrap_think_tags
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,13 @@ class LLMClient:
         Returns:
             LLMResponse containing the generated content
         """
-        return await self._client.generate(messages, tools, thinking_enabled=thinking_enabled)
+        response = await self._client.generate(messages, tools, thinking_enabled=thinking_enabled)
+        if response.content and "<think>" in response.content:
+            cleaned, extracted = split_inline_think(response.content)
+            if extracted:
+                merged_thinking = (response.thinking or "") + extracted
+                response = response.model_copy(update={"content": cleaned, "thinking": merged_thinking})
+        return response
 
     async def generate_stream(
         self,
@@ -136,7 +143,8 @@ class LLMClient:
         Yields:
             StreamEvent chunks
         """
-        async for event in self._client.generate_stream(
+        upstream = self._client.generate_stream(
             messages, tools, thinking_enabled=thinking_enabled
-        ):
+        )
+        async for event in unwrap_think_tags(upstream):
             yield event

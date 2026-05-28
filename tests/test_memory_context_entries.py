@@ -226,3 +226,59 @@ def test_now_iso_is_second_precision():
     stamp = _now_iso()
     assert "T" in stamp
     assert len(stamp) == 19  # YYYY-MM-DDTHH:MM:SS
+
+
+# ── Topic sharding ──────────────────────────────────────────
+
+
+def test_append_context_routes_to_named_topic(mgr: MemoryManager):
+    mgr.append_context("- preference: dark mode", topic="preferences")
+    mgr.append_context("- uses pytest", topic="testing")
+
+    assert sorted(mgr.list_topics()) == ["preferences", "testing"]
+    assert "dark mode" in mgr.read_context_topic("preferences")
+    assert "pytest" in mgr.read_context_topic("testing")
+    assert "dark mode" not in mgr.read_context_topic("testing")
+
+
+def test_write_context_overwrites_only_target_topic(mgr: MemoryManager):
+    mgr.append_context("- a", topic="alpha")
+    mgr.append_context("- b", topic="beta")
+
+    mgr.write_context("- a2", topic="alpha")
+
+    assert mgr.read_context_topic("alpha") == "- a2"
+    assert mgr.read_context_topic("beta") == "- b"
+
+
+def test_topic_slug_normalizes_unsafe_chars(mgr: MemoryManager):
+    mgr.append_context("- thing", topic="Project X / Module.A")
+    topics = mgr.list_topics()
+    assert len(topics) == 1
+    # slashes/spaces/dots collapse into a single dash run
+    assert "/" not in topics[0]
+    assert "." not in topics[0]
+
+
+def test_legacy_context_file_is_purged_on_init(memory_dir: Path):
+    legacy = memory_dir / "CONTEXT.md"
+    legacy.write_text("- old line\n", encoding="utf-8")
+
+    MemoryManager(memory_dir=str(memory_dir))
+
+    assert not legacy.exists()
+    trash_files = list((memory_dir / "trash").rglob("CONTEXT.legacy.*.md"))
+    assert len(trash_files) == 1
+    assert "old line" in trash_files[0].read_text(encoding="utf-8")
+
+
+def test_topic_store_writes_sidecar_index(mgr: MemoryManager):
+    mgr.append_context("- one", topic="alpha")
+    mgr.append_context("- two\n- three", topic="beta")
+
+    index_path = mgr.context_dir / "_index.json"
+    assert index_path.exists()
+    import json as _json
+    data = _json.loads(index_path.read_text(encoding="utf-8"))
+    assert data["alpha"]["count"] == 1
+    assert data["beta"]["count"] == 2

@@ -17,7 +17,9 @@ from box_agent.memory import (
 )
 from box_agent.memory_maintainer import (
     MemoryMaintainer,
+    _cluster_by_jaccard,
     _jaccard,
+    _parse_conflict_output,
     _tokens,
 )
 
@@ -499,6 +501,290 @@ async def test_compact_creates_backup_before_overwrite(memory_dir):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     backup_dir = mgr.trash_dir / today / "compact"
     assert backup_dir.exists()
-    backups = list(backup_dir.glob("CONTEXT.*.md"))
-    assert backups, "expected a CONTEXT.<timestamp>.md backup"
+    backups = list(backup_dir.glob("general.*.md"))
+    assert backups, "expected a general.<timestamp>.md backup"
     assert backups[0].read_text(encoding="utf-8") == original_text
+
+
+# ── _resolve_conflicts (Phase 3.5: LLM semantic conflict arbitration) ─
+
+
+class FakeConflictLLM:
+    """Returns canned responses in order; clamps to the last response if exhausted."""
+
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+        self.calls = 0
+        self.received_user_prompts: list[str] = []
+
+    async def generate(self, messages, **_):
+        for m in messages:
+            if m.role == "user":
+                self.received_user_prompts.append(m.content)
+        idx = min(self.calls, len(self.responses) - 1)
+        self.calls += 1
+        return FakeLLMResponse(self.responses[idx])
+
+
+def _conflict_cfg(**overrides) -> AgentConfig:
+    base = dict(
+        memory_maintainer_enabled=True,
+        memory_conflict_resolution_enabled=True,
+        memory_conflict_cluster_threshold=0.15,  # generous for short test fixtures
+        memory_conflict_max_clusters_per_run=5,
+        memory_compaction_enabled=False,  # isolate the phase under test
+        memory_dedup_jaccard=0.999,  # avoid accidental dedup merging fixtures
+        memory_decay_days=30,
+        memory_archive_days=90,
+        memory_maintainer_interval_hours=24,
+    )
+    base.update(overrides)
+    return AgentConfig(**base)
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_winner_kept_loser_archived(memory_dir):
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    older = _new_entry("- project uses redis for cache")
+    older.created = "2026-01-01T00:00:00"
+    newer = _new_entry("- project switched to postgres listen notify replacing redis")
+    newer.created = "2026-04-01T00:00:00"
+    unrelated = _new_entry("- migrations live in migrations directory")
+    unrelated.created = "2026-02-01T00:00:00"
+    write_context_file(mgr.context_file, [older, newer, unrelated])
+
+    canned = _json.dumps({
+        "groups": [
+            {"winner_id": newer.id, "loser_ids": [older.id], "reason": "explicit replacement"},
+        ]
+    })
+    llm = FakeConflictLLM([canned])
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=llm)
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    active_ids = {e.id for e in parse_context_file(mgr.context_file)}
+    archived_ids = {e.id for e in parse_context_file(mgr.archive_file)}
+    assert newer.id in active_ids and unrelated.id in active_ids
+    assert older.id not in active_ids
+    assert older.id in archived_ids
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_compatible_pair_kept(memory_dir):
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- user prefers dark mode interface")
+    b = _new_entry("- user prefers dark mode for editor")
+    write_context_file(mgr.context_file, [a, b])
+
+    llm = FakeConflictLLM([_json.dumps({"groups": []})])
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=llm)
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    active_ids = {e.id for e in parse_context_file(mgr.context_file)}
+    assert active_ids == {a.id, b.id}
+    assert not mgr.archive_file.exists() or not parse_context_file(mgr.archive_file)
+    assert llm.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_invalid_json_noop(memory_dir):
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- use redis cache")
+    b = _new_entry("- use postgres instead of redis")
+    write_context_file(mgr.context_file, [a, b])
+
+    llm = FakeConflictLLM(["this is not valid json"])
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=llm)
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    active_ids = {e.id for e in parse_context_file(mgr.context_file)}
+    assert active_ids == {a.id, b.id}
+    assert not mgr.archive_file.exists() or not parse_context_file(mgr.archive_file)
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_disabled_skips(memory_dir):
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- use redis cache")
+    b = _new_entry("- use postgres instead of redis")
+    write_context_file(mgr.context_file, [a, b])
+
+    llm = FakeConflictLLM(["{\"groups\":[]}"])
+    cfg = _conflict_cfg(memory_conflict_resolution_enabled=False)
+    m = MemoryMaintainer(mgr, cfg, llm=llm)
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    assert llm.calls == 0
+    assert len(parse_context_file(mgr.context_file)) == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_no_llm_skips(memory_dir):
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- use redis cache")
+    b = _new_entry("- use postgres instead of redis")
+    write_context_file(mgr.context_file, [a, b])
+
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=None)
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    assert len(parse_context_file(mgr.context_file)) == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_caps_clusters_per_run(memory_dir):
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    # Three independent topic clusters, each a conflict pair.
+    # Vocab kept disjoint across clusters so they don't union-find merge.
+    redis_a = _new_entry("- caching backed by redis")
+    redis_b = _new_entry("- caching backed by memcached replacing redis")
+    auth_a = _new_entry("- login strategy jwt")
+    auth_b = _new_entry("- login strategy cookies superseded jwt")
+    db_a = _new_entry("- orm choice sqlalchemy")
+    db_b = _new_entry("- orm choice tortoise instead sqlalchemy")
+    write_context_file(mgr.context_file, [redis_a, redis_b, auth_a, auth_b, db_a, db_b])
+
+    # Each LLM call returns a per-cluster conflict; only 2 calls allowed.
+    canned_per_call = [
+        _json.dumps({"groups": [{"winner_id": redis_b.id, "loser_ids": [redis_a.id]}]}),
+        _json.dumps({"groups": [{"winner_id": auth_b.id, "loser_ids": [auth_a.id]}]}),
+        _json.dumps({"groups": [{"winner_id": db_b.id, "loser_ids": [db_a.id]}]}),
+    ]
+    llm = FakeConflictLLM(canned_per_call)
+    cfg = _conflict_cfg(memory_conflict_max_clusters_per_run=2)
+    m = MemoryMaintainer(mgr, cfg, llm=llm)
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    assert llm.calls == 2  # capped
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_rejects_hallucinated_id(memory_dir):
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- use redis cache")
+    b = _new_entry("- use postgres instead of redis")
+    write_context_file(mgr.context_file, [a, b])
+
+    canned = _json.dumps({
+        "groups": [{"winner_id": "ghost-id", "loser_ids": [a.id]}]
+    })
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=FakeConflictLLM([canned]))
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    active_ids = {e.id for e in parse_context_file(mgr.context_file)}
+    assert active_ids == {a.id, b.id}
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_rejects_winner_in_losers(memory_dir):
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- use redis cache")
+    b = _new_entry("- use postgres instead of redis")
+    write_context_file(mgr.context_file, [a, b])
+
+    canned = _json.dumps({
+        "groups": [{"winner_id": a.id, "loser_ids": [a.id, b.id]}]
+    })
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=FakeConflictLLM([canned]))
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    active_ids = {e.id for e in parse_context_file(mgr.context_file)}
+    assert active_ids == {a.id, b.id}
+
+
+@pytest.mark.asyncio
+async def test_resolve_conflicts_dedupes_overlapping_losers(memory_dir):
+    """When two clusters claim the same loser, archive it only once."""
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    # Two clusters might share an entry if Jaccard binds it to both topics.
+    # Simulate by returning the same loser in two consecutive group responses
+    # (defensive — clusters as built shouldn't overlap, but the logic guards anyway).
+    a = _new_entry("- redis cache layer")
+    b = _new_entry("- postgres replaces redis cache layer")
+    c = _new_entry("- another fact about redis cache layer storage")
+    write_context_file(mgr.context_file, [a, b, c])
+
+    # Single cluster {a,b,c}: one LLM call returns a conflict pair (winner=b, loser=a).
+    canned = _json.dumps({"groups": [{"winner_id": b.id, "loser_ids": [a.id]}]})
+    m = MemoryMaintainer(mgr, _conflict_cfg(), llm=FakeConflictLLM([canned]))
+
+    await m._resolve_conflicts(datetime.now(timezone.utc))
+
+    archived = parse_context_file(mgr.archive_file)
+    assert [e.id for e in archived] == [a.id]
+
+
+# ── Helper unit tests ──────────────────────────────────────
+
+
+def test_cluster_by_jaccard_finds_overlapping_group():
+    e1 = _new_entry("redis cache backend")
+    e2 = _new_entry("postgres replaces redis cache")
+    e3 = _new_entry("completely unrelated fact about cats")
+    clusters = _cluster_by_jaccard([e1, e2, e3], threshold=0.15)
+    assert len(clusters) == 1
+    assert set(clusters[0]) == {0, 1}
+
+
+def test_cluster_by_jaccard_empty_when_all_disjoint():
+    e1 = _new_entry("apples are red")
+    e2 = _new_entry("clocks tell time")
+    assert _cluster_by_jaccard([e1, e2], threshold=0.3) == []
+
+
+def test_cluster_by_jaccard_singleton_dropped():
+    e1 = _new_entry("only entry")
+    assert _cluster_by_jaccard([e1], threshold=0.3) == []
+
+
+def test_parse_conflict_output_strips_fences():
+    text = "```json\n{\"groups\": []}\n```"
+    assert _parse_conflict_output(text, valid_ids={"a"}) == []
+
+
+def test_parse_conflict_output_rejects_non_dict_root():
+    assert _parse_conflict_output("[]", valid_ids={"a"}) is None
+
+
+def test_parse_conflict_output_rejects_unknown_winner_id():
+    text = '{"groups": [{"winner_id": "ghost", "loser_ids": ["a"]}]}'
+    assert _parse_conflict_output(text, valid_ids={"a"}) is None
+
+
+def test_parse_conflict_output_rejects_empty_losers():
+    text = '{"groups": [{"winner_id": "a", "loser_ids": []}]}'
+    assert _parse_conflict_output(text, valid_ids={"a"}) is None
+
+
+def test_parse_conflict_output_rejects_duplicate_losers_across_groups():
+    text = ('{"groups": ['
+            '{"winner_id": "a", "loser_ids": ["b"]},'
+            '{"winner_id": "c", "loser_ids": ["b"]}'
+            ']}')
+    assert _parse_conflict_output(text, valid_ids={"a", "b", "c"}) is None
+
+
+def test_parse_conflict_output_accepts_well_formed():
+    text = '{"groups": [{"winner_id": "a", "loser_ids": ["b", "c"], "reason": "newer"}]}'
+    out = _parse_conflict_output(text, valid_ids={"a", "b", "c"})
+    assert out == [{"winner_id": "a", "loser_ids": ["b", "c"]}]

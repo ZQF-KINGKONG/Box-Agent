@@ -52,6 +52,9 @@ _MIME_EXTENSIONS = {
     "image/gif": ".gif",
     "image/svg+xml": ".svg",
 }
+_BASE64_IMAGE_KEYS = ("b64_json", "base64", "image_base64", "image", "image_data")
+_URL_IMAGE_KEYS = ("url", "image_url", "imageUrl", "image_urls", "imageUrls", "output_url", "signed_url")
+_NESTED_IMAGE_KEYS = ("data", "images", "output", "outputs", "result", "results")
 
 
 def _is_large_image_service(endpoint: str | None, model: str | None) -> bool:
@@ -101,13 +104,39 @@ def _guess_mime_from_data_url(data_url: str) -> str:
     return _DEFAULT_MIME_TYPE
 
 
+def _guess_mime_from_bytes(image_bytes: bytes) -> str:
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes.startswith(b"GIF87a") or image_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if image_bytes.startswith(b"RIFF") and image_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    return _DEFAULT_MIME_TYPE
+
+
 def _decode_base64_image(value: str) -> tuple[bytes, str]:
     text = value.strip()
     mime_type = _DEFAULT_MIME_TYPE
     if text.startswith("data:") and ";base64," in text:
         mime_type = _guess_mime_from_data_url(text)
         text = text.split(";base64,", 1)[1]
-    return base64.b64decode(text), mime_type
+        return base64.b64decode(text), mime_type
+
+    image_bytes = base64.b64decode(text)
+    return image_bytes, _guess_mime_from_bytes(image_bytes)
+
+
+def _first_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        for item in value:
+            found = _first_string(item)
+            if found:
+                return found
+    return ""
 
 
 def _find_first_image_payload(data: Any) -> tuple[str, str] | None:
@@ -115,24 +144,27 @@ def _find_first_image_payload(data: Any) -> tuple[str, str] | None:
     if not isinstance(data, dict):
         return None
 
-    for key in ("b64_json", "base64", "image_base64"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
+    for key in _BASE64_IMAGE_KEYS:
+        value = _first_string(data.get(key))
+        if value:
             return "base64", value
 
-    for key in ("url", "image_url"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
+    for key in _URL_IMAGE_KEYS:
+        value = _first_string(data.get(key))
+        if value:
             return "url", value
 
-    nested = data.get("data") or data.get("images") or data.get("output")
-    if isinstance(nested, list):
-        for item in nested:
-            found = _find_first_image_payload(item)
+    for key in _NESTED_IMAGE_KEYS:
+        nested = data.get(key)
+        if isinstance(nested, list):
+            for item in nested:
+                found = _find_first_image_payload(item)
+                if found:
+                    return found
+        elif isinstance(nested, dict):
+            found = _find_first_image_payload(nested)
             if found:
                 return found
-    elif isinstance(nested, dict):
-        return _find_first_image_payload(nested)
 
     return None
 

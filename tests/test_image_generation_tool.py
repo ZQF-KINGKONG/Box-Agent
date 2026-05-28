@@ -11,6 +11,7 @@ from box_agent.tools.setup import add_workspace_tools
 
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\nimage-bytes"
+JPEG_BYTES = b"\xff\xd8\xff\xe0jpeg-bytes"
 
 
 def patch_async_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:
@@ -175,6 +176,65 @@ async def test_generate_image_downloads_url_response(
     assert (tmp_path / "assets/generated/from-url.webp").read_bytes() == b"webp"
     assert result.raw_output
     assert result.raw_output["mime_type"] == "image/webp"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_accepts_minimax_image_base64_list_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "image_base64": [
+                        base64.b64encode(JPEG_BYTES).decode("ascii"),
+                    ],
+                },
+            },
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://api.minimaxi.com/v1/image_generation",
+    )
+
+    result = await tool.execute(prompt="minimax image", output_path="assets/generated/minimax")
+
+    assert result.success
+    assert (tmp_path / "assets/generated/minimax.jpg").read_bytes() == JPEG_BYTES
+    assert result.raw_output
+    assert result.raw_output["path"] == "assets/generated/minimax.jpg"
+    assert result.raw_output["mime_type"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_accepts_nested_image_url_list_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == "https://image.example.test/v1/images/generations":
+            return httpx.Response(
+                200,
+                json={"result": {"image_urls": ["https://cdn.example.test/nested.webp"]}},
+            )
+        return httpx.Response(200, content=b"webp", headers={"content-type": "image/webp"})
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/v1/images/generations",
+    )
+
+    result = await tool.execute(prompt="nested url", output_path="assets/generated/nested")
+
+    assert result.success
+    assert (tmp_path / "assets/generated/nested.webp").read_bytes() == b"webp"
 
 
 @pytest.mark.asyncio

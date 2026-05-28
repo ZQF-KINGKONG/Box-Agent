@@ -53,9 +53,10 @@ def jaccard(a: set[str], b: set[str]) -> float:
 class ContextEntry:
     """One context-memory record with metadata.
 
-    Stored in CONTEXT.md as an HTML comment header followed by a content
-    block. ``hits``/``last_used`` mutate over time; everything else is set
-    at creation.
+    Stored under {memory_dir}/context/{topic}.md as an HTML comment header
+    followed by a content block. ``hits``/``last_used`` mutate over time;
+    ``topic`` is stable once assigned (re-classification happens via
+    maintainer, not in-place edits).
     """
     id: str
     content: str
@@ -64,6 +65,7 @@ class ContextEntry:
     hits: int = 0
     source: str = "tool"  # "tool" | "extractor" | "legacy" | "user"
     confidence: float = 1.0
+    topic: str = "general"  # slug; routes the entry to context/{topic}.md
     # Promotion-to-core tracking. ``core_status`` is "none" by default;
     # set to "rejected" after the user permanently declines promotion.
     # ``last_proposed`` is bumped each time the entry is offered for
@@ -87,7 +89,8 @@ def _new_entry_id() -> str:
     return f"ctx_{stamp}_{uuid.uuid4().hex[:6]}"
 
 
-def _new_entry(content: str, *, source: str = "tool", confidence: float = 1.0) -> ContextEntry:
+def _new_entry(content: str, *, source: str = "tool", confidence: float = 1.0,
+               topic: str = "general") -> ContextEntry:
     now = _now_iso()
     return ContextEntry(
         id=_new_entry_id(),
@@ -97,6 +100,7 @@ def _new_entry(content: str, *, source: str = "tool", confidence: float = 1.0) -
         hits=0,
         source=source,
         confidence=confidence,
+        topic=topic or "general",
     )
 
 
@@ -108,6 +112,7 @@ def _format_entry_header(e: ContextEntry) -> str:
         f"hits={e.hits}",
         f"source={e.source}",
         f"confidence={e.confidence:.2f}",
+        f"topic={e.topic or 'general'}",
     ]
     if e.core_status and e.core_status != "none":
         parts.append(f"core_status={e.core_status}")
@@ -174,6 +179,7 @@ def _parse_context_text(text: str) -> list[ContextEntry]:
                 hits=int(meta.get("hits", "0")),
                 source=meta.get("source") or "legacy",
                 confidence=float(meta.get("confidence", "1.0")),
+                topic=meta.get("topic") or "general",
                 core_status=meta.get("core_status") or "none",
                 last_proposed=meta.get("last_proposed") or "",
             ))
@@ -195,6 +201,135 @@ def write_context_file(path: Path, entries: list[ContextEntry]) -> None:
         parts.append("")  # blank line between entries
     text = "\n".join(parts).rstrip() + "\n"
     path.write_text(text, encoding="utf-8")
+
+
+# ── Topic-aware storage ─────────────────────────────────────
+
+_TOPIC_SLUG_FORBIDDEN_RE = re.compile(r"[\s/\\:*?\"<>|.,;]+")
+_TOPIC_INDEX_FILENAME = "_index.json"
+
+
+def _slugify_topic(text: str, max_len: int = 64) -> str:
+    """Convert a free-form topic label to a filesystem-safe slug.
+
+    Non-ASCII characters (e.g. Chinese) are preserved — modern filesystems
+    handle them — but whitespace and FS-unsafe punctuation collapse to ``-``.
+    Empty / all-punctuation input falls back to ``"general"``.
+    """
+    s = (text or "").strip().lower()
+    s = _TOPIC_SLUG_FORBIDDEN_RE.sub("-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    if not s:
+        return "general"
+    return s[:max_len]
+
+
+class TopicStore:
+    """Storage layer for CONTEXT entries split across {context_dir}/{topic}.md.
+
+    Each per-topic file uses the same metadata-header format as the legacy
+    monolithic CONTEXT.md, so :func:`parse_context_file` /
+    :func:`write_context_file` round-trip unchanged at the per-file level.
+    """
+
+    def __init__(self, context_dir: Path):
+        self._dir = context_dir
+
+    @property
+    def context_dir(self) -> Path:
+        return self._dir
+
+    @property
+    def index_file(self) -> Path:
+        return self._dir / _TOPIC_INDEX_FILENAME
+
+    def _topic_path(self, topic: str) -> Path:
+        return self._dir / f"{_slugify_topic(topic)}.md"
+
+    def list_topics(self) -> list[str]:
+        if not self._dir.exists():
+            return []
+        return sorted(
+            p.stem
+            for p in self._dir.glob("*.md")
+            if p.is_file() and not p.stem.startswith("_")
+        )
+
+    def read_topic(self, topic: str) -> list[ContextEntry]:
+        path = self._topic_path(topic)
+        if not path.exists():
+            return []
+        entries = parse_context_file(path)
+        slug = _slugify_topic(topic)
+        # Topic field is authoritative from the header; backfill if missing.
+        for e in entries:
+            if not e.topic:
+                e.topic = slug
+        return entries
+
+    def read_all(self) -> list[ContextEntry]:
+        out: list[ContextEntry] = []
+        for slug in self.list_topics():
+            out.extend(self.read_topic(slug))
+        return out
+
+    def read_all_grouped(self) -> dict[str, list[ContextEntry]]:
+        return {slug: self.read_topic(slug) for slug in self.list_topics()}
+
+    def write_all(self, entries: list[ContextEntry]) -> None:
+        """Persist *entries* to per-topic files; remove topics now empty.
+
+        ``entry.topic`` is normalized to its slug form before grouping so a
+        round-trip is stable. The sidecar index is rebuilt to match.
+        """
+        self._dir.mkdir(parents=True, exist_ok=True)
+        grouped: dict[str, list[ContextEntry]] = {}
+        for e in entries:
+            slug = _slugify_topic(e.topic or "general")
+            e.topic = slug
+            grouped.setdefault(slug, []).append(e)
+
+        existing = {p.stem for p in self._dir.glob("*.md") if p.is_file()}
+        for slug, group in grouped.items():
+            write_context_file(self._dir / f"{slug}.md", group)
+        for stale in existing - set(grouped.keys()):
+            if stale.startswith("_"):
+                continue
+            try:
+                (self._dir / f"{stale}.md").unlink()
+            except OSError:
+                pass
+
+        self._write_index(grouped)
+
+    def delete_topic(self, topic: str) -> bool:
+        path = self._topic_path(topic)
+        if not path.exists():
+            return False
+        try:
+            path.unlink()
+        except OSError:
+            return False
+        self._write_index(self.read_all_grouped())
+        return True
+
+    def _write_index(self, grouped: dict[str, list[ContextEntry]]) -> None:
+        import json as _json
+        try:
+            index = {
+                slug: {
+                    "count": len(group),
+                    "last_updated": max((e.last_used for e in group), default=""),
+                    "hits_total": sum(e.hits for e in group),
+                }
+                for slug, group in grouped.items()
+            }
+            self.index_file.write_text(
+                _json.dumps(index, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("TopicStore: failed to write _index.json")
 
 
 class MemoryManager:
@@ -219,6 +354,10 @@ class MemoryManager:
         self.memory_dir = Path(memory_dir).expanduser()
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self.dedup_jaccard_threshold = dedup_jaccard_threshold
+        self._context_dir = self.memory_dir / "context"
+        self._context_dir.mkdir(parents=True, exist_ok=True)
+        self._topic_store = TopicStore(self._context_dir)
+        self._purge_legacy_context_file()
 
     # ── File paths ──────────────────────────────────────────────
 
@@ -228,9 +367,23 @@ class MemoryManager:
         return self.memory_dir / "MEMORY.md"
 
     @property
+    def context_dir(self) -> Path:
+        """Directory holding per-topic context markdown files."""
+        return self._context_dir
+
+    @property
+    def topic_store(self) -> "TopicStore":
+        """Topic-sharded storage for CONTEXT entries."""
+        return self._topic_store
+
+    @property
     def context_file(self) -> Path:
-        """CONTEXT.md — searchable context, retrieved on demand."""
-        return self.memory_dir / "CONTEXT.md"
+        """Backward-compat shim: path of the ``general`` topic file.
+
+        Prefer :meth:`topic_store` / :meth:`read_all_context_entries` for new
+        code. Direct reads/writes here only affect the default topic.
+        """
+        return self._context_dir / "general.md"
 
     @property
     def archive_file(self) -> Path:
@@ -277,21 +430,25 @@ class MemoryManager:
             return ""
         return "\n".join(e.content for e in entries).strip()
 
-    def write_context(self, content: str) -> None:
-        """Overwrite CONTEXT.md with *content* (creates fresh entries, one per line).
+    def write_context(self, content: str, *, topic: str = "general") -> None:
+        """Overwrite context entries for *topic* with *content*.
 
-        Destructive — drops metadata of any existing entries. Used by callers
-        that already hold the desired final text (tests, legacy paths). For
-        non-destructive updates use ``append_context`` / ``apply_context_operations``.
+        Destructive — drops metadata of existing entries **in that topic only**.
+        Other topics are untouched. Used by callers that already hold the
+        desired final text (tests, legacy paths). For non-destructive updates
+        use ``append_context`` / ``apply_context_operations``.
         """
-        entries = [
-            _new_entry(line, source="tool")
+        slug = _slugify_topic(topic)
+        replacement = [
+            _new_entry(line, source="tool", topic=slug)
             for line in content.splitlines()
             if line.strip()
         ]
-        self._write_context_entries(entries)
+        all_entries = [e for e in self._read_context_entries() if (e.topic or "general") != slug]
+        all_entries.extend(replacement)
+        self._write_context_entries(all_entries)
 
-    def append_context(self, content: str) -> None:
+    def append_context(self, content: str, *, topic: str = "general") -> None:
         """Append to CONTEXT.md, skipping lines already present in Core or Context.
 
         Two-tier dedup:
@@ -302,7 +459,9 @@ class MemoryManager:
            entry's ``hits`` is bumped and ``last_used`` refreshed instead of
            adding a new entry.
 
-        Existing entries' metadata (hits, created, etc.) is preserved.
+        New entries are written under *topic* (default ``"general"``). Existing
+        entries' metadata (hits, created, etc., and original topic) is preserved
+        on fuzzy match.
         """
         existing = self.read_context()
         filtered = self._dedupe_context_lines(content, existing_context=existing)
@@ -313,6 +472,7 @@ class MemoryManager:
         existing_entries = self._read_context_entries()
         threshold = self.dedup_jaccard_threshold
         entry_tokens = [tokens(e.content) for e in existing_entries]
+        topic_slug = _slugify_topic(topic)
 
         new_entries: list[ContextEntry] = []
         merged_any = False
@@ -334,7 +494,7 @@ class MemoryManager:
                 existing_entries[best_idx].last_used = now
                 merged_any = True
             else:
-                entry = _new_entry(line, source="tool")
+                entry = _new_entry(line, source="tool", topic=topic_slug)
                 new_entries.append(entry)
                 existing_entries.append(entry)
                 entry_tokens.append(line_tokens)
@@ -345,12 +505,55 @@ class MemoryManager:
         self._write_context_entries(existing_entries)
 
     def _read_context_entries(self) -> list[ContextEntry]:
-        """Parse CONTEXT.md into entries (or empty list if missing)."""
-        return parse_context_file(self.context_file)
+        """Parse all topic files into a flat entry list (or empty if none)."""
+        return self._topic_store.read_all()
 
     def _write_context_entries(self, entries: list[ContextEntry]) -> None:
-        """Serialize entries to CONTEXT.md."""
-        write_context_file(self.context_file, entries)
+        """Persist *entries* across topic files."""
+        self._topic_store.write_all(entries)
+
+    def read_all_context_entries(self) -> list[ContextEntry]:
+        """Public: read every context entry across all topics."""
+        return self._topic_store.read_all()
+
+    def write_all_context_entries(self, entries: list[ContextEntry]) -> None:
+        """Public: replace all context entries (sharded by ``entry.topic``)."""
+        self._topic_store.write_all(entries)
+
+    def list_topics(self) -> list[str]:
+        """Return the list of known topic slugs (excluding the JSON sidecar)."""
+        return self._topic_store.list_topics()
+
+    def read_context_topic(self, topic: str) -> str:
+        """Return the joined content of one topic, or empty if unknown."""
+        entries = self._topic_store.read_topic(topic)
+        if not entries:
+            return ""
+        return "\n".join(e.content for e in entries).strip()
+
+    def _purge_legacy_context_file(self) -> None:
+        """Move pre-shard ``CONTEXT.md`` into trash on first run after upgrade.
+
+        Schema-change policy is wipe-on-upgrade — no migration. The legacy
+        file is parked under ``trash/<date>/CONTEXT.legacy.<HHMMSS>.md`` for
+        manual recovery in case anything important slipped through.
+        """
+        legacy = self.memory_dir / "CONTEXT.md"
+        if not legacy.exists():
+            return
+        # Only purge if the new layout is empty — otherwise the migration was
+        # presumably already handled and the legacy file is stray.
+        if any(self._context_dir.glob("*.md")):
+            return
+        try:
+            now = datetime.now(timezone.utc)
+            day = now.strftime("%Y-%m-%d")
+            stamp = now.strftime("%H%M%S")
+            dest_dir = self.memory_dir / "trash" / day
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            legacy.rename(dest_dir / f"CONTEXT.legacy.{stamp}.md")
+        except OSError:
+            logger.exception("Failed to archive legacy CONTEXT.md; leaving in place")
 
     def _dedupe_context_lines(self, content: str, *, existing_context: str | None = None) -> list[str]:
         """Return non-empty context lines not already present in Core or Context.
@@ -608,11 +811,14 @@ class MemoryManager:
             parts.append(f"{msg.role.capitalize()}: {text[:max_chars_per_msg]}")
         return "\n".join(parts)
 
-    async def update_context_with_llm(self, content: str, llm) -> str:
+    async def update_context_with_llm(self, content: str, llm, *, topic: str = "general") -> str:
         """Ask an LLM how to merge candidate context, then safely apply it.
 
         The model decides semantic add/replace/drop/noop operations, while this
         method enforces exact-match mutations and line-level duplicate guards.
+        ``topic`` is the default bucket for any operation that doesn't carry its
+        own ``topic`` field, and is also used by the fallback append on planner
+        failure.
 
         Returns:
             A short status label: ``"applied"``, ``"no_change"``, or
@@ -641,10 +847,15 @@ class MemoryManager:
         except Exception:
             logger.exception("Context memory update planning failed; falling back to append")
             before = self.read_context()
-            self.append_context(content)
+            self.append_context(content, topic=topic)
             return "fallback_appended" if self.read_context() != before else "no_change"
 
-        changed = self.apply_context_operations(data.get("operations", []))
+        operations = data.get("operations", [])
+        # Stamp default topic on add operations that didn't specify one.
+        for op in operations:
+            if isinstance(op, dict) and op.get("action") == "add" and not op.get("topic"):
+                op["topic"] = topic
+        changed = self.apply_context_operations(operations)
         return "applied" if changed else "no_change"
 
     def apply_context_operations(self, operations: list[dict]) -> bool:
@@ -706,13 +917,14 @@ class MemoryManager:
                 content = str(op.get("content", "")).strip()
                 if not content:
                     continue
+                op_topic = _slugify_topic(str(op.get("topic", "") or "general"))
                 existing_norm = {e.content.strip().lower() for e in entries}
                 for line in content.splitlines():
                     norm = line.strip().lower()
                     if not norm or norm in existing_norm or norm in core_norm:
                         continue
                     existing_norm.add(norm)
-                    entries.append(_new_entry(line, source="tool"))
+                    entries.append(_new_entry(line, source="tool", topic=op_topic))
                     changed = True
 
             elif action == "noop":

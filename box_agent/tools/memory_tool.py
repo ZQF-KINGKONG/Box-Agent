@@ -61,20 +61,28 @@ class MemoryWriteTool(Tool):
                     "enum": ["append", "overwrite"],
                     "description": "Write mode: 'append' adds to existing (default), 'overwrite' replaces the category.",
                 },
+                "topic": {
+                    "type": "string",
+                    "description": (
+                        "Optional topic label that buckets context entries into "
+                        "per-topic files (e.g. 'preferences', 'project-x'). "
+                        "Only used when category='context'. Defaults to 'general'."
+                    ),
+                },
             },
             "required": ["content"],
         }
 
-    async def execute(self, content: str, category: str = "core", mode: str = "append") -> ToolResult:
+    async def execute(self, content: str, category: str = "core", mode: str = "append", topic: str = "general") -> ToolResult:
         try:
             if category == "context":
                 if mode == "overwrite":
-                    self._mgr.write_context(content)
+                    self._mgr.write_context(content, topic=topic)
                     strategy = "overwrite"
                 elif self._llm is not None:
-                    strategy = await self._mgr.update_context_with_llm(content, self._llm)
+                    strategy = await self._mgr.update_context_with_llm(content, self._llm, topic=topic)
                 else:
-                    self._mgr.append_context(content)
+                    self._mgr.append_context(content, topic=topic)
                     strategy = "append_dedup"
                 current = self._mgr.read_context()
                 label = "context"

@@ -8,6 +8,13 @@ from ..auth import request_auth_headers
 from ..retry import RetryConfig
 from ..schema import LLMResponse, Message, StreamEvent
 
+HOSTED_AUTH_API_KEY_PLACEHOLDERS = {
+    "",
+    "box-agent-auth-json",
+    "box-agent-no-auth",
+    "YOUR_API_KEY_HERE",
+}
+
 
 class LLMClientBase(ABC):
     """Abstract base class for LLM clients.
@@ -47,10 +54,14 @@ class LLMClientBase(ABC):
 
     def _auth_headers(self, existing: dict[str, str] | None = None) -> dict[str, str]:
         """Read current login auth and return request headers."""
+        headers = dict(existing or {})
+        if self.api_key.strip() not in HOSTED_AUTH_API_KEY_PLACEHOLDERS:
+            return headers
+
         return request_auth_headers(
             auth_file=self.auth_file,
             explicit_token=self.auth_token,
-            existing=existing,
+            existing=headers,
             url=self.api_base,
         )
 

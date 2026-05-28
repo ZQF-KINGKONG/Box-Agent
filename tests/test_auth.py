@@ -160,12 +160,12 @@ def test_hosted_gateway_drops_unconfigured_default_model(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_openai_client_reads_auth_json_for_each_request(tmp_path: Path) -> None:
-    captured: list[dict[str, str]] = []
+async def test_openai_client_uses_configured_api_key_without_auth_json(tmp_path: Path) -> None:
+    captured: list[dict[str, str] | None] = []
 
     class FakeCompletions:
         async def create(self, **params):
-            captured.append(params["extra_headers"])
+            captured.append(params.get("extra_headers"))
             return object()
 
     class FakeChat:
@@ -185,10 +185,7 @@ async def test_openai_client_reads_auth_json_for_each_request(tmp_path: Path) ->
     (tmp_path / "auth.json").write_text('{"access_token": "token-two"}\n', encoding="utf-8")
     await client._make_api_request([{"role": "user", "content": "hi"}])
 
-    assert captured == [
-        {"Authorization": "Bearer token-one"},
-        {"Authorization": "Bearer token-two"},
-    ]
+    assert captured == [None, None]
 
 
 @pytest.mark.asyncio
@@ -219,12 +216,38 @@ async def test_openai_client_omits_empty_model(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_client_reads_auth_json_for_each_request(tmp_path: Path) -> None:
+async def test_openai_client_reads_auth_json_for_officev3_placeholder(tmp_path: Path) -> None:
     captured: list[dict[str, str]] = []
+
+    class FakeCompletions:
+        async def create(self, **params):
+            captured.append(params["extra_headers"])
+            return object()
+
+    class FakeChat:
+        completions = FakeCompletions()
+
+    client = OpenAIClient(
+        api_key="box-agent-no-auth",
+        api_base="https://pre.xiaohuanxiong.com/api/web/llm/v2",
+        model="test-model",
+        auth_file=str(tmp_path / "auth.json"),
+    )
+    client.client.chat = FakeChat()
+
+    (tmp_path / "auth.json").write_text('{"access_token": "token-one"}\n', encoding="utf-8")
+    await client._make_api_request([{"role": "user", "content": "hi"}])
+
+    assert captured == [{"Authorization": "Bearer token-one"}]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_uses_configured_api_key_without_auth_json(tmp_path: Path) -> None:
+    captured: list[dict[str, str] | None] = []
 
     class FakeMessages:
         async def create(self, **params):
-            captured.append(params["extra_headers"])
+            captured.append(params.get("extra_headers"))
             return object()
 
     client = AnthropicClient(
@@ -241,10 +264,7 @@ async def test_anthropic_client_reads_auth_json_for_each_request(tmp_path: Path)
     (tmp_path / "auth.json").write_text('{"access_token": "token-two"}\n', encoding="utf-8")
     await client._make_api_request(None, [{"role": "user", "content": "hi"}])
 
-    assert captured == [
-        {"Authorization": "Bearer token-one"},
-        {"Authorization": "Bearer token-two"},
-    ]
+    assert captured == [None, None]
 
 
 @pytest.mark.asyncio

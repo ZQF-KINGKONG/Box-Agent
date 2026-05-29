@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from box_agent.acp import BoxACPAgent
+from box_agent.acp import BoxACPAgent, _inject_item_id
 from box_agent.config import (
     AgentConfig,
     Config,
@@ -261,6 +261,50 @@ async def test_acp_can_cancel_pending_injected_message(tmp_path):
     assert injected == {"ok": True, "injectionId": "inj-2"}
     assert cancelled == {"ok": True}
     assert state.inject_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_acp_inject_same_id_is_idempotent(tmp_path):
+    """Retrying inject with the same injectionId must not enqueue/run twice."""
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+    state.turn_active = True
+
+    args = {"sessionId": session.sessionId, "text": "只做5页", "injectionId": "dup-1"}
+
+    first = await agent.extMethod("inject", args)
+    second = await agent.extMethod("inject", dict(args))  # retry, same id
+
+    assert first == {"ok": True, "injectionId": "dup-1"}
+    assert second == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
+    # Still exactly one queued item despite two calls.
+    assert state.inject_queue.qsize() == 1
+
+    # Even after the item is consumed (drained by the loop), a retry stays deduped.
+    consumed = state.inject_queue.get_nowait()
+    assert _inject_item_id(consumed) == "dup-1"
+    third = await agent.extMethod("inject", dict(args))
+    assert third == {"ok": True, "injectionId": "dup-1", "deduplicated": True}
+    assert state.inject_queue.empty()
+
+    # An explicit cancel clears the id so the host may deliberately re-inject it.
+    await agent.extMethod(
+        "cancel_inject",
+        {"sessionId": session.sessionId, "injectionId": "dup-1"},
+    )
+    fourth = await agent.extMethod("inject", dict(args))
+    assert fourth == {"ok": True, "injectionId": "dup-1"}
+    assert state.inject_queue.qsize() == 1
 
 
 @pytest.mark.asyncio

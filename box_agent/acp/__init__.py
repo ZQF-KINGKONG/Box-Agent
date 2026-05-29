@@ -201,6 +201,7 @@ class SessionState:
     memory_extractor: Any | None = None  # per-session instance to avoid cross-session state leaks
     inject_queue: asyncio.Queue = field(default_factory=asyncio.Queue)  # in-stream message injection
     turn_active: bool = False  # True while _run_turn is executing; guards inject_queue
+    seen_injection_ids: set[str] = field(default_factory=set)  # per-turn dedup of inject IDs (idempotent retries)
     auto_classify_pending: bool = False  # True when caller didn't supply session_mode; classify on first prompt
     memory_block: str | None = None  # cached memory recall, re-applied when mode switches
     thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
@@ -756,6 +757,8 @@ class BoxACPAgent:
         while not state.inject_queue.empty():
             stale = state.inject_queue.get_nowait()
             log.warn("session/inject_stale", session_id=session_id, text=_inject_item_text(stale)[:80])
+        # Reset per-turn inject dedup — IDs are only meaningful within a turn.
+        state.seen_injection_ids.clear()
 
         prompt_start = perf_counter()
         state.turn_active = True
@@ -802,6 +805,17 @@ class BoxACPAgent:
                 return {"error": "empty_text"}
             if not state.turn_active:
                 return {"error": "no_active_turn"}
+            # Idempotency: a host retrying after a lost/timed-out response with the
+            # same injectionId must not enqueue (or re-run) the instruction twice.
+            # Covers both still-pending and already-consumed items within the turn.
+            if injection_id in state.seen_injection_ids:
+                log.info(
+                    "session/inject_dedup",
+                    session_id=session_id,
+                    injection_id=injection_id,
+                )
+                return {"ok": True, "injectionId": injection_id, "deduplicated": True}
+            state.seen_injection_ids.add(injection_id)
             state.inject_queue.put_nowait({"id": injection_id, "content": text})
             log.info(
                 "session/inject",
@@ -819,6 +833,8 @@ class BoxACPAgent:
             if not injection_id:
                 return {"error": "empty_injection_id"}
             removed = _remove_inject_queue_item(state.inject_queue, injection_id)
+            # Allow the host to re-inject the same id after an explicit cancel.
+            state.seen_injection_ids.discard(injection_id)
             log.info(
                 "session/inject_cancel",
                 session_id=session_id,

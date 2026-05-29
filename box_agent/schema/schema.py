@@ -28,6 +28,10 @@ class StreamEvent(BaseModel):
     usage: "TokenUsage | None" = None
     tool_calls: "list[ToolCall] | None" = None
     provider_request_id: str | None = None
+    # Tool calls dropped because their streamed arguments were truncated
+    # mid-flight (relay/provider hit max_tokens). Each entry: {"name", "arguments_len"}.
+    # Surfaced so the agent loop can report *what* was being written when cut off.
+    truncated_tool_calls: "list[dict[str, Any]] | None" = None
 
 
 class FunctionCall(BaseModel):
@@ -72,3 +76,6 @@ class LLMResponse(BaseModel):
     tool_calls: list[ToolCall] | None = None
     finish_reason: str
     usage: TokenUsage | None = None  # Token usage from API response
+    # See StreamEvent.truncated_tool_calls — propagated for diagnostics on
+    # finish_reason in ("length", "max_tokens").
+    truncated_tool_calls: list[dict[str, Any]] | None = None

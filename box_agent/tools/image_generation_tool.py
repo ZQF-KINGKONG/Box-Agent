@@ -296,7 +296,7 @@ class GenerateImageTool(Tool):
         self,
         prompt: str,
         output_path: str,
-        width: int = 1600,
+        width: int = 1024,
         height: int = 1024,
         size: str | None = None,
         style: str | None = None,

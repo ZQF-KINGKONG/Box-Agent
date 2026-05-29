@@ -1128,9 +1128,19 @@ async def run_agent_loop(
         # ── Drain inject queue (in-stream injection) ───────
         if inject_queue:
             while not inject_queue.empty():
-                injected_text = inject_queue.get_nowait()
+                injected_item = inject_queue.get_nowait()
+                injection_id = None
+                if isinstance(injected_item, dict):
+                    injected_text = str(injected_item.get("content") or "")
+                    raw_injection_id = injected_item.get("id")
+                    if isinstance(raw_injection_id, str):
+                        injection_id = raw_injection_id
+                else:
+                    injected_text = str(injected_item)
+                if not injected_text:
+                    continue
                 messages.append(Message(role="user", content=injected_text))
-                yield InjectedMessageEvent(content=injected_text)
+                yield InjectedMessageEvent(content=injected_text, injection_id=injection_id)
 
         # ── Micro-compact (Layer 1) ────────────────────────
         # Cheap: replace old tool results with placeholders
@@ -1212,6 +1222,7 @@ async def run_agent_loop(
                 tool_calls=finish_event.tool_calls,
                 finish_reason=finish_event.finish_reason or "stop",
                 usage=finish_event.usage,
+                truncated_tool_calls=finish_event.truncated_tool_calls,
             )
             provider_request_id = finish_event.provider_request_id
             yield LLMOutputEvent(
@@ -1281,6 +1292,8 @@ async def run_agent_loop(
                 thinking=response.thinking,
                 tool_calls=response.tool_calls,
                 finish_reason=response.finish_reason,
+                usage=response.usage,
+                provider_request_id=provider_request_id,
             )
 
         # ── Append assistant message ────────────────────────
@@ -1299,11 +1312,34 @@ async def run_agent_loop(
         # either feed the model empty/partial args and trigger a retry loop,
         # or run a tool with the wrong arguments. Abort the turn with a
         # clear reason instead.
-        if response.finish_reason == "length":
+        if response.finish_reason in ("length", "max_tokens"):
+            # Consolidate the diagnostics that already flow through the stream
+            # but were previously invisible unless BOX_AGENT_LLM_DEBUG was on.
+            # This is the only place we can confirm whether the gateway clipped
+            # max_tokens below what we requested (completion_tokens ≈ effective
+            # cap) and *what* the model was writing when cut off.
+            usage = response.usage
+            diag_parts: list[str] = []
+            if usage is not None:
+                diag_parts.append(f"completion_tokens={usage.completion_tokens}")
+                diag_parts.append(f"total_tokens={usage.total_tokens}")
+            requested_max = getattr(llm, "max_output_tokens", None)
+            if requested_max is not None:
+                diag_parts.append(f"requested_max_tokens={requested_max}")
+            if provider_request_id:
+                diag_parts.append(f"request_id={provider_request_id}")
+            if response.truncated_tool_calls:
+                rendered = ", ".join(
+                    f"{tc.get('name') or '?'}(args≈{tc.get('arguments_len', 0)} chars)"
+                    for tc in response.truncated_tool_calls
+                )
+                diag_parts.append(f"truncated_tool_calls=[{rendered}]")
+            diag = ("  Diagnostics: " + "; ".join(diag_parts)) if diag_parts else ""
             msg = (
                 "LLM output truncated by provider max_tokens limit. "
                 "Tool-call arguments may be incomplete. Try a smaller task "
-                "per turn or raise the provider's output token limit."
+                "per turn (e.g. write the file in sections instead of one call) "
+                "or raise the provider's output token limit." + diag
             )
             _cleanup_incomplete_messages(messages)
             if hook_mgr.hooks:

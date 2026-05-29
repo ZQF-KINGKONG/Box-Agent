@@ -291,6 +291,7 @@ class InjectedMessageEvent:
     """A user message was injected into the running agent loop."""
 
     content: str
+    injection_id: str | None = None
 
 
 # ── Memory promotion proposal ───────────────────────────────────

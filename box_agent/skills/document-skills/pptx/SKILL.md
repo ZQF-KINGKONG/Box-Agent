@@ -18,6 +18,7 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable.
 6. If render is attempted but blocked (missing `soffice`/PDF renderer), continue without it; do not treat it as a delivery blocker.
 8. Before writing any slide HTML, invoke the `html-templates` skill to fetch the Visual DNA profile (palette / typography / decoration tokens). See §3.0. This applies to every new HTML-first deck without exception.
 7. `.slide` must be exactly `1920px × 1080px`. **NEVER** pass `--width` / `--height` to `html_self_check.js` or `html_to_editable_pptx.js`; the scripts auto-detect from the `.slide` CSS. Mismatched dimensions are a hard failure, not a fixable warning.
+9. **Never re-serialize a whole multi-slide deck through a single `write_file` call.** Writing every slide's HTML in one tool call routinely overruns the provider output-token limit and the call is truncated mid-stream (`finish_reason=length`), losing the entire turn. For decks of 6+ slides, author per-range fragment files and merge them (see §3.4). When you already hold sub-agent drafts, the orchestrator merges them with `merge_html_fragments.js` — it must not paste their combined content back into one `write_file`.
 
 ## 1. Route Decision
 
@@ -29,7 +30,7 @@ Use this path by default:
 2. plan slide-level image decisions in `assets/generated/manifest.json`; record the whole deck theme in `deck_context`, and when the image service is available, covers, dividers, campaign/launch/vision pages, and abstract concept pages should normally choose `generate`
 3. call `generate_image` for every `generate` item before writing final slide HTML
 4. for data charts, keep the source dataset/chart spec and use ECharts only as an HTML preview; final PPT must preserve chart data through native PowerPoint chart/table output, not through screenshots
-5. create `deck.html` using the Visual DNA profile and generated local assets as hard constraints
+5. create the slide HTML using the Visual DNA profile and generated local assets as hard constraints. For decks with **6 or more slides** (or dense source material / likely-large HTML), you **must** use the fragment-drafting workflow in §3.4 — author per-range draft files and combine them with `merge_html_fragments.js`. Smaller decks may write `deck.html` directly in one pass.
 6. run HTML self-check
 7. export with `scripts/html_to_editable_pptx.js`
 8. run structural QA (package validation, text extraction, placeholder scan)
@@ -136,6 +137,60 @@ For data presentation slides, preserve data first:
 - Want a glowing pill, gradient orb, blurred halo, rotated badge? Put it in an empty `<div>` (or SVG), then place the text in a **separate** sibling element on top. The decoration goes into the bitmap; the text stays sharp and editable.
 - `.slide`'s own `background` can be any gradient / image / blend — it ends up in the bitmap layer.
 - If `html_self_check.js` flags a visual effect on a "text-bearing element", the fix is usually to split the element: one decoration sibling for the effect, one text element for the words.
+
+### 3.4 Fragment drafting (large decks — mandatory for 6+ slides)
+
+A full multi-slide deck's HTML is large. Emitting it through a single
+`write_file` call routinely exceeds the provider's output-token limit, so the
+call is truncated mid-stream (`finish_reason=length`) and the whole turn is
+lost. Avoid this by authoring the deck in fragments and merging them with a
+script — the model never has to stream the entire deck in one tool call.
+
+**Workflow:**
+
+1. Put all shared CSS **once** into `drafts/common.css` (the `.slide` rules,
+   palette variables, typography, reusable component classes). Do not repeat
+   styles inline on every slide — define a class in `common.css` and reference it.
+2. Author each contiguous slide range into its own draft file, e.g.
+   `drafts/slides_01_04.html`, `drafts/slides_05_08.html`,
+   `drafts/slides_09_12.html`. Each draft contains **only**
+   `<section class="slide" data-slide="NN">…</section>` blocks for its range —
+   no `<html>`, `<head>`, `<body>`, `<style>`, or `<script>` wrapper.
+   - **Every section MUST carry a numeric `data-slide`** (`merge_html_fragments.js`
+     rejects any section without one). Number them **`01`, `02`, …` continuously
+     from `01` across the whole deck** (not per-fragment) — the merge enforces a
+     gap-free, non-duplicated `01..N` sequence and sorts by `data-slide`, so the
+     fragment file order on the command line does not matter. Example:
+     ```html
+     <section class="slide" data-slide="05">…</section>
+     <section class="slide" data-slide="06">…</section>
+     ```
+   - **Charts inside a fragment must use the `data-chart-spec` or
+     `data-chart-spec-src` attribute form** (see §3.2) — the inline
+     `<script type="application/json" data-chart-spec>` variant is **forbidden in
+     fragments** because the merge strips/rejects any `<script>`. Put the spec in
+     an attribute, or reference an external `assets/data/*.json` via
+     `data-chart-spec-src`.
+3. Keep each fragment small enough to write comfortably in one `write_file`
+   call (roughly ≤4 slides per fragment, fewer if a slide is dense). When in
+   doubt, split further.
+4. Merge into the final single-file `deck.html`:
+
+   ```bash
+   ${BOX_AGENT_NODE:-node} "$PPTX_SKILL_DIR/scripts/merge_html_fragments.js" \
+     --css drafts/common.css \
+     --out deck.html \
+     --title "Deck title" \
+     drafts/slides_01_04.html drafts/slides_05_08.html drafts/slides_09_12.html
+   ```
+
+5. Continue with HTML self-check and export on the merged `deck.html` as usual.
+
+**When sub-agents drafted the slides:** each sub-agent writes its own fragment
+file directly (`drafts/slides_NN_MM.html`). The orchestrator then **only runs
+the merge command** above. It must **never** read the drafts back and paste
+their combined content into a single `write_file` — that recreates the exact
+truncation failure this workflow exists to prevent.
 
 ## 4. QA Gates
 

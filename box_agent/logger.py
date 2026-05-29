@@ -95,6 +95,8 @@ class AgentLogger:
         thinking: str | None = None,
         tool_calls: list[ToolCall] | None = None,
         finish_reason: str | None = None,
+        usage: Any | None = None,
+        provider_request_id: str | None = None,
     ):
         """Log LLM response
 
@@ -103,6 +105,10 @@ class AgentLogger:
             thinking: Thinking content (optional)
             tool_calls: Tool call list (optional)
             finish_reason: Finish reason (optional)
+            usage: TokenUsage from the API response (optional). Recorded so
+                truncation/cost diagnostics survive even when LLM debug logging
+                is off.
+            provider_request_id: Vendor request id (optional).
         """
         self.log_index += 1
 
@@ -119,6 +125,12 @@ class AgentLogger:
 
         if finish_reason:
             response_data["finish_reason"] = finish_reason
+
+        if usage is not None:
+            response_data["usage"] = usage.model_dump() if hasattr(usage, "model_dump") else usage
+
+        if provider_request_id:
+            response_data["provider_request_id"] = provider_request_id
 
         if not full_payload_logging_enabled():
             response_data = summarize_request_payload_for_logging(response_data)

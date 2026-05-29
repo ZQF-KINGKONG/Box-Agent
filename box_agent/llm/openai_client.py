@@ -545,6 +545,7 @@ class OpenAIClient(LLMClientBase):
         # terminates the turn with a clear MAX_TOKENS stop reason.
         tool_calls: list[ToolCall] = []
         truncated_tool = False
+        truncated_info: list[dict[str, Any]] = []
         for idx in sorted(tool_acc):
             entry = tool_acc[idx]
             raw = entry["arguments"]
@@ -552,6 +553,7 @@ class OpenAIClient(LLMClientBase):
                 arguments = json.loads(raw) if raw else {}
             except json.JSONDecodeError as exc:
                 truncated_tool = True
+                truncated_info.append({"name": entry["name"], "arguments_len": len(raw)})
                 logger.warning(
                     "Truncated tool_call arguments for %r (idx=%d, len=%d): %s",
                     entry["name"], idx, len(raw), exc,
@@ -559,6 +561,7 @@ class OpenAIClient(LLMClientBase):
                 continue
             if not entry["name"]:
                 truncated_tool = True
+                truncated_info.append({"name": "", "arguments_len": len(raw)})
                 logger.warning("Tool_call idx=%d has no function name; dropping", idx)
                 continue
             tool_calls.append(
@@ -581,4 +584,5 @@ class OpenAIClient(LLMClientBase):
             usage=usage,
             tool_calls=tool_calls if tool_calls else None,
             provider_request_id=provider_request_id,
+            truncated_tool_calls=truncated_info or None,
         )

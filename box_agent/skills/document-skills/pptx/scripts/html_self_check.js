@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const Module = require("module");
+const os = require("os");
 const path = require("path");
 
 function officeRaccoonPrefix() {
   if (process.env.BOX_AGENT_NODE_PREFIX) return process.env.BOX_AGENT_NODE_PREFIX;
   if (process.env.BOX_AGENT_RUNTIME_PREFIX) return process.env.BOX_AGENT_RUNTIME_PREFIX;
-  const home = process.env.HOME || "";
+  // Use os.homedir() (HOME if set, else passwd lookup) — NOT process.env.HOME,
+  // which is empty in GUI/launchd/spawn contexts where HOME is unset. Must match
+  // check_html_export_env.js exactly, or the env preflight resolves playwright
+  // while the real launch (different prefix) fails with "no playwright".
+  const home = os.homedir();
   if (process.platform === "darwin") {
     return path.join(home, "Library", "Application Support", "office-raccoon");
   }

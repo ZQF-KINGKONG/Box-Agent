@@ -157,6 +157,39 @@ def _artifact_envelope(art: ArtifactEvent, output_dir: str | None) -> dict[str, 
     return payload
 
 
+def _inject_item_text(item: Any) -> str:
+    if isinstance(item, dict):
+        return str(item.get("content") or "")
+    return str(item or "")
+
+
+def _inject_item_id(item: Any) -> str | None:
+    if not isinstance(item, dict):
+        return None
+    item_id = item.get("id")
+    return item_id if isinstance(item_id, str) else None
+
+
+def _injected_marker(text: str, injection_id: str | None = None) -> str:
+    if injection_id:
+        return f"[Injected:{injection_id}] {text}"
+    return f"[Injected] {text}"
+
+
+def _remove_inject_queue_item(queue: asyncio.Queue, injection_id: str) -> bool:
+    kept: list[Any] = []
+    removed = False
+    while not queue.empty():
+        item = queue.get_nowait()
+        if _inject_item_id(item) == injection_id:
+            removed = True
+            continue
+        kept.append(item)
+    for item in kept:
+        queue.put_nowait(item)
+    return removed
+
+
 @dataclass
 class SessionState:
     agent: Agent
@@ -722,7 +755,7 @@ class BoxACPAgent:
         # Drain any stale injections from a previous turn
         while not state.inject_queue.empty():
             stale = state.inject_queue.get_nowait()
-            log.warn("session/inject_stale", session_id=session_id, text=stale[:80])
+            log.warn("session/inject_stale", session_id=session_id, text=_inject_item_text(stale)[:80])
 
         prompt_start = perf_counter()
         state.turn_active = True
@@ -756,6 +789,12 @@ class BoxACPAgent:
         if method == "inject":
             session_id = params.get("sessionId", "")
             text = params.get("text", "")
+            raw_injection_id = params.get("injectionId")
+            injection_id = (
+                raw_injection_id
+                if isinstance(raw_injection_id, str) and raw_injection_id
+                else str(uuid4())
+            )
             state = self._sessions.get(session_id)
             if not state:
                 return {"error": "session_not_found"}
@@ -763,9 +802,30 @@ class BoxACPAgent:
                 return {"error": "empty_text"}
             if not state.turn_active:
                 return {"error": "no_active_turn"}
-            state.inject_queue.put_nowait(text)
-            log.info("session/inject", session_id=session_id, text=text[:80])
-            return {"ok": True}
+            state.inject_queue.put_nowait({"id": injection_id, "content": text})
+            log.info(
+                "session/inject",
+                session_id=session_id,
+                injection_id=injection_id,
+                text=text[:80],
+            )
+            return {"ok": True, "injectionId": injection_id}
+        if method == "cancel_inject":
+            session_id = params.get("sessionId", "")
+            injection_id = params.get("injectionId", "")
+            state = self._sessions.get(session_id)
+            if not state:
+                return {"error": "session_not_found"}
+            if not injection_id:
+                return {"error": "empty_injection_id"}
+            removed = _remove_inject_queue_item(state.inject_queue, injection_id)
+            log.info(
+                "session/inject_cancel",
+                session_id=session_id,
+                injection_id=injection_id,
+                removed=removed,
+            )
+            return {"ok": removed}
         if method == "list_skills":
             skills = self._skills_meta()
             if skills is None:
@@ -1210,9 +1270,17 @@ class BoxACPAgent:
                         # Don't return yet — let the loop consume the subsequent DoneEvent
                         # so the async generator is properly exhausted.
 
-                    case InjectedMessageEvent(content=text):
-                        log.info("session/injected", session_id=session_id, text=text[:80])
-                        await self._send(session_id, update_agent_message(text_block(f"[Injected] {text}")))
+                    case InjectedMessageEvent(content=text, injection_id=injection_id):
+                        log.info(
+                            "session/injected",
+                            session_id=session_id,
+                            injection_id=injection_id,
+                            text=text[:80],
+                        )
+                        await self._send(
+                            session_id,
+                            update_agent_message(text_block(_injected_marker(text, injection_id))),
+                        )
 
                     case StepEnd(step=s, elapsed_seconds=el, total_elapsed_seconds=tot):
                         log.debug("step/end", session_id=session_id, step=s, duration_ms=int(el * 1000), total_ms=int(tot * 1000))

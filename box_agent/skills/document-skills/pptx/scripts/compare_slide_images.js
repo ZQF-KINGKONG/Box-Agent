@@ -1,15 +1,26 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const Module = require("module");
+const os = require("os");
 const path = require("path");
 
-const managedNodeModules = path.join(
-  process.env.HOME || "",
-  "Library",
-  "Application Support",
-  "office-raccoon",
-  "node_modules"
-);
+function officeRaccoonPrefix() {
+  if (process.env.BOX_AGENT_NODE_PREFIX) return process.env.BOX_AGENT_NODE_PREFIX;
+  if (process.env.BOX_AGENT_RUNTIME_PREFIX) return process.env.BOX_AGENT_RUNTIME_PREFIX;
+  // os.homedir() (HOME if set, else passwd lookup) — process.env.HOME is empty
+  // in GUI/launchd/spawn contexts. Platform-branch so Windows/Linux resolve the
+  // same managed prefix the export scripts use, instead of a macOS-only path.
+  const home = os.homedir();
+  if (process.platform === "darwin") {
+    return path.join(home, "Library", "Application Support", "office-raccoon");
+  }
+  if (process.platform === "win32") {
+    return path.join(process.env.APPDATA || home, "office-raccoon");
+  }
+  return path.join(home, ".config", "office-raccoon");
+}
+
+const managedNodeModules = path.join(officeRaccoonPrefix(), "node_modules");
 process.env.NODE_PATH = process.env.NODE_PATH
   ? `${managedNodeModules}${path.delimiter}${process.env.NODE_PATH}`
   : managedNodeModules;

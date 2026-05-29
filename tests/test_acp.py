@@ -99,6 +99,15 @@ class TodoLLM:
         return LLMResponse(content="general", finish_reason="stop")
 
 
+class DoneLLM:
+    async def generate_stream(self, messages, tools=None, **_):
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
 class SubAgentLLM:
     def __init__(self):
         self.calls = 0
@@ -194,6 +203,64 @@ async def test_acp_turn_executes_tool(acp_agent):
     assert llm_outputs[1]["content"] == "done"
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
+
+
+@pytest.mark.asyncio
+async def test_acp_marks_injected_message_at_step_boundary(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+    await state.inject_queue.put({"id": "inj-1", "content": "生成10页就可以了"})
+
+    stop_reason = await agent._run_turn(state, session.sessionId)
+
+    assert stop_reason == "end_turn"
+    rendered = "\n".join(str(update) for update in conn.updates)
+    assert "[Injected:inj-1] 生成10页就可以了" in rendered
+    assert "done" in rendered
+
+
+@pytest.mark.asyncio
+async def test_acp_can_cancel_pending_injected_message(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, DoneLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+    state.turn_active = True
+
+    injected = await agent.extMethod(
+        "inject",
+        {
+            "sessionId": session.sessionId,
+            "text": "生成10页就可以了",
+            "injectionId": "inj-2",
+        },
+    )
+    cancelled = await agent.extMethod(
+        "cancel_inject",
+        {"sessionId": session.sessionId, "injectionId": "inj-2"},
+    )
+
+    assert injected == {"ok": True, "injectionId": "inj-2"}
+    assert cancelled == {"ok": True}
+    assert state.inject_queue.empty()
 
 
 @pytest.mark.asyncio

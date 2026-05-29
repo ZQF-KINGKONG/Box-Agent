@@ -138,7 +138,8 @@ Use one `.slide` element per page:
 ## Fragment Drafting
 
 For decks with 6 or more slides, dense source material, or likely large HTML,
-follow the fragment rules in `SKILL.md` before writing the final `deck.html`.
+follow the fragment rules in `SKILL.md` §3.4 before writing the final `deck.html`.
+Never re-serialize the whole deck through a single `write_file` call.
 The merge command is:
 
 ```bash

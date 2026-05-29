@@ -248,3 +248,58 @@ async def test_merge_substring_does_not_match(mgr: MemoryManager):
     await extractor.maybe_extract(messages, "loop_end")
     assert "Alice Zhang" in mgr.read_context()
     assert "Bob" not in mgr.read_context()
+
+
+# ── Topic-tagged extraction ──────────────────────────────────
+
+
+async def test_extract_additions_routed_to_topics(mgr: MemoryManager):
+    """Object-form additions land in their tagged topic files."""
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(
+        mgr,
+        '{"additions": ['
+        '{"text": "- user is a backend engineer", "topic": "user_profile"}, '
+        '{"text": "- prefers Chinese replies", "topic": "preferences"}'
+        '], "merges": []}',
+    )
+    messages = [Message(role="user", content="hi")]
+
+    await extractor.maybe_extract(messages, "loop_end")
+
+    assert "backend engineer" in mgr.read_context_topic("user_profile")
+    assert "Chinese replies" in mgr.read_context_topic("preferences")
+    assert sorted(mgr.list_topics()) == ["preferences", "user_profile"]
+
+
+async def test_extract_unknown_topic_falls_back_to_general(mgr: MemoryManager):
+    """An out-of-vocabulary topic label is folded into 'general'."""
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(
+        mgr,
+        '{"additions": [{"text": "- some fact", "topic": "made_up_label"}], "merges": []}',
+    )
+    messages = [Message(role="user", content="hi")]
+
+    await extractor.maybe_extract(messages, "loop_end")
+
+    assert mgr.list_topics() == ["general"]
+    assert "some fact" in mgr.read_context_topic("general")
+
+
+async def test_extract_string_additions_still_general(mgr: MemoryManager):
+    """Legacy string additions remain backward-compatible (→ general)."""
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(
+        mgr,
+        '{"additions": ["- legacy style fact"], "merges": []}',
+    )
+    messages = [Message(role="user", content="hi")]
+
+    await extractor.maybe_extract(messages, "loop_end")
+
+    assert mgr.list_topics() == ["general"]
+    assert "legacy style fact" in mgr.read_context_topic("general")

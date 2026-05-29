@@ -1190,6 +1190,23 @@ class MemoryManager:
 
 # ── Auto Memory Extraction ────────────────────────────────────────
 
+# Controlled vocabulary for auto-extracted context topics. Keeping this set
+# small prevents topic explosion (one file per stray label) — anything the LLM
+# emits outside the set is folded back into "general".
+_EXTRACTION_TOPICS = ("user_profile", "preferences", "project", "feedback", "general")
+
+
+def _normalize_extraction_topic(raw: object) -> str:
+    """Map an LLM-supplied topic label onto the controlled vocabulary.
+
+    Unknown / empty labels fall back to ``"general"``. Dash and underscore are
+    treated interchangeably so ``"user profile"`` / ``"user-profile"`` /
+    ``"user_profile"`` all resolve to the same bucket.
+    """
+    slug = _slugify_topic(str(raw or "general")).replace("-", "_")
+    return slug if slug in _EXTRACTION_TOPICS else "general"
+
+
 _EXTRACTION_SYSTEM_PROMPT = "You are a memory extraction assistant. You analyze conversations to identify information worth remembering across sessions."
 
 _EXTRACTION_USER_PROMPT = """\
@@ -1218,9 +1235,15 @@ Rules:
 5. If there is nothing worth remembering, return empty arrays.
 6. Distill to abstract facts, preferences, or constraints. NEVER quote, copy, or near-paraphrase the user's exact sentences — the user must not see their own input echoed back as "memory". If you can only restate what the user just said, return empty arrays.
 7. If the conversation is mostly a one-off task description, request, or in-progress work without a stable cross-session fact emerging, return empty arrays.
+8. Tag each addition with exactly one topic from this fixed set (pick the closest; use "general" if none fit):
+   - "user_profile": identity, role, team, expertise, background
+   - "preferences": language, communication style, tool/workflow preferences
+   - "project": goals, constraints, key decisions, deadlines
+   - "feedback": corrections and approaches the user endorsed
+   - "general": anything cross-session-useful that fits none of the above
 
 Output ONLY valid JSON (no markdown fences):
-{{"additions": ["- bullet point 1", "- bullet point 2"], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
+{{"additions": [{{"text": "- bullet point 1", "topic": "preferences"}}, {{"text": "- bullet point 2", "topic": "project"}}], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
 
 _CONTEXT_UPDATE_SYSTEM_PROMPT = (
     "You are a long-term memory curator. You update persistent context memory "
@@ -1600,7 +1623,7 @@ class MemoryExtractor:
             logger.warning("Memory extraction returned invalid JSON: %s", text[:200])
             return
 
-        additions: list[str] = data.get("additions", [])
+        additions: list = data.get("additions", [])
         merges: list[dict] = data.get("merges", [])
 
         if not additions and not merges:
@@ -1613,10 +1636,24 @@ class MemoryExtractor:
             if old and new:
                 operations.append({"action": "replace", "old": old, "new": new})
 
-        if additions:
-            joined = "\n".join(a for a in additions if isinstance(a, str) and a.strip())
+        # Additions may be plain strings (legacy → "general") or objects
+        # carrying a topic. Group by topic so each bucket lands in its own file.
+        by_topic: dict[str, list[str]] = {}
+        for item in additions:
+            if isinstance(item, str):
+                text, topic = item, "general"
+            elif isinstance(item, dict):
+                text = str(item.get("text", "")).strip()
+                topic = _normalize_extraction_topic(item.get("topic"))
+            else:
+                continue
+            if text and text.strip():
+                by_topic.setdefault(topic, []).append(text)
+
+        for topic, lines in by_topic.items():
+            joined = "\n".join(lines)
             if joined:
-                operations.append({"action": "add", "content": joined})
+                operations.append({"action": "add", "content": joined, "topic": topic})
 
         if operations:
             self._mgr.apply_context_operations(operations)

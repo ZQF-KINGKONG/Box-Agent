@@ -4,7 +4,7 @@ Directory layout::
 
     ~/.box-agent/memory/
     ├── MEMORY.md          # Core memory (always injected into system prompt)
-    └── CONTEXT.md         # Searchable context (retrieved on demand)
+    └── context/           # Topic-sharded searchable context (retrieved on demand)
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .schema import Message
@@ -273,8 +273,31 @@ class TopicStore:
             out.extend(self.read_topic(slug))
         return out
 
+    def read_topics(self, topics: list[str]) -> list[ContextEntry]:
+        out: list[ContextEntry] = []
+        seen: set[str] = set()
+        for topic in topics:
+            slug = _slugify_topic(topic)
+            if slug in seen:
+                continue
+            seen.add(slug)
+            out.extend(self.read_topic(slug))
+        return out
+
     def read_all_grouped(self) -> dict[str, list[ContextEntry]]:
         return {slug: self.read_topic(slug) for slug in self.list_topics()}
+
+    def ensure_index(self) -> None:
+        """Rebuild the sidecar index when it is missing or pre-vocabulary."""
+        topics = self.list_topics()
+        if not topics:
+            return
+        index = self.read_index()
+        if (
+            set(index.keys()) != set(topics)
+            or any("terms" not in index.get(slug, {}) for slug in topics)
+        ):
+            self._write_index(self.read_all_grouped())
 
     def write_all(self, entries: list[ContextEntry]) -> None:
         """Persist *entries* to per-topic files; remove topics now empty.
@@ -302,6 +325,19 @@ class TopicStore:
 
         self._write_index(grouped)
 
+    def write_topics(self, entries: list[ContextEntry]) -> None:
+        """Persist entries for their topics without touching unrelated topics."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        grouped: dict[str, list[ContextEntry]] = {}
+        for e in entries:
+            slug = _slugify_topic(e.topic or "general")
+            e.topic = slug
+            grouped.setdefault(slug, []).append(e)
+
+        for slug, group in grouped.items():
+            write_context_file(self._dir / f"{slug}.md", group)
+        self._merge_index(grouped)
+
     def delete_topic(self, topic: str) -> bool:
         path = self._topic_path(topic)
         if not path.exists():
@@ -310,20 +346,56 @@ class TopicStore:
             path.unlink()
         except OSError:
             return False
-        self._write_index(self.read_all_grouped())
+        self._remove_from_index(_slugify_topic(topic))
         return True
+
+    def read_index(self) -> dict[str, dict[str, Any]]:
+        if not self.index_file.exists():
+            return {}
+        try:
+            import json as _json
+
+            data = _json.loads(self.index_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+    def match_topics(self, query: str) -> list[str]:
+        """Return topic slugs whose index vocabulary overlaps the query."""
+        query_lower = query.lower()
+        query_terms = set(_extract_match_terms(query_lower))
+        if not query_terms and not query_lower:
+            return []
+
+        index = self.read_index()
+        scored: list[tuple[int, int, str]] = []
+        for slug in self.list_topics():
+            item = index.get(slug, {})
+            terms = {str(t) for t in item.get("terms", []) if isinstance(t, str)}
+            score = 0
+            slug_terms = {
+                slug,
+                slug.replace("-", "_"),
+                slug.replace("_", "-"),
+                slug.replace("-", " "),
+                slug.replace("_", " "),
+            }
+            if any(term and term in query_lower for term in slug_terms):
+                score += 8
+            overlap = query_terms & terms
+            score += len(overlap) * 2
+            if score > 0:
+                scored.append((score, int(item.get("hits_total", 0) or 0), slug))
+
+        scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+        return [slug for _, _, slug in scored]
 
     def _write_index(self, grouped: dict[str, list[ContextEntry]]) -> None:
         import json as _json
         try:
-            index = {
-                slug: {
-                    "count": len(group),
-                    "last_updated": max((e.last_used for e in group), default=""),
-                    "hits_total": sum(e.hits for e in group),
-                }
-                for slug, group in grouped.items()
-            }
+            index = {slug: self._index_record(slug, group) for slug, group in grouped.items()}
             self.index_file.write_text(
                 _json.dumps(index, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
@@ -331,16 +403,57 @@ class TopicStore:
         except OSError:
             logger.exception("TopicStore: failed to write _index.json")
 
+    def _merge_index(self, grouped: dict[str, list[ContextEntry]]) -> None:
+        import json as _json
+
+        index = self.read_index()
+        for slug, group in grouped.items():
+            index[slug] = self._index_record(slug, group)
+        try:
+            self.index_file.write_text(
+                _json.dumps(index, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("TopicStore: failed to update _index.json")
+
+    def _remove_from_index(self, slug: str) -> None:
+        import json as _json
+
+        index = self.read_index()
+        if slug not in index:
+            return
+        index.pop(slug, None)
+        try:
+            self.index_file.write_text(
+                _json.dumps(index, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("TopicStore: failed to update _index.json")
+
+    @staticmethod
+    def _index_record(slug: str, group: list[ContextEntry]) -> dict[str, Any]:
+        terms: set[str] = set(_extract_match_terms(slug.replace("-", " ")))
+        for entry in group:
+            terms.update(_extract_match_terms(entry.content.lower()))
+        return {
+            "count": len(group),
+            "last_updated": max((e.last_used for e in group), default=""),
+            "hits_total": sum(e.hits for e in group),
+            "terms": sorted(terms)[:120],
+        }
+
 
 class MemoryManager:
-    """Dual-file memory: MEMORY.md (core) + CONTEXT.md (searchable).
+    """Two-tier memory: MEMORY.md (core) + topic-sharded searchable context.
 
     - **MEMORY.md** — user identity, preferences, writing style.
       Always injected into the system prompt via ``recall()``.
       Written by LLM via ``memory_write(category="core")``.
 
-    - **CONTEXT.md** — project context, task patterns, behavioral feedback.
-      Retrieved on demand via ``memory_search`` tool.
+    - **context/<topic>.md** — project context, task patterns, behavioral feedback.
+      Retrieved on demand via topic-routed ``memory_search``.
       Written by ``memory_write(category="context")`` and ``MemoryExtractor``.
     """
 
@@ -358,6 +471,7 @@ class MemoryManager:
         self._context_dir.mkdir(parents=True, exist_ok=True)
         self._topic_store = TopicStore(self._context_dir)
         self._purge_legacy_context_file()
+        self._topic_store.ensure_index()
 
     # ── File paths ──────────────────────────────────────────────
 
@@ -414,6 +528,31 @@ class MemoryManager:
             self.write_core(f"{existing}\n{content.strip()}")
         else:
             self.write_core(content)
+
+    def append_core_dedup(self, content: str) -> bool:
+        """Append non-duplicate lines to MEMORY.md. Returns True if changed."""
+        core = self.read_core()
+        core_lines_norm = {
+            line.strip().lower()
+            for line in core.splitlines()
+            if line.strip()
+        }
+        to_append: list[str] = []
+        for line in content.splitlines():
+            stripped = line.strip()
+            norm = stripped.lower()
+            if not norm or norm in core_lines_norm:
+                continue
+            core_lines_norm.add(norm)
+            to_append.append(stripped)
+
+        if not to_append:
+            return False
+        if core:
+            self.write_core(core + "\n" + "\n".join(to_append))
+        else:
+            self.write_core("\n".join(to_append))
+        return True
 
     # Legacy aliases — backward compat for existing callers/tests
     read_all = read_core
@@ -512,6 +651,10 @@ class MemoryManager:
         """Persist *entries* across topic files."""
         self._topic_store.write_all(entries)
 
+    def _write_context_topic_entries(self, entries: list[ContextEntry]) -> None:
+        """Persist entries for touched topics only."""
+        self._topic_store.write_topics(entries)
+
     def read_all_context_entries(self) -> list[ContextEntry]:
         """Public: read every context entry across all topics."""
         return self._topic_store.read_all()
@@ -582,8 +725,8 @@ class MemoryManager:
 
     # ── Search ──────────────────────────────────────────────────
 
-    def search(self, query: str, *, limit: int = 5) -> list[str]:
-        """Keyword search across CONTEXT.md entries.
+    def search(self, query: str, *, limit: int = 5, topic: str | None = None) -> list[str]:
+        """Keyword search across topic-routed context entries.
 
         Returns entry contents (deduped across multi-line entries) ranked by
         occurrence count, with historical ``hits`` as a tiebreak.  Capped at
@@ -594,30 +737,15 @@ class MemoryManager:
         """
         if not query:
             return []
-        entries = self._read_context_entries()
-        if not entries:
-            return []
-
         query_lower = query.lower()
-        scored: list[tuple[int, int, str]] = []  # (occurrences, hits, content)
-        changed = False
-        now = _now_iso()
+        entries, routed_topics, explicit_topic = self._entries_for_query(query, topic=topic)
+        results = self._search_entries(query_lower, entries, limit, routed_topics)
 
-        for entry in entries:
-            content_lower = entry.content.lower()
-            occurrences = content_lower.count(query_lower)
-            if occurrences == 0:
-                continue
-            scored.append((occurrences, entry.hits, entry.content))
-            entry.hits += 1
-            entry.last_used = now
-            changed = True
+        if not results and routed_topics is not None and not explicit_topic:
+            entries = self._read_context_entries()
+            results = self._search_entries(query_lower, entries, limit, None)
 
-        if changed:
-            self._write_context_entries(entries)
-
-        scored.sort(key=lambda item: (-item[0], -item[1]))
-        return [content for _, _, content in scored[:limit]]
+        return results
 
     def auto_match_context(self, query: str, *, limit: int = 3) -> list[dict[str, str]]:
         """Return high-confidence context-memory matches for a user prompt.
@@ -633,8 +761,7 @@ class MemoryManager:
         query = _sanitize_auto_match_query(query)
         if _is_title_generation_query(query):
             return []
-        entries = self._read_context_entries()
-        if not query or not entries:
+        if not query:
             return []
 
         query_lower = query.lower()
@@ -642,8 +769,84 @@ class MemoryManager:
         if not query_terms:
             return []
 
-        # (score, line_no, text, entry_index) — line_no is globally indexed
-        # across joined content so callers keep stable ids.
+        entries, routed_topics, explicit_topic = self._entries_for_query(query)
+        if not entries:
+            return []
+
+        top = self._auto_match_entries(query, query_lower, query_terms, entries, routed_topics, limit)
+        if not top and routed_topics is not None and not explicit_topic:
+            entries = self._read_context_entries()
+            top = self._auto_match_entries(query, query_lower, query_terms, entries, None, limit)
+
+        return [
+            {
+                "id": f"context:{line_no}",
+                "source": "context",
+                "category": "context",
+                "text": text,
+            }
+            for _, line_no, text, _ in top
+        ]
+
+    def _entries_for_query(
+        self,
+        query: str,
+        *,
+        topic: str | None = None,
+    ) -> tuple[list[ContextEntry], list[str] | None, bool]:
+        if topic:
+            slug = _slugify_topic(topic)
+            return self._topic_store.read_topic(slug), [slug], True
+
+        topics = self._topic_store.match_topics(query)
+        if topics:
+            return self._topic_store.read_topics(topics), topics, False
+        return self._read_context_entries(), None, False
+
+    def _search_entries(
+        self,
+        query_lower: str,
+        entries: list[ContextEntry],
+        limit: int,
+        routed_topics: list[str] | None,
+    ) -> list[str]:
+        if not entries:
+            return []
+
+        scored: list[tuple[int, int, str]] = []  # (occurrences, hits, content)
+        changed = False
+        now = _now_iso()
+
+        for entry in entries:
+            content_lower = entry.content.lower()
+            occurrences = content_lower.count(query_lower)
+            if occurrences == 0:
+                continue
+            scored.append((occurrences, entry.hits, entry.content))
+            entry.hits += 1
+            entry.last_used = now
+            changed = True
+
+        if changed:
+            if routed_topics is None:
+                self._write_context_entries(entries)
+            else:
+                self._write_context_topic_entries(entries)
+
+        scored.sort(key=lambda item: (-item[0], -item[1]))
+        return [content for _, _, content in scored[:limit]]
+
+    def _auto_match_entries(
+        self,
+        query: str,
+        query_lower: str,
+        query_terms: list[str],
+        entries: list[ContextEntry],
+        routed_topics: list[str] | None,
+        limit: int,
+    ) -> list[tuple[float, int, str, int]]:
+        # (score, line_no, text, entry_index) — line_no is scoped to the searched
+        # topic set; callers treat it as a lightweight display id.
         scored: list[tuple[float, int, str, int]] = []
         line_no = 0
         for entry_idx, entry in enumerate(entries):
@@ -669,17 +872,12 @@ class MemoryManager:
             for idx in hit_entry_indices:
                 entries[idx].hits += 1
                 entries[idx].last_used = now
-            self._write_context_entries(entries)
+            if routed_topics is None:
+                self._write_context_entries(entries)
+            else:
+                self._write_context_topic_entries(entries)
 
-        return [
-            {
-                "id": f"context:{line_no}",
-                "source": "context",
-                "category": "context",
-                "text": text,
-            }
-            for _, line_no, text, _ in top
-        ]
+        return top
 
     # ── Recall (system prompt injection) ────────────────────────
 
@@ -1213,7 +1411,7 @@ _EXTRACTION_USER_PROMPT = """\
 Analyze the recent conversation below. Extract information worth remembering across sessions.
 
 Categories to look for:
-- User info: name, role, team, expertise, background
+- User info: name, role, team, expertise, background, usual/default city, location, timezone
 - Preferences: language, communication style, tools, workflows
 - Project context: goals, constraints, key decisions, deadlines
 - Behavioral feedback: corrections the user made, approaches that worked
@@ -1227,6 +1425,11 @@ Existing context memory (CONTEXT.md — check for duplicates before adding):
 Recent conversation:
 {transcript}
 
+Output buckets:
+- "core_additions": explicit user-stated identity/profile facts, stable preferences, durable rules, and local defaults that should be available in every future session. Examples: name, role, preferred language/style, usual/default city or timezone.
+- "additions": project context, task patterns, historical notes, and feedback that should stay searchable but not always injected.
+- "merges": replacements for existing context memory only.
+
 Rules:
 1. Only extract cross-session-valuable information. Ignore ephemeral task details.
 2. If new info updates or refines something in context memory, output a merge.
@@ -1235,15 +1438,17 @@ Rules:
 5. If there is nothing worth remembering, return empty arrays.
 6. Distill to abstract facts, preferences, or constraints. NEVER quote, copy, or near-paraphrase the user's exact sentences — the user must not see their own input echoed back as "memory". If you can only restate what the user just said, return empty arrays.
 7. If the conversation is mostly a one-off task description, request, or in-progress work without a stable cross-session fact emerging, return empty arrays.
-8. Tag each addition with exactly one topic from this fixed set (pick the closest; use "general" if none fit):
+8. For local facts, only save explicit self-statements. If the user says "I am in Beijing" / "我在北京" while asking weather, directions, delivery, or other local services, save a cautious default such as "- 用户用于本地查询的默认城市是北京"; do not infer residence or permanence. If the wording is clearly temporary travel, do not save it to core.
+9. Tag each context addition with exactly one topic from this fixed set (pick the closest; use "general" if none fit):
    - "user_profile": identity, role, team, expertise, background
    - "preferences": language, communication style, tool/workflow preferences
    - "project": goals, constraints, key decisions, deadlines
    - "feedback": corrections and approaches the user endorsed
    - "general": anything cross-session-useful that fits none of the above
+10. Write memory bullets in the user's dominant language when it is clear; otherwise use concise English.
 
 Output ONLY valid JSON (no markdown fences):
-{{"additions": [{{"text": "- bullet point 1", "topic": "preferences"}}, {{"text": "- bullet point 2", "topic": "project"}}], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
+{{"core_additions": ["- core memory bullet"], "additions": [{{"text": "- context bullet point 1", "topic": "preferences"}}, {{"text": "- context bullet point 2", "topic": "project"}}], "merges": [{{"old": "exact old line", "new": "replacement line"}}]}}"""
 
 _CONTEXT_UPDATE_SYSTEM_PROMPT = (
     "You are a long-term memory curator. You update persistent context memory "
@@ -1523,7 +1728,8 @@ class MemoryExtractor:
 
     Called at key points in the agent loop to extract cross-session
     knowledge before information is lost (e.g. before context compression).
-    Writes to CONTEXT.md.
+    Writes explicit profile/preferences/local defaults to MEMORY.md and
+    project/task history to topic-sharded context memory.
     """
 
     def __init__(
@@ -1623,11 +1829,27 @@ class MemoryExtractor:
             logger.warning("Memory extraction returned invalid JSON: %s", text[:200])
             return
 
+        core_additions = data.get("core_additions", [])
+        if not isinstance(core_additions, list):
+            core_additions = []
         additions: list = data.get("additions", [])
         merges: list[dict] = data.get("merges", [])
 
-        if not additions and not merges:
+        if not core_additions and not additions and not merges:
             return
+
+        core_lines: list[str] = []
+        for item in core_additions:
+            if isinstance(item, str):
+                text = item.strip()
+            elif isinstance(item, dict):
+                text = str(item.get("text", "")).strip()
+            else:
+                continue
+            if text:
+                core_lines.append(text)
+        if core_lines:
+            self._mgr.append_core_dedup("\n".join(core_lines))
 
         operations: list[dict] = []
         for merge in merges:

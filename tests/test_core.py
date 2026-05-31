@@ -15,6 +15,7 @@ from box_agent.events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
+    ProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -55,6 +56,22 @@ class MockLLM:
             usage=resp.usage,
             tool_calls=resp.tool_calls,
         )
+
+
+class ChunkedStreamLLM:
+    """LLM test double that emits visible text in multiple stream chunks."""
+
+    def __init__(self, chunks: list[str], *, finish_reason: str = "stop"):
+        self.chunks = chunks
+        self.finish_reason = finish_reason
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="".join(self.chunks), finish_reason=self.finish_reason)
+
+    async def generate_stream(self, messages, tools=None, **_):
+        for chunk in self.chunks:
+            yield StreamEvent(type="text", delta=chunk)
+        yield StreamEvent(type="finish", finish_reason=self.finish_reason)
 
 
 class EchoTool(Tool):
@@ -174,6 +191,18 @@ async def test_simple_conversation():
 
 
 @pytest.mark.asyncio
+async def test_long_plain_answer_streams_before_finish_without_duplicate():
+    chunks = ["李白是唐代诗人，" * 20, "他的诗歌想象瑰丽，" * 20, "后世称他为诗仙。"]
+    llm = ChunkedStreamLLM(chunks)
+
+    events = await collect(run_agent_loop(llm=llm, messages=_msgs(), tools={}, max_steps=5))
+
+    content_events = [e for e in events if isinstance(e, ContentEvent)]
+    assert any(e._streaming for e in content_events)
+    assert "".join(e.content for e in content_events) == "".join(chunks)
+
+
+@pytest.mark.asyncio
 async def test_thinking_event():
     """LLM with thinking should yield ThinkingEvent."""
     llm = MockLLM([LLMResponse(content="ok", thinking="let me think", finish_reason="stop")])
@@ -206,6 +235,12 @@ async def test_tool_call_cycle():
     assert len(results) == 1
     assert results[0].success is True
     assert "echo:ping" in results[0].content
+    visible_text = "".join(e.content for e in events if isinstance(e, ContentEvent))
+    assert "calling tool" not in visible_text
+    assert visible_text == "done"
+    progress = [e for e in events if isinstance(e, ProgressEvent)]
+    assert len(progress) == 1
+    assert progress[0].content == "calling tool"
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,14 @@ class ContentEvent:
 
 
 @dataclass(frozen=True)
+class ProgressEvent:
+    """User-visible progress text that must not become final answer content."""
+
+    step: int
+    content: str
+
+
+@dataclass(frozen=True)
 class TokenUsageEvent:
     """Token usage reported by the API after an LLM call."""
 
@@ -356,6 +364,7 @@ AgentEvent = Union[
     StepEnd,
     ThinkingEvent,
     ContentEvent,
+    ProgressEvent,
     TokenUsageEvent,
     LLMOutputEvent,
     ToolCallStart,

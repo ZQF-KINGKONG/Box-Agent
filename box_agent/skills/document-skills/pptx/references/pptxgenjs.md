@@ -138,6 +138,15 @@ const safeShape = (name) => {
   return ShapeType[name];
 };
 
+const normalizeLineShapeBox = ({ x1 = 0, y1 = 0, x2 = 0, y2 = 0 } = {}) => {
+  return {
+    x: Math.min(x1, x2),
+    y: Math.min(y1, y2),
+    w: Math.abs(x2 - x1),
+    h: Math.abs(y2 - y1),
+  };
+};
+
 slide.addShape(safeShape("rect"), {
   x: 0.5,
   y: 0.5,
@@ -145,6 +154,12 @@ slide.addShape(safeShape("rect"), {
   h: 1,
   fill: { color: "FDE047" },
   line: { color: "14532D", width: 1 },
+});
+
+// Keep line geometry non-negative even when direction is encoded as negative delta.
+slide.addShape(safeShape("line"), {
+  ...normalizeLineShapeBox({ x1: 8.6, y1: 1.6, x2: 6.3, y2: 3.1 }),
+  line: { color: "111827", width: 1.5 },
 });
 ```
 
@@ -159,6 +174,7 @@ Do not use PowerPoint shapes to draw people, faces, portraits, athletes, celebri
 - Do not ignore stderr from the generation script. PptxGenJS warnings about colors, missing assets, invalid options, or unsupported shapes are QA failures until fixed.
 - Do not assume optional methods exist across PptxGenJS versions. For example, call `pptx.defineSection(...)` only after checking `typeof pptx.defineSection === "function"`; otherwise omit section metadata.
 - Do not reuse mutable option objects across many shapes. Return a fresh object from a helper.
+- Never use negative `w`/`h` for line-like shapes. Encode direction with coordinates, then normalize to non-negative geometry before calling `addShape`.
 - Do not call `addShape` with unsupported names such as an assumed `shield`; PptxGenJS will throw before writing the deck.
 - In Office Raccoon, avoid shell checks that rely on `rm -rf`, `/dev/null`, absolute redirects, `/tmp`, or heredocs. Keep logs, previews, generated images, and QA outputs in the current workspace or requested output folder.
 - Avoid excessive shadows, transparency, and rounded cards unless they are part of the actual design language.

@@ -54,6 +54,7 @@ class DummyLLM:
         self.calls += 1
         if self.calls == 1:
             yield StreamEvent(type="thinking", delta="calling echo")
+            yield StreamEvent(type="text", delta="calling tool")
             yield StreamEvent(
                 type="finish",
                 finish_reason="tool",
@@ -106,6 +107,16 @@ class DoneLLM:
 
     async def generate(self, messages, tools=None):
         return LLMResponse(content="done", finish_reason="stop")
+
+
+class LongAnswerLLM:
+    async def generate_stream(self, messages, tools=None, **_):
+        for chunk in ["李白是唐代诗人，" * 20, "他的诗歌想象瑰丽，" * 20, "后世称他为诗仙。"]:
+            yield StreamEvent(type="text", delta=chunk)
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="", finish_reason="stop")
 
 
 class SubAgentLLM:
@@ -198,11 +209,49 @@ async def test_acp_turn_executes_tool(acp_agent):
         and update.update.rawOutput.get("type") == "llm_output"
     ]
     assert [item["finish_reason"] for item in llm_outputs] == ["tool", "stop"]
+    assert llm_outputs[0]["content"] == "calling tool"
     assert llm_outputs[0]["thinking"] == "calling echo"
     assert llm_outputs[0]["tool_calls"][0]["function"]["name"] == "echo"
     assert llm_outputs[1]["content"] == "done"
+    progress_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "agent_progress"
+    ]
+    assert [item["content"] for item in progress_outputs] == ["calling tool"]
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
+
+
+@pytest.mark.asyncio
+async def test_acp_streams_long_plain_answer_chunks(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, LongAnswerLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "介绍李白"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    message_chunks = [
+        update
+        for update in conn.updates
+        if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
+    ]
+    assert message_chunks
+    streamed_text = "".join(chunk.update.content.text for chunk in message_chunks)
+    assert "李白是唐代诗人" in streamed_text
+    assert "后世称他为诗仙" in streamed_text
 
 
 @pytest.mark.asyncio

@@ -282,3 +282,64 @@ def test_topic_store_writes_sidecar_index(mgr: MemoryManager):
     data = _json.loads(index_path.read_text(encoding="utf-8"))
     assert data["alpha"]["count"] == 1
     assert data["beta"]["count"] == 2
+    assert "one" in data["alpha"]["terms"]
+    assert "three" in data["beta"]["terms"]
+
+
+def test_memory_manager_rebuilds_pre_vocabulary_topic_index(memory_dir: Path):
+    context_dir = memory_dir / "context"
+    context_dir.mkdir()
+    entry = _new_entry("- user prefers dark mode", topic="preferences")
+    write_context_file(context_dir / "preferences.md", [entry])
+    (context_dir / "_index.json").write_text(
+        '{"preferences": {"count": 1, "hits_total": 0}}\n',
+        encoding="utf-8",
+    )
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+
+    import json as _json
+    data = _json.loads((context_dir / "_index.json").read_text(encoding="utf-8"))
+    assert "dark" in data["preferences"]["terms"]
+    assert mgr.search("dark mode") == ["- user prefers dark mode"]
+
+
+def test_search_routes_to_indexed_topic_without_reading_unrelated_topic(mgr: MemoryManager, monkeypatch):
+    mgr.append_context("- user prefers dark mode", topic="preferences")
+    mgr.append_context("- project dashboard status", topic="project")
+
+    calls: list[str] = []
+    original = mgr.topic_store.read_topic
+
+    def wrapped(topic: str):
+        calls.append(topic)
+        return original(topic)
+
+    monkeypatch.setattr(mgr.topic_store, "read_topic", wrapped)
+
+    results = mgr.search("dark mode")
+
+    assert results == ["- user prefers dark mode"]
+    assert calls == ["preferences"]
+
+
+def test_search_falls_back_to_all_topics_when_index_is_stale(mgr: MemoryManager):
+    mgr.append_context("- user prefers dark mode", topic="preferences")
+    mgr.append_context("- project dashboard status", topic="project")
+    mgr.topic_store.index_file.write_text(
+        '{"preferences": {"count": 1}, "project": {"count": 1}}\n',
+        encoding="utf-8",
+    )
+
+    results = mgr.search("dark mode")
+
+    assert results == ["- user prefers dark mode"]
+
+
+def test_search_can_be_scoped_to_explicit_topic(mgr: MemoryManager):
+    mgr.append_context("- PPT style: dark editorial", topic="preferences")
+    mgr.append_context("- PPT project: Brazil world cup deck", topic="project")
+
+    results = mgr.search("ppt", topic="project")
+
+    assert results == ["- PPT project: Brazil world cup deck"]

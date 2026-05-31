@@ -46,6 +46,13 @@ def loader() -> SkillLoader:
             source="builtin",
             keywords=["excel", "表格", "xlsx"],
         ),
+        "research-synthesis": Skill(
+            name="research-synthesis",
+            description="industry analysis market research 深度总结 行业研究",
+            content="",
+            source="builtin",
+            keywords=["行业分析", "行业研究", "市场研究", "深度总结", "资料综述"],
+        ),
     }
     return inst
 
@@ -98,6 +105,13 @@ class TestFilterByQuery:
     def test_excel_query_matches_xlsx(self, loader: SkillLoader):
         names = [s.name for s in loader.filter_by_query("分析excel数据")]
         assert "xlsx" in names
+
+    def test_industry_research_query_matches_research_synthesis(
+        self, loader: SkillLoader
+    ):
+        names = [s.name for s in loader.filter_by_query("做一个行业分析和深度总结")]
+        assert "research-synthesis" in names
+        assert "webapp-testing" not in names
 
     def test_no_match_returns_only_always_on(self, loader: SkillLoader):
         names = [s.name for s in loader.filter_by_query("随便聊聊天气")]

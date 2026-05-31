@@ -82,3 +82,26 @@ async def test_memory_search_returns_empty_structured_payload(mgr: MemoryManager
         "query": "weekly",
         "matched_memories": [],
     }
+
+
+async def test_memory_search_accepts_explicit_topic(mgr: MemoryManager):
+    mgr.append_context("- PPT style: dark editorial", topic="preferences")
+    mgr.append_context("- PPT project: Brazil world cup deck", topic="project")
+    tool = MemorySearchTool(mgr)
+
+    result = await tool.execute("ppt", topic="project")
+
+    assert result.success is True
+    assert result.raw_output == {
+        "type": "memory_search",
+        "query": "ppt",
+        "topic": "project",
+        "matched_memories": [
+            {
+                "id": "context:1",
+                "source": "context",
+                "category": "context",
+                "text": "- PPT project: Brazil world cup deck",
+            }
+        ],
+    }

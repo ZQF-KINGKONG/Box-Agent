@@ -77,7 +77,7 @@ def _msgs():
 
 @pytest.mark.asyncio
 async def test_inject_at_step_boundary():
-    """Injected message is drained at step boundary and appears in messages."""
+    """Injected message is drained at step boundary as guidance for the active task."""
     queue: asyncio.Queue[str] = asyncio.Queue()
     msgs = _msgs()
 
@@ -105,7 +105,11 @@ async def test_inject_at_step_boundary():
 
     # The injected message should be in the message history
     user_msgs = [m for m in msgs if m.role == "user"]
-    assert any("extra context" in m.content for m in user_msgs)
+    injected_msg = next(m for m in user_msgs if "extra context" in m.content)
+    assert injected_msg.content != "extra context here"
+    assert "mid-turn guidance" in injected_msg.content
+    assert "not as a new standalone task" in injected_msg.content
+    assert "then continue the original task" in injected_msg.content
 
 
 @pytest.mark.asyncio

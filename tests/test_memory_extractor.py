@@ -1,4 +1,4 @@
-"""Tests for MemoryExtractor — writes to CONTEXT.md."""
+"""Tests for MemoryExtractor — writes persistent memory."""
 
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def _make_extractor(mgr: MemoryManager, response_text: str, **kwargs) -> MemoryE
     return MemoryExtractor(llm=llm, memory_manager=mgr, **kwargs)
 
 
-# ── Extraction → CONTEXT.md ──────────────────────────────────
+# ── Extraction → persistent memory ───────────────────────────
 
 
 async def test_extract_additions(mgr: MemoryManager):
@@ -58,6 +58,47 @@ async def test_extract_additions(mgr: MemoryManager):
     assert "prefers Python" in ctx
     # Core untouched
     assert mgr.read_core() == ""
+
+
+async def test_extract_core_additions_write_memory_md(mgr: MemoryManager):
+    """Explicit user profile/default facts can go directly to core memory."""
+    from box_agent.schema import Message
+
+    extractor = _make_extractor(
+        mgr,
+        '{"core_additions": ["- User\\u0027s default city for local queries is Beijing"], '
+        '"additions": [], "merges": []}',
+    )
+    messages = [
+        Message(role="user", content="今天天气怎么样"),
+        Message(role="assistant", content="你想查哪个城市的天气？"),
+        Message(role="user", content="我在北京"),
+    ]
+
+    result = await extractor.maybe_extract(messages, "loop_end")
+
+    assert result is True
+    assert "default city for local queries is Beijing" in mgr.read_core()
+    assert mgr.read_context() == ""
+
+
+async def test_extract_core_additions_dedup_and_filter_context_duplicate(mgr: MemoryManager):
+    """Core additions are deduped and duplicate context additions are skipped."""
+    from box_agent.schema import Message
+
+    mgr.write_core("- User's default city for local queries is Beijing")
+    extractor = _make_extractor(
+        mgr,
+        '{"core_additions": ["- User\\u0027s default city for local queries is Beijing"], '
+        '"additions": [{"text": "- User\\u0027s default city for local queries is Beijing", "topic": "user_profile"}], '
+        '"merges": []}',
+    )
+    messages = [Message(role="user", content="我在北京")]
+
+    await extractor.maybe_extract(messages, "loop_end")
+
+    assert mgr.read_core().count("default city for local queries is Beijing") == 1
+    assert mgr.read_context() == ""
 
 
 async def test_extract_merges(mgr: MemoryManager):
@@ -127,8 +168,8 @@ async def test_extract_additions_dedup_against_context(mgr: MemoryManager):
     assert "weekly report format" in ctx
 
 
-async def test_extract_does_not_touch_core(mgr: MemoryManager):
-    """Extraction only modifies CONTEXT.md, not MEMORY.md."""
+async def test_context_only_extraction_does_not_touch_core(mgr: MemoryManager):
+    """Context-only additions do not modify MEMORY.md."""
     from box_agent.schema import Message
 
     mgr.write_core("- user wrote this manually")

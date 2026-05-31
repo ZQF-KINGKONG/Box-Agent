@@ -1,0 +1,92 @@
+from types import SimpleNamespace
+
+import pytest
+
+from box_agent.acp import BoxACPAgent
+from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.experts import ExpertSessionContext
+from box_agent.schema import LLMResponse, StreamEvent
+
+
+class DoneLLM:
+    async def generate_stream(self, messages, tools=None, **_):
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class DummyConn:
+    def __init__(self):
+        self.updates = []
+
+    async def sessionUpdate(self, payload):
+        self.updates.append(payload)
+
+
+def test_expert_session_context_parses_camel_and_snake_case() -> None:
+    ctx = ExpertSessionContext.from_meta(
+        {
+            "expert": {
+                "id": "researcher",
+                "name": "行业研究员",
+                "role": "拆解行业问题",
+                "defaultSkills": ["web-research", "pptx"],
+                "outputFormat": "先给结论，再给证据。",
+            },
+            "expertTeam": {
+                "id": "industry-report",
+                "name": "行业研究专家团",
+                "executionMode": "orchestrated",
+                "members": [
+                    {"id": "researcher", "name": "研究员", "default_skills": ["web-research"]},
+                    {"id": "analyst", "name": "分析师", "role": "数据核验"},
+                ],
+                "reviewRules": ["结论必须有证据支撑"],
+            },
+        }
+    )
+
+    assert ctx is not None
+    rendered = ctx.render_prompt()
+    assert "行业研究员" in rendered
+    assert "web-research, pptx" in rendered
+    assert "行业研究专家团" in rendered
+    assert "Execution mode: orchestrated" in rendered
+    assert "Mandatory orchestration protocol" in rendered
+    assert "Leader framing" in rendered
+    assert "Review panel" in rendered
+    assert "结论必须有证据支撑" in rendered
+    assert ctx.to_metadata()["expert_team"]["execution_mode"] == "orchestrated"
+
+
+@pytest.mark.asyncio
+async def test_acp_session_injects_expert_prompt_and_returns_meta(tmp_path) -> None:
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_mcp=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "base system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={
+                "session_mode": "general",
+                "expert": {
+                    "id": "ppt-designer",
+                    "name": "PPT 设计师",
+                    "instructions": ["先统一结构，再做页面表达"],
+                    "defaultSkills": ["pptx"],
+                },
+            },
+        )
+    )
+
+    state = agent._sessions[session.sessionId]
+    assert "## Expert Profile" in state.agent.system_prompt
+    assert "PPT 设计师" in state.agent.system_prompt
+    assert "先统一结构" in state.agent.system_prompt
+    assert session.field_meta["expert_context"]["expert"]["id"] == "ppt-designer"

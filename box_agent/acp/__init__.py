@@ -81,6 +81,7 @@ from box_agent.events import (
     InjectedMessageEvent,
     LLMOutputEvent,
     MemoryProposalEvent,
+    ProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -97,6 +98,7 @@ from box_agent.acp.action_hints import (
     is_playwright_unavailable,
 )
 from box_agent.acp.env_context import EnvContext, build_env_context_prompt
+from box_agent.experts import ExpertSessionContext
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
 from box_agent.schema import LLMProvider, Message
@@ -208,6 +210,7 @@ class SessionState:
     env_context: "EnvContext | None" = None  # cached env_context, re-applied when mode switches
     skill_runtime_context: "SkillRuntimeContext | None" = None
     skill_selector: Any | None = None  # SkillSelector — filters skill metadata per turn
+    expert_context: ExpertSessionContext | None = None
 
 
 class BoxACPAgent:
@@ -329,13 +332,22 @@ class BoxACPAgent:
         session_mode = None
         deep_think = False
         env_context: EnvContext | None = None
+        expert_context: ExpertSessionContext | None = None
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             session_mode = meta.get("session_mode")
             deep_think = bool(meta.get("deep_think", False))
             env_context = EnvContext.from_meta(meta.get("env_context"))
+            expert_context = ExpertSessionContext.from_meta(meta)
 
-        log.info("session/new", session_id=session_id, message=f"Creating session, workspace={workspace}, session_mode={session_mode}, deep_think={deep_think}")
+        log.info(
+            "session/new",
+            session_id=session_id,
+            message=(
+                f"Creating session, workspace={workspace}, session_mode={session_mode}, "
+                f"deep_think={deep_think}, expert={expert_context.to_metadata() if expert_context else None}"
+            ),
+        )
 
         # Build PermissionEngine via policy composition if officev3 block is configured
         perm_engine = None
@@ -420,6 +432,7 @@ class BoxACPAgent:
             policy=effective_policy,
             env_context=env_context,
             skill_runtime_context=skill_runtime_context,
+            expert_context=expert_context,
         )
 
         # Inject memory context
@@ -486,6 +499,7 @@ class BoxACPAgent:
             thinking_enabled=deep_think,
             env_context=env_context,
             skill_runtime_context=skill_runtime_context,
+            expert_context=expert_context,
         )
 
         # Skill selector: per-turn keyword-based filter on the skill catalog.
@@ -495,6 +509,12 @@ class BoxACPAgent:
             from box_agent.tools.skill_loader import SkillSelector
             selector = SkillSelector(self._skill_loader)
             selector.bind(agent.messages[0].content)
+            if expert_context:
+                expert_skill_prompt = selector.update(expert_context.skill_query())
+                if expert_skill_prompt is not None:
+                    agent.system_prompt = expert_skill_prompt
+                    if agent.messages and agent.messages[0].role == "system":
+                        agent.messages[0] = Message(role="system", content=expert_skill_prompt)
             self._sessions[session_id].skill_selector = selector
 
         tool_names = [t.name for t in tools]
@@ -505,6 +525,8 @@ class BoxACPAgent:
         skills = self._skills_meta()
         if skills is not None:
             response_meta["skills"] = skills
+        if expert_context is not None:
+            response_meta["expert_context"] = expert_context.to_metadata()
         if response_meta:
             kwargs["field_meta"] = response_meta
         return NewSessionResponse(**kwargs)
@@ -583,6 +605,7 @@ class BoxACPAgent:
         policy: CapabilityPolicy | None = None,
         env_context: EnvContext | None = None,
         skill_runtime_context: SkillRuntimeContext | None = None,
+        expert_context: ExpertSessionContext | None = None,
     ) -> str:
         """Build system prompt with conditional mode-specific injection."""
         _MODE_PROMPT_MAP = {
@@ -608,19 +631,20 @@ class BoxACPAgent:
             base_prompt = f"{base_prompt.rstrip()}\n\n{hints_prompt}"
 
         attr = _MODE_PROMPT_MAP.get(session_mode or "")
-        if not attr:
-            return base_prompt
+        if attr:
+            prompt_filename = getattr(self._config.agent, attr, None)
+            if prompt_filename:
+                mode_path = Config.find_config_file(prompt_filename)
+                if mode_path and mode_path.exists():
+                    mode_prompt = mode_path.read_text(encoding="utf-8").strip()
+                    base_prompt = f"{base_prompt.rstrip()}\n\n{mode_prompt}"
+                else:
+                    log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
 
-        prompt_filename = getattr(self._config.agent, attr, None)
-        if not prompt_filename:
-            return base_prompt
-
-        mode_path = Config.find_config_file(prompt_filename)
-        if mode_path and mode_path.exists():
-            mode_prompt = mode_path.read_text(encoding="utf-8").strip()
-            return f"{base_prompt.rstrip()}\n\n{mode_prompt}"
-
-        log.warn("session/prompt", message=f"Mode prompt not found: {prompt_filename}")
+        if expert_context:
+            expert_prompt = expert_context.render_prompt()
+            if expert_prompt:
+                base_prompt = f"{base_prompt.rstrip()}\n\n{expert_prompt}"
         return base_prompt
 
     def _apply_session_mode(self, state: SessionState, mode: str | None) -> None:
@@ -644,6 +668,7 @@ class BoxACPAgent:
             policy=state.permission_engine.policy if state.permission_engine else None,
             env_context=state.env_context,
             skill_runtime_context=state.skill_runtime_context,
+            expert_context=state.expert_context,
         )
         if state.memory_block:
             new_prompt = f"{new_prompt.rstrip()}\n\n{state.memory_block}"
@@ -1198,6 +1223,18 @@ class BoxACPAgent:
                         log.debug("content", session_id=session_id, content=text)
                         await self._send(session_id, update_agent_message(text_block(text)))
 
+                    case ProgressEvent(step=s, content=text):
+                        payload = {
+                            "type": "agent_progress",
+                            "step": s,
+                            "content": text,
+                        }
+                        log.debug("progress", session_id=session_id, step=s, content=text)
+                        await self._send(
+                            session_id,
+                            update_tool_call(f"agent-progress-{s}", raw_output=payload),
+                        )
+
                     case LLMOutputEvent(
                         step=s,
                         content=content,
@@ -1337,6 +1374,10 @@ class BoxACPAgent:
                             case ErrorEvent(message=msg):
                                 progress["event"] = "error"
                                 progress["message"] = msg
+                            case ProgressEvent(step=s, content=content):
+                                progress["event"] = "agent_progress"
+                                progress["step"] = s
+                                progress["content"] = content
                             case LLMOutputEvent(
                                 step=s,
                                 content=content,

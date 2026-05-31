@@ -444,6 +444,30 @@ async def test_compact_rejected_flag_propagates(memory_dir):
 
 
 @pytest.mark.asyncio
+async def test_compact_preserves_single_topic_bucket(memory_dir):
+    import json as _json
+
+    mgr = MemoryManager(memory_dir=str(memory_dir))
+    a = _new_entry("- PPT style prefers dark editorial", topic="preferences")
+    b = _new_entry("- PPT style prefers sports magazine visuals", topic="preferences")
+    mgr.write_all_context_entries([a, b, _new_entry("- project detail", topic="project")])
+
+    canned = _json.dumps([
+        {
+            "content": "- PPT style prefers dark sports magazine visuals",
+            "hits": 0,
+            "sources": [a.id, b.id],
+        },
+    ])
+    m = MemoryMaintainer(mgr, _maint_cfg(memory_context_max_entries=1), llm=FakeCompactLLM(canned))
+
+    await m._compact(datetime.now(timezone.utc))
+
+    assert "sports magazine" in mgr.read_context_topic("preferences")
+    assert "sports magazine" not in mgr.read_context_topic("general")
+
+
+@pytest.mark.asyncio
 async def test_compact_invalid_json_keeps_original(memory_dir):
     mgr = MemoryManager(memory_dir=str(memory_dir))
     entries = [_new_entry(f"- entry {i}") for i in range(5)]

@@ -38,6 +38,7 @@ This repository includes a diverse collection of example skills demonstrating di
 ## Enterprise & Communication
 - **brand-guidelines** - Apply Anthropic's official brand colors and typography to artifacts
 - **internal-comms** - Write internal communications like status reports, newsletters, and FAQs
+- **research-synthesis** - Structure industry research, market scans, competitive briefs, and deep summaries into evidence-backed reports
 - **theme-factory** - Style artifacts with 10 pre-set professional themes or generate custom themes on-the-fly
 
 ## Meta Skills

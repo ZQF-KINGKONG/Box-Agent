@@ -254,6 +254,23 @@ copy, and the HTML should add a controlled overlay when needed. Do not use
 complex generated backgrounds behind dense body text, data labels, charts, or
 tables.
 
+The text-safe area must come from a slide layout contract, not from a vague
+visual preference. For generated full-slide/background slides, first choose the
+slide layout in the fixed `1920x1080` coordinate system, then record title,
+body, chart, and page-number boxes in `assets/generated/manifest.json` as
+`layout_contract.text_regions`. Use those same coordinates in the final HTML.
+The generated-image prompt then derives its composition from the remaining
+visual-focus regions. If the text boxes move after drafting HTML, update the
+manifest and revise/regenerate the image plan. Small or medium generated hero
+images in fixed frames do not require this contract unless they sit behind or
+overlap text.
+
+Every text-bearing HTML element covered by the contract must carry
+`data-layout-region="<region name>"`, where the name matches the corresponding
+`layout_contract.text_regions[].name`. Before HTML self-check, run
+`scripts/validate_image_layout_contract.js deck.html assets/generated/manifest.json`
+and fix any coordinate drift.
+
 For content slides, prefer:
 
 - no generated image

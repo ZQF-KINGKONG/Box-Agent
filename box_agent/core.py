@@ -37,6 +37,7 @@ from .events import (
     MemoryProposalEvent,
     MemoryPromotionCandidate,
     PermissionRequestEvent,
+    ProgressEvent,
     StepEnd,
     StepStart,
     StopReason,
@@ -946,6 +947,18 @@ def _cleanup_incomplete_messages(messages: list[Message]) -> int:
 # ── Main loop ───────────────────────────────────────────────────
 
 
+def _format_injected_message(text: str) -> str:
+    """Wrap mid-stream user input so it steers the active task."""
+    return (
+        "The user sent the following message while the current task was already running.\n"
+        "Treat it as mid-turn guidance, a constraint, or a clarification for the current task, "
+        "not as a new standalone task.\n"
+        "If it asks a question, answer it briefly if useful, then continue the original task. "
+        "Do not stop or switch tasks unless the user explicitly asks you to stop, cancel, or change the task.\n\n"
+        f"Mid-turn user message:\n{text}"
+    )
+
+
 async def run_agent_loop(
     *,
     llm,
@@ -1139,7 +1152,9 @@ async def run_agent_loop(
                     injected_text = str(injected_item)
                 if not injected_text:
                     continue
-                messages.append(Message(role="user", content=injected_text))
+                messages.append(
+                    Message(role="user", content=_format_injected_message(injected_text))
+                )
                 yield InjectedMessageEvent(content=injected_text, injection_id=injection_id)
 
         # ── Micro-compact (Layer 1) ────────────────────────
@@ -1172,12 +1187,17 @@ async def run_agent_loop(
             set_llm_debug_sink(logger.log_llm_debug_record) if logger else None
         )
         try:
-            # Stream thinking/text deltas, accumulate for final response
+            # Stream thinking deltas immediately. For visible text, keep a
+            # small leading buffer so short pre-tool-call prose can be
+            # reclassified as progress after the finish event, while ordinary
+            # long answers still feel live instead of waiting for the full LLM
+            # response to complete.
+            visible_text_stream_threshold = 240
             text_content = ""
             thinking_content = ""
             finish_event: StreamEvent | None = None
             thinking_header_yielded = False
-            content_header_yielded = False
+            text_stream_started = False
 
             async for chunk in llm.generate_stream(
                 messages=messages, tools=tool_list, thinking_enabled=thinking_enabled
@@ -1191,11 +1211,12 @@ async def run_agent_loop(
                     thinking_content += chunk.delta
                     yield ThinkingEvent(content=chunk.delta, _streaming=True)
                 elif chunk.type == "text":
-                    if not content_header_yielded:
-                        yield ContentEvent(content="", _streaming=True, _header=True)
-                        content_header_yielded = True
                     text_content += chunk.delta
-                    yield ContentEvent(content=chunk.delta, _streaming=True)
+                    if text_stream_started:
+                        yield ContentEvent(content=chunk.delta, _streaming=True)
+                    elif len(text_content) >= visible_text_stream_threshold:
+                        text_stream_started = True
+                        yield ContentEvent(content=text_content, _streaming=True)
                 elif chunk.type == "finish":
                     finish_event = chunk
 
@@ -1224,6 +1245,12 @@ async def run_agent_loop(
                 usage=finish_event.usage,
                 truncated_tool_calls=finish_event.truncated_tool_calls,
             )
+            if response.content:
+                if response.tool_calls:
+                    if not text_stream_started:
+                        yield ProgressEvent(step=step + 1, content=response.content)
+                elif not text_stream_started:
+                    yield ContentEvent(content=response.content)
             provider_request_id = finish_event.provider_request_id
             yield LLMOutputEvent(
                 step=step + 1,

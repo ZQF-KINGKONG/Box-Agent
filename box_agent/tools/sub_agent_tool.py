@@ -19,6 +19,7 @@ from ..events import (
     DoneEvent,
     ErrorEvent,
     LLMOutputEvent,
+    ProgressEvent,
     StepStart,
     SubAgentEvent,
     ToolCallResult,
@@ -126,6 +127,7 @@ class SubAgentTool(EventEmittingTool):
     # Event types worth surfacing to the parent.
     _FORWARD_TYPES = (
         StepStart,
+        ProgressEvent,
         LLMOutputEvent,
         ToolCallStart,
         ToolCallResult,

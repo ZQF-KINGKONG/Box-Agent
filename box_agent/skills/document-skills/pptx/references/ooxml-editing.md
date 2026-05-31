@@ -26,6 +26,7 @@ Use direct OOXML editing only when normal libraries cannot preserve or express t
   - `ppt/_rels/presentation.xml.rels`
   - `[Content_Types].xml`
   - any slide relationships and referenced media/chart/notes parts
+- Never emit negative geometry extents for line-like shapes. Normalize start/end coordinates first and write non-negative `a:off`/`a:ext` dimensions (`w = abs(x2-x1)`, `h = abs(y2-y1)`, `x = min(x1,x2)`, `y = min(y1,y2)`).
 - Relationship IDs are local to the `.rels` file that contains them. Do not assume `rId5` has the same meaning in another file.
 - Remove unused media and chart parts only after confirming no remaining `.rels` file references them.
 - Treat notes and comments as user content. Preserve them unless deletion is requested.

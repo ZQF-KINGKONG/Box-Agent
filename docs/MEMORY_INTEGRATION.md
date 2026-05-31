@@ -1,11 +1,11 @@
 # Memory System Integration Guide
 
-Box-Agent provides persistent cross-session memory with two markdown files:
+Box-Agent provides persistent cross-session memory with core memory plus topic-sharded context memory:
 
 | Type | Purpose | Recall behavior | Storage |
 |------|---------|-----------------|---------|
-| **Core memory** | User identity, explicit preferences, durable behavioral rules | Automatically injected into the system prompt at session start | `~/.box-agent/memory/MEMORY.md` |
-| **Context memory** | Project context, task templates, historical notes, decisions, deadlines | Searchable on demand via `memory_search`; not automatically injected | `~/.box-agent/memory/CONTEXT.md` |
+| **Core memory** | User identity, explicit preferences, local defaults, durable behavioral rules | Automatically injected into the system prompt at session start | `~/.box-agent/memory/MEMORY.md` |
+| **Context memory** | Project context, task templates, historical notes, decisions, deadlines | Topic-routed search on demand via `memory_search`; not automatically injected | `~/.box-agent/memory/context/<topic>.md` |
 
 This split keeps high-signal user facts always available while preventing project/history notes from bloating every prompt.
 
@@ -19,7 +19,7 @@ Add these values to `config.yaml` if you need to override the defaults:
 enable_memory: true                    # Enable memory tools and startup core recall
 memory_dir: "~/.box-agent/memory"      # Memory storage directory
 
-enable_memory_extraction: true         # Auto-extract useful context from agent lifecycle points
+enable_memory_extraction: true         # Auto-extract useful memory from agent lifecycle points
 memory_extraction_cooldown: 300        # Seconds between extraction attempts
 memory_extraction_step_interval: 10    # Extract every N agent steps
 ```
@@ -48,6 +48,7 @@ Set `enable_memory: false` to disable the memory manager and memory tools.
 | `content` | string | Yes | Markdown bullet-style memory content |
 | `category` | `core` or `context` | No | `core` for explicit user identity/preferences/rules; `context` for project/task history. Default: `core` |
 | `mode` | `append` or `overwrite` | No | `append` merges/appends; `overwrite` replaces the target file |
+| `topic` | string | No | Context bucket when `category="context"`, for example `preferences`, `project`, `feedback`, or `general` |
 
 #### Core writes
 
@@ -58,16 +59,17 @@ Use core only when the user explicitly states durable personal information or pr
 ```text
 - User prefers concise Chinese responses
 - User is a product manager in the data platform team
+- 用户用于本地查询的默认城市是北京
 - Do not add emoji in final answers
 ```
 
 #### Context writes
 
-`category="context"` writes to `CONTEXT.md`.
+`category="context"` writes to topic-sharded context memory under `context/<topic>.md`.
 
 When an LLM client is available, append-mode context writes are model-merged with existing memory:
 
-1. Box-Agent sends the candidate memory plus current `MEMORY.md` and `CONTEXT.md` to the LLM.
+1. Box-Agent sends the candidate memory plus current `MEMORY.md` and context memory to the LLM.
 2. The LLM returns a structured operation plan: `add`, `replace`, `drop`, or `noop`.
 3. Code applies the plan safely:
    - `replace` and `drop` require an exact full-line match.
@@ -85,7 +87,7 @@ When no LLM is available, context writes use append-with-dedup directly.
 }
 ```
 
-Returns both `MEMORY.md` and `CONTEXT.md` when present.
+Returns both `MEMORY.md` and context memory when present.
 
 ### `memory_search` — search context memory
 
@@ -98,7 +100,7 @@ Returns both `MEMORY.md` and `CONTEXT.md` when present.
 }
 ```
 
-Search is a case-insensitive line-level keyword search over `CONTEXT.md`. Core memory is already present in the prompt, so `memory_search` only searches context memory.
+Search is a case-insensitive keyword search over context entries. When `topic` is omitted, Box-Agent first uses the topic sidecar index (`context/_index.json`) to route the query to likely topic files, then falls back to all topics if the routed search finds nothing. Core memory is already present in the prompt, so `memory_search` only searches context memory.
 
 ---
 
@@ -108,13 +110,13 @@ No additional integration code is needed. When `enable_memory: true`:
 
 - **Startup**: `MEMORY.md` is recalled and injected into the system prompt if non-empty.
 - **During a session**: the agent can call `memory_write`, `memory_read`, and `memory_search`.
-- **Lifecycle extraction**: when `enable_memory_extraction: true`, the agent loop periodically asks the LLM to extract cross-session-useful context and writes it to `CONTEXT.md`.
+- **Lifecycle extraction**: when `enable_memory_extraction: true`, the agent loop periodically asks the LLM to extract cross-session-useful memory. Explicit user profile/preferences/local defaults can go to core; project and task history go to topic-sharded context memory.
 
 Manual editing is also possible:
 
 ```bash
 vim ~/.box-agent/memory/MEMORY.md
-vim ~/.box-agent/memory/CONTEXT.md
+vim ~/.box-agent/memory/context/preferences.md
 ```
 
 ---
@@ -171,7 +173,7 @@ Format:
 --- MEMORY END ---
 ```
 
-`CONTEXT.md` is not injected automatically; use `memory_search` when the agent needs project/task context.
+Context memory is not injected automatically; use `memory_search` when the agent needs project/task context.
 
 ---
 
@@ -180,15 +182,19 @@ Format:
 ```text
 ~/.box-agent/memory/
 ├── MEMORY.md          # Core memory, always recalled at session start
-├── CONTEXT.md         # Searchable context memory
+├── context/           # Searchable context memory by topic
+│   ├── _index.json    # Topic routing index
+│   ├── general.md
+│   ├── preferences.md
+│   └── project.md
 └── .openclaw_imported # Marker for one-time OpenClaw import, when applicable
 ```
 
-`MEMORY.md` and `CONTEXT.md` are plain UTF-8 markdown files. Bullet points are recommended because model merge and line-level safety checks operate on full lines.
+`MEMORY.md` and topic files under `context/` are plain UTF-8 markdown files. Bullet points are recommended because model merge and line-level safety checks operate on full lines.
 
 ---
 
-## 6. Automatic context extraction
+## 6. Automatic memory extraction
 
 When `enable_memory_extraction` is enabled, `MemoryExtractor` analyzes recent conversation at lifecycle points:
 
@@ -196,7 +202,9 @@ When `enable_memory_extraction` is enabled, `MemoryExtractor` analyzes recent co
 - every configured step interval (`step_interval`)
 - at loop end (`loop_end`)
 
-The extractor writes only to `CONTEXT.md`; it does not write to `MEMORY.md`. This prevents inferred or task-derived information from polluting core user memory.
+The extractor can write explicit user-stated profile facts, preferences, and local defaults to `MEMORY.md`. For example, if the user says they are in Beijing while asking for weather, the extractor should save a cautious default such as `- 用户用于本地查询的默认城市是北京`, not infer a permanent residence.
+
+Project context, task patterns, historical notes, decisions, deadlines, and behavioral feedback still go to topic-sharded context memory. This keeps one-off task details out of core memory.
 
 ---
 
@@ -225,8 +233,8 @@ mgr.append_core("- 用户偏好中文")
 print(mgr.read_core())
 
 # Context memory
-mgr.append_context("- Weekly report format: progress/issues/next week")
-print(mgr.search("weekly report"))
+mgr.append_context("- Weekly report format: progress/issues/next week", topic="preferences")
+print(mgr.search("weekly report", topic="preferences"))
 
 # Startup recall block for system prompt injection
 block = mgr.recall()

@@ -363,8 +363,7 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
             return
 
         # Backup before overwrite — dump every topic file we currently have.
-        from datetime import datetime as _dt
-        trash_dir = self._mgr.trash_dir / _dt.now().strftime("%Y-%m-%d") / "compact"
+        trash_dir = self._mgr.trash_dir / now.strftime("%Y-%m-%d") / "compact"
         try:
             trash_dir.mkdir(parents=True, exist_ok=True)
             stamp = _now_iso_stamp()
@@ -379,14 +378,17 @@ class MemoryMaintainer_Compact:  # placeholder so the file parses; will be inlin
             return
 
         # Build new entries — preserve oldest created + most-recent last_used + max confidence
-        # from source entries; assign fresh ids. Compacted entries collapse to the
-        # default topic since the LLM merges across topic boundaries.
+        # from source entries; assign fresh ids. If a compacted entry only
+        # consumes one topic, keep it in that topic so topic-routed retrieval
+        # remains useful. Mixed-topic merges fall back to "general".
         from .memory import _new_entry as _make_entry
         by_id = {e.id: e for e in entries}
         new_entries: list[ContextEntry] = []
         for item in parsed:
             sources = [by_id[sid] for sid in item["sources"]]
-            new = _make_entry(item["content"], source="compact")
+            source_topics = {s.topic or "general" for s in sources}
+            topic = next(iter(source_topics)) if len(source_topics) == 1 else "general"
+            new = _make_entry(item["content"], source="compact", topic=topic)
             new.hits = item["hits"]
             new.created = min(s.created for s in sources)
             new.last_used = max(s.last_used for s in sources)

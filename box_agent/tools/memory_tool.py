@@ -1,8 +1,8 @@
 """Memory tools — read, write, and search long-term memory.
 
 Provides persistent cross-session memory that survives beyond individual
-sessions.  Core memory (MEMORY.md) is always injected; context memory
-(CONTEXT.md) is searchable on demand.
+sessions.  Core memory (MEMORY.md) is always injected; topic-sharded context
+memory is searchable on demand.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ class MemoryReadTool(Tool):
             if core:
                 parts.append(f"[Core Memory (MEMORY.md)]\n{core}")
             if context:
-                parts.append(f"[Context Memory (CONTEXT.md)]\n{context}")
+                parts.append(f"[Context Memory]\n{context}")
             return ToolResult(success=True, content="\n\n".join(parts))
         except Exception as e:
             return ToolResult(success=False, content="", error=f"Failed to read memory: {e}")
@@ -161,7 +161,7 @@ class MemorySearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search context memory (CONTEXT.md) by keyword. Use this to find "
+            "Search topic-sharded context memory by keyword. Use this to find "
             "project context, task patterns, or historical notes. Core memory "
             "is always available — use this for everything else."
         )
@@ -175,29 +175,41 @@ class MemorySearchTool(Tool):
                     "type": "string",
                     "description": "Keyword to search for (case-insensitive).",
                 },
+                "topic": {
+                    "type": "string",
+                    "description": (
+                        "Optional context topic to search, e.g. 'preferences', "
+                        "'project', 'feedback', or 'general'. If omitted, the "
+                        "memory index routes the query to relevant topics first."
+                    ),
+                },
             },
             "required": ["query"],
         }
 
-    async def execute(self, query: str) -> ToolResult:
+    async def execute(self, query: str, topic: str | None = None) -> ToolResult:
         try:
-            results = self._mgr.search(query)
+            results = self._mgr.search(query, topic=topic)
             if not results:
+                topic_suffix = f" in topic '{topic}'" if topic else ""
                 return ToolResult(
                     success=True,
-                    content=f"No matching memories found for '{query}'.",
+                    content=f"No matching memories found for '{query}'{topic_suffix}.",
                     raw_output={
                         "type": "memory_search",
                         "query": query,
+                        **({"topic": topic} if topic else {}),
                         "matched_memories": [],
                     },
                 )
+            topic_suffix = f" in topic '{topic}'" if topic else ""
             return ToolResult(
                 success=True,
-                content=f"Found {len(results)} match(es) for '{query}':\n" + "\n".join(results),
+                content=f"Found {len(results)} match(es) for '{query}'{topic_suffix}:\n" + "\n".join(results),
                 raw_output={
                     "type": "memory_search",
                     "query": query,
+                    **({"topic": topic} if topic else {}),
                     "matched_memories": [
                         {
                             "id": f"context:{index}",

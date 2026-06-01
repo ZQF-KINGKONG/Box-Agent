@@ -20,6 +20,7 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable.
 7. `.slide` must be exactly `1920px × 1080px`. **NEVER** pass `--width` / `--height` to `html_self_check.js` or `html_to_editable_pptx.js`; the scripts auto-detect from the `.slide` CSS. Mismatched dimensions are a hard failure, not a fixable warning.
 9. **Never re-serialize a whole multi-slide deck through a single `write_file` call.** Writing every slide's HTML in one tool call routinely overruns the provider output-token limit and the call is truncated mid-stream (`finish_reason=length`), losing the entire turn. For decks of 6+ slides, author per-range fragment files and merge them (see §3.4). When you already hold sub-agent drafts, the orchestrator merges them with `merge_html_fragments.js` — it must not paste their combined content back into one `write_file`.
 10. Any PPTX line geometry written by direct generation paths (`PptxGenJS` / OOXML / python-pptx / other direct generators, i.e., not `dom-to-pptx` HTML export) must avoid negative width/height. Normalize line geometry from start/end coordinates (`x1`,`y1`,`x2`,`y2`) into non-negative geometry before writing geometry boxes: `x=min(x1,x2)`, `y=min(y1,y2)`, `w=abs(x2-x1)`, `h=abs(y2-y1)`.
+11. When the task declares `creative_image_mode`, successful image generation is mandatory: at least one `generate_image` call must complete and the generated asset must be referenced in `assets/generated/manifest.json`. If `generate_image` is unavailable or every call fails, mark the deck as blocked and do not present the PPT as completed.
 
 ## 1. Route Decision
 
@@ -33,10 +34,24 @@ Use this path by default:
 4. for data charts, keep the source dataset/chart spec and use ECharts only as an HTML preview; final PPT must preserve chart data through native PowerPoint chart/table output, not through screenshots
 5. create the slide HTML using the Visual DNA profile and generated local assets as hard constraints. For decks with **6 or more slides** (or dense source material / likely-large HTML), you **must** use the fragment-drafting workflow in §3.4 — author per-range draft files and combine them with `merge_html_fragments.js`. Smaller decks may write `deck.html` directly in one pass.
 6. when `assets/generated/manifest.json` contains `layout_contract`, run image layout contract validation
-7. run HTML self-check
-8. export with `scripts/html_to_editable_pptx.js`
-9. run structural QA (package validation, text extraction, placeholder scan)
-10. render and inspect only if §4.2 triggers apply
+7. when `assets/generated/manifest.json` declares `creative_image_mode`, run image manifest validation before HTML self-check
+8. run HTML self-check
+9. export with `scripts/html_to_editable_pptx.js`
+10. run structural QA (package validation, text extraction, placeholder scan)
+11. render and inspect only if §4.2 triggers apply
+
+### `creative_image_mode`
+
+This mode is activated when the user explicitly asks for a creative/image-rich PPT, when an upstream expert/team instruction says `creative_image_mode`, or when the "Creative PPT / image-generation PPT" expert/team is selected.
+
+Mode contract:
+
+1. Treat the user input as a PPT creation brief even if it is only a short topic such as "茉莉花茶制作过程".
+2. The deck must include generated bitmap visuals. At minimum, the cover must use `decision: "generate"` and a successful `generate_image` output under `assets/generated/`.
+3. Prefer `generate` for cover, section divider, process hero, atmosphere/scene, poster-like, and closing slides. Dense data/table/process detail slides may use editable HTML/CSS/SVG, but they do not satisfy the mandatory generated-image requirement unless at least one other slide generated an asset.
+4. If using full-slide or background generated images, create `layout_contract` before writing the prompt and keep text regions calm, low-detail, and low-contrast.
+5. If `generate_image` is not configured or fails for all required images, stop before claiming completion. Return `BLOCKED: creative_image_mode requires generated images`, include the failure reason, the image plan, and any draft HTML/outline paths. Do not silently downgrade to a normal text-only PPT or a pure HTML-shape deck.
+6. Final delivery must list generated asset paths and the manifest path. If there are zero successful generated assets, the final status is blocked, not completed.
 
 If browser host preflight blocks HTML export, ask the user to choose one route:
 
@@ -70,6 +85,7 @@ Do not switch routes based on convenience.
 | Extract text | `${BOX_AGENT_PYTHON:-python3} scripts/extract_text.py input.pptx` |
 | Validate package | `${BOX_AGENT_PYTHON:-python3} scripts/validate_pptx_package.py input.pptx` |
 | Render PPTX | `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py input.pptx --out rendered` |
+| Validate image manifest | `${BOX_AGENT_NODE:-node} scripts/validate_image_manifest.js assets/generated/manifest.json --mode creative_image_mode --min-generated 1 --report qa/image_manifest.json` |
 | Validate image layout contract | `${BOX_AGENT_NODE:-node} scripts/validate_image_layout_contract.js deck.html assets/generated/manifest.json --report qa/image_layout_contract.json` |
 | HTML self-check | `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` ⚠️ 不要追加 `--width/--height` |
 | Export HTML | `${BOX_AGENT_NODE:-node} scripts/html_to_editable_pptx.js deck.html output.pptx` ⚠️ 不要追加 `--width/--height` |
@@ -106,6 +122,7 @@ If `html-templates` is unavailable in this session, fall back to authoring the d
 9. Read `references/html-first.md` and `references/html-editable.md`.
 10. Keep image generation rules in `references/image-assets.md`.
 11. For generated full-slide/background slides, text-bearing HTML elements that correspond to `layout_contract.text_regions` must carry `data-layout-region="<region name>"`, and `scripts/validate_image_layout_contract.js` must pass before HTML self-check. Small/medium hero images in fixed frames do not require this contract unless they overlap text-safe areas.
+12. In `creative_image_mode`, `assets/generated/manifest.json` must include `"mode": "creative_image_mode"` and at least one image-plan entry with `decision: "generate"`, `status: "generated"` (or equivalent success marker), and an existing `output_path`.
 
 ### 3.2 Data charts and ECharts previews
 

@@ -1,5 +1,18 @@
 # Image and manifest policy
 
+## 0. Creative image mode
+
+`creative_image_mode` is the strict image-generation mode used by creative PPT experts or expert teams.
+
+Rules:
+
+1. The manifest must include `"mode": "creative_image_mode"`.
+2. At least one slide, normally the cover, must use `decision: "generate"` and must finish with a real generated file under `assets/generated/`.
+3. A generated image counts only when `generate_image` succeeds, `output_path` exists, and the final HTML/PPT references that asset.
+4. If no generated image succeeds, the deck status is `blocked`; do not mark the PPT as completed and do not replace the required generated asset with `draw_in_html`, `skip`, or a decorative CSS-only visual.
+5. Record failures as `decision: "blocked"` with `reason`, `tool: "generate_image"`, and the attempted prompt/slide role so the user can retry after configuration or service recovery.
+6. Full-slide/background generated images must still follow the `layout_contract` rules below. Fixed-frame hero images may satisfy the mandatory generation requirement without a layout contract if they do not sit behind text.
+
 ## 1. Decision first
 
 1. Every slide must have one explicit `image_plan` entry.
@@ -83,3 +96,4 @@
 1. Store generated files under `assets/generated/`.
 1. Reference files with relative paths inside HTML.
 1. If generation tooling is unavailable, mark appropriate image-plan entries as `blocked` or choose `draw_in_html`; do not silently convert strong `generate` candidates to `skip` just to avoid the missing tool.
+1. In `creative_image_mode`, the previous fallback rule is stricter: if the required generated image is unavailable, the overall deck is blocked even if some slides can be drawn in HTML.

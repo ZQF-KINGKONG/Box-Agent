@@ -1,0 +1,47 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+# Lines below are suggestions — uncomment to activate.
+# Use ! prefix to force-include something excluded by defaults.
+#
+# Built-in defaults (always excluded unless negated):
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js, etc.
+#
+# --- Active exclusions (Box-Agent scope) ---
+
+# Skill asset bundles (374 files: HTML/CSS/JS themes, layouts) — data, not Box-Agent architecture.
+# The skills *system* is captured by box_agent/skill_loader.py; individual bundle internals are noise.
+box_agent/skills/
+
+# Build/graphify/output artifacts and virtualenvs not covered by built-in defaults
+graphify-out/
+workspace/
+.venv-x64/
+.build-python-x64/
+.uv-cache/
+.venv
+.omx/
+.understand-anything/
+
+# Generated / vendored
+*.egg-info/
+*.so
+
+# --- From .gitignore (uncomment to exclude) ---
+
+# config.yaml
+# mcp.json
+# docs/assets/backup/
+# docs/assets/preview.html
+
+# --- Detected directories (uncomment to exclude) ---
+
+tests/
+# docs/
+# examples/
+# scripts/
+
+# --- Test file patterns (uncomment to exclude) ---
+
+# *.test.*
+# *.spec.*
+# *.snap

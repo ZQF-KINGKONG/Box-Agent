@@ -149,7 +149,7 @@ class TestLLMClientIntegration:
 
         client = LLMClient.__new__(LLMClient)
 
-        async def fake_generate(messages, tools, *, thinking_enabled=False):
+        async def fake_generate(messages, tools, *, thinking_enabled=False, session_id="", **_):
             return LLMResponse(
                 content="<think>private reasoning</think>visible answer",
                 thinking=None,
@@ -172,7 +172,7 @@ class TestLLMClientIntegration:
 
         client = LLMClient.__new__(LLMClient)
 
-        async def fake_generate(messages, tools, *, thinking_enabled=False):
+        async def fake_generate(messages, tools, *, thinking_enabled=False, session_id="", **_):
             return LLMResponse(
                 content="<think>extra</think>answer",
                 thinking="provider-native",
@@ -194,7 +194,7 @@ class TestLLMClientIntegration:
 
         client = LLMClient.__new__(LLMClient)
 
-        async def fake_stream(messages, tools, *, thinking_enabled=False):
+        async def fake_stream(messages, tools, *, thinking_enabled=False, session_id="", **_):
             yield StreamEvent(type="text", delta="<think>x</think>hi")
             yield StreamEvent(type="finish", finish_reason="stop")
 

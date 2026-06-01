@@ -211,6 +211,7 @@ class SessionState:
     skill_runtime_context: "SkillRuntimeContext | None" = None
     skill_selector: Any | None = None  # SkillSelector — filters skill metadata per turn
     expert_context: ExpertSessionContext | None = None
+    upstream_session_id: str = ""  # caller-owned session id from _meta.session_id; forwarded as X-RACCOON-Session-ID
 
 
 class BoxACPAgent:
@@ -333,12 +334,20 @@ class BoxACPAgent:
         deep_think = False
         env_context: EnvContext | None = None
         expert_context: ExpertSessionContext | None = None
+        upstream_session_id = ""
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             session_mode = meta.get("session_mode")
             deep_think = bool(meta.get("deep_think", False))
             env_context = EnvContext.from_meta(meta.get("env_context"))
             expert_context = ExpertSessionContext.from_meta(meta)
+            # Caller-owned session id (e.g. officev3 chat session id). Forwarded
+            # verbatim as X-RACCOON-Session-ID so the gateway groups LLM calls
+            # under that Langfuse session. Distinct from the ACP `session_id`
+            # above (``sess-N-xxxx``), which is our own per-connection handle.
+            raw_upstream = meta.get("session_id")
+            if isinstance(raw_upstream, str):
+                upstream_session_id = raw_upstream.strip()
 
         log.info(
             "session/new",
@@ -500,6 +509,7 @@ class BoxACPAgent:
             env_context=env_context,
             skill_runtime_context=skill_runtime_context,
             expert_context=expert_context,
+            upstream_session_id=upstream_session_id,
         )
 
         # Skill selector: per-turn keyword-based filter on the skill catalog.
@@ -1201,6 +1211,7 @@ class BoxACPAgent:
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
             inject_queue=state.inject_queue,
             thinking_enabled=agent.thinking_enabled,
+            session_id=state.upstream_session_id,
         ):
             try:
                 match event:

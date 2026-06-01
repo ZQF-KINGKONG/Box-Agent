@@ -160,12 +160,13 @@ async def test_run_agent_loop_forwards_thinking_flag():
     captured: dict = {}
 
     class _LLM:
-        async def generate_stream(self, *, messages, tools, thinking_enabled=False):
+        async def generate_stream(self, *, messages, tools, thinking_enabled=False, session_id="", **_):
             captured["thinking_enabled"] = thinking_enabled
+            captured["session_id"] = session_id
             yield StreamEvent(type="text", delta="hi")
             yield StreamEvent(type="finish", finish_reason="stop")
 
-        async def generate(self, messages, tools=None, *, thinking_enabled=False):
+        async def generate(self, messages, tools=None, *, thinking_enabled=False, session_id="", **_):
             return SimpleNamespace(content="", thinking=None, tool_calls=None)
 
     events = []

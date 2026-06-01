@@ -65,6 +65,19 @@ class LLMClientBase(ABC):
             url=self.api_base,
         )
 
+    @staticmethod
+    def _session_header(session_id: str = "") -> dict[str, str]:
+        """Return the per-request session header for upstream trace correlation.
+
+        When ``session_id`` is a non-empty string, emit ``X-RACCOON-Session-ID``
+        so the gateway can attach the request to a caller-owned Langfuse session.
+        An empty value yields an empty dict, so the gateway falls back to its
+        default session-creation rule. The value is forwarded verbatim — the
+        client never generates or rewrites it.
+        """
+        sid = (session_id or "").strip()
+        return {"X-RACCOON-Session-ID": sid} if sid else {}
+
     @abstractmethod
     async def generate(
         self,
@@ -72,6 +85,7 @@ class LLMClientBase(ABC):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> LLMResponse:
         """Generate response from LLM.
 
@@ -82,6 +96,10 @@ class LLMClientBase(ABC):
                 provider (Anthropic native, or Qwen-style ``enable_thinking``
                 for OpenAI-compatible endpoints). Silent no-op for providers
                 that don't support it.
+            session_id: Optional caller-owned session id. When non-empty, sent
+                as the ``X-RACCOON-Session-ID`` header so the gateway groups the
+                request under that Langfuse session; empty falls back to the
+                gateway default.
 
         Returns:
             LLMResponse containing the generated content, thinking, and tool calls
@@ -95,6 +113,7 @@ class LLMClientBase(ABC):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from LLM.
 
@@ -105,6 +124,7 @@ class LLMClientBase(ABC):
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
             thinking_enabled: See ``generate()``.
+            session_id: See ``generate()``.
 
         Yields:
             StreamEvent chunks

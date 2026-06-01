@@ -169,7 +169,7 @@ async def test_run_agent_loop_writes_llm_debug_records_to_agent_log(tmp_path, mo
     monkeypatch.setenv("BOX_AGENT_LLM_DEBUG", "1")
 
     class DebugLLM:
-        async def generate_stream(self, *, messages, tools, thinking_enabled=False):
+        async def generate_stream(self, *, messages, tools, thinking_enabled=False, session_id="", **_):
             from box_agent.llm.debug_logging import log_llm_request, log_llm_response_meta
 
             log_llm_request(

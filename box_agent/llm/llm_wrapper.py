@@ -104,6 +104,7 @@ class LLMClient:
         tools: list | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> LLMResponse:
         """Generate response from LLM.
 
@@ -111,11 +112,15 @@ class LLMClient:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
             thinking_enabled: Enable provider-native extended thinking.
+            session_id: Optional caller-owned session id forwarded as the
+                ``X-RACCOON-Session-ID`` header (empty = gateway default).
 
         Returns:
             LLMResponse containing the generated content
         """
-        response = await self._client.generate(messages, tools, thinking_enabled=thinking_enabled)
+        response = await self._client.generate(
+            messages, tools, thinking_enabled=thinking_enabled, session_id=session_id
+        )
         if response.content and "<think>" in response.content:
             cleaned, extracted = split_inline_think(response.content)
             if extracted:
@@ -129,6 +134,7 @@ class LLMClient:
         tools: list | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from LLM.
 
@@ -139,12 +145,14 @@ class LLMClient:
             messages: List of conversation messages
             tools: Optional list of Tool objects or dicts
             thinking_enabled: Enable provider-native extended thinking.
+            session_id: Optional caller-owned session id forwarded as the
+                ``X-RACCOON-Session-ID`` header (empty = gateway default).
 
         Yields:
             StreamEvent chunks
         """
         upstream = self._client.generate_stream(
-            messages, tools, thinking_enabled=thinking_enabled
+            messages, tools, thinking_enabled=thinking_enabled, session_id=session_id
         )
         async for event in unwrap_think_tags(upstream):
             yield event

@@ -43,6 +43,28 @@ def test_expert_session_context_parses_camel_and_snake_case() -> None:
                     {"id": "researcher", "name": "研究员", "default_skills": ["web-research"]},
                     {"id": "analyst", "name": "分析师", "role": "数据核验"},
                 ],
+                "orchestration": {
+                    "trigger": "复杂行业研究任务启用",
+                    "stages": [
+                        {
+                            "id": "briefing",
+                            "title": "团长定题",
+                            "owner": "researcher",
+                            "goal": "明确范围和证据标准",
+                            "deliverable": "任务边界",
+                        }
+                    ],
+                    "workstreams": [
+                        {
+                            "memberId": "researcher",
+                            "title": "行业研究线",
+                            "brief": "形成市场判断",
+                            "deliverable": "核心结论",
+                            "required": True,
+                        }
+                    ],
+                    "reviewChecklist": ["事实与推断必须分开"],
+                },
                 "reviewRules": ["结论必须有证据支撑"],
             },
         }
@@ -56,9 +78,16 @@ def test_expert_session_context_parses_camel_and_snake_case() -> None:
     assert "Execution mode: orchestrated" in rendered
     assert "Mandatory orchestration protocol" in rendered
     assert "Leader framing" in rendered
+    assert "Orchestration contract" in rendered
+    assert "团长定题" in rendered
+    assert "Delegation task template" in rendered
+    assert "Required workstreams for non-trivial tasks: 行业研究线" in rendered
     assert "Review panel" in rendered
     assert "结论必须有证据支撑" in rendered
     assert ctx.to_metadata()["expert_team"]["execution_mode"] == "orchestrated"
+    assert ctx.to_metadata()["expert_team"]["orchestration"]["stage_count"] == 1
+    required_workstreams = ctx.to_metadata()["expert_team"]["orchestration"]["required_workstreams"]
+    assert required_workstreams[0]["member_id"] == "researcher"
 
 
 @pytest.mark.asyncio

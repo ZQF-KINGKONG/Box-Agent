@@ -1053,11 +1053,12 @@ class _FakeSummaryLLM:
         self._raise = raise_exc
         self.calls: list[dict] = []
 
-    async def generate(self, messages, tools=None, *, thinking_enabled: bool = False):
+    async def generate(self, messages, tools=None, *, thinking_enabled: bool = False, session_id: str = "", **_):
         self.calls.append({
             "n_messages": len(messages),
             "tools": tools,
             "thinking_enabled": thinking_enabled,
+            "session_id": session_id,
         })
         if self._raise is not None:
             raise self._raise

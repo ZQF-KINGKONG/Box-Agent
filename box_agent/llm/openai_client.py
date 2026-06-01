@@ -80,6 +80,7 @@ class OpenAIClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> Any:
         """Execute API request (core method that can be retried).
 
@@ -105,7 +106,7 @@ class OpenAIClient(LLMClientBase):
         if tools:
             params["tools"] = self._convert_tools(tools)
 
-        auth_headers = self._auth_headers()
+        auth_headers = self._auth_headers(self._session_header(session_id))
         if auth_headers:
             params["extra_headers"] = auth_headers
 
@@ -321,6 +322,7 @@ class OpenAIClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> LLMResponse:
         """Generate response from OpenAI LLM.
 
@@ -328,6 +330,8 @@ class OpenAIClient(LLMClientBase):
             messages: List of conversation messages
             tools: Optional list of available tools
             thinking_enabled: Currently a no-op for OpenAI-compatible endpoints.
+            session_id: Optional caller-owned session id forwarded as the
+                ``X-RACCOON-Session-ID`` header (empty = gateway default).
 
         Returns:
             LLMResponse containing the generated content
@@ -344,6 +348,7 @@ class OpenAIClient(LLMClientBase):
                 request_params["api_messages"],
                 request_params["tools"],
                 thinking_enabled=thinking_enabled,
+                session_id=session_id,
             )
         else:
             # Don't use retry
@@ -351,6 +356,7 @@ class OpenAIClient(LLMClientBase):
                 request_params["api_messages"],
                 request_params["tools"],
                 thinking_enabled=thinking_enabled,
+                session_id=session_id,
             )
 
         # Parse and return response
@@ -362,6 +368,7 @@ class OpenAIClient(LLMClientBase):
         tools: list[Any] | None = None,
         *,
         thinking_enabled: bool = False,
+        session_id: str = "",
     ) -> AsyncIterator[StreamEvent]:
         """Generate streaming response from OpenAI LLM.
 
@@ -381,7 +388,7 @@ class OpenAIClient(LLMClientBase):
         if request_params["tools"]:
             params["tools"] = self._convert_tools(request_params["tools"])
 
-        auth_headers = self._auth_headers()
+        auth_headers = self._auth_headers(self._session_header(session_id))
         if auth_headers:
             params["extra_headers"] = auth_headers
 

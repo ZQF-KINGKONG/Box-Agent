@@ -635,6 +635,7 @@ async def _create_summary(
     llm,
     messages: list[Message],
     round_num: int,
+    session_id: str = "",
 ) -> str:
     """Summarize one execution round via an LLM call.
 
@@ -674,6 +675,7 @@ async def _create_summary(
         ],
         tools=None,
         thinking_enabled=False,
+        session_id=session_id,
     )
     return response.content
 
@@ -684,6 +686,7 @@ async def _maybe_summarize(
     token_limit: int,
     api_total_tokens: int,
     skip_check: bool,
+    session_id: str = "",
 ) -> tuple[list[Message] | None, bool, int]:
     """Check token usage and summarize if needed.
 
@@ -720,7 +723,7 @@ async def _maybe_summarize(
 
         if exec_msgs:
             try:
-                summary = await _create_summary(llm, exec_msgs, idx + 1)
+                summary = await _create_summary(llm, exec_msgs, idx + 1, session_id=session_id)
             except Exception as exc:
                 _log.warning(
                     "summarization failed for round %d: %s — dropping exec_msgs",
@@ -978,6 +981,7 @@ async def run_agent_loop(
     memory_promotion_cooldown_days: int = 14,
     inject_queue: asyncio.Queue[str] | None = None,
     thinking_enabled: bool = False,
+    session_id: str = "",
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1162,7 +1166,7 @@ async def run_agent_loop(
         _micro_compact(messages)
 
         # ── Summarization (Layer 2) ────────────────────────
-        result = await _maybe_summarize(llm, messages, token_limit, api_total_tokens, skip_next_token_check)
+        result = await _maybe_summarize(llm, messages, token_limit, api_total_tokens, skip_next_token_check, session_id=session_id)
         new_msgs, skip_next_token_check, est_before = result
         if new_msgs is not None:
             # Snapshot messages before compression, then extract in background
@@ -1200,7 +1204,8 @@ async def run_agent_loop(
             text_stream_started = False
 
             async for chunk in llm.generate_stream(
-                messages=messages, tools=tool_list, thinking_enabled=thinking_enabled
+                messages=messages, tools=tool_list, thinking_enabled=thinking_enabled,
+                session_id=session_id,
             ):
                 if cancelled():
                     break

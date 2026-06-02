@@ -204,7 +204,6 @@ class SessionState:
     inject_queue: asyncio.Queue = field(default_factory=asyncio.Queue)  # in-stream message injection
     turn_active: bool = False  # True while _run_turn is executing; guards inject_queue
     seen_injection_ids: set[str] = field(default_factory=set)  # per-turn dedup of inject IDs (idempotent retries)
-    auto_classify_pending: bool = False  # True when caller didn't supply session_mode; classify on first prompt
     memory_block: str | None = None  # cached memory recall, re-applied when mode switches
     thinking_enabled: bool = False  # extended thinking toggle from _meta.deep_think
     env_context: "EnvContext | None" = None  # cached env_context, re-applied when mode switches
@@ -495,6 +494,7 @@ class BoxACPAgent:
             session_extractor = MemoryExtractor(
                 llm=self._llm,
                 memory_manager=self._memory,
+                session_id=upstream_session_id,
                 cooldown=self._config.agent.memory_extraction_cooldown,
                 step_interval=self._config.agent.memory_extraction_step_interval,
             )
@@ -503,7 +503,6 @@ class BoxACPAgent:
             agent=agent, output_dir=output_dir, session_mode=session_mode,
             permission_engine=perm_engine, grant_store=grant_store,
             memory_extractor=session_extractor,
-            auto_classify_pending=(session_mode is None),
             memory_block=memory_block,
             thinking_enabled=deep_think,
             env_context=env_context,
@@ -657,47 +656,6 @@ class BoxACPAgent:
                 base_prompt = f"{base_prompt.rstrip()}\n\n{expert_prompt}"
         return base_prompt
 
-    def _apply_session_mode(self, state: SessionState, mode: str | None) -> None:
-        """Retroactively apply a ``session_mode`` to an existing session.
-
-        Used when the caller did not supply ``_meta.session_mode`` and we
-        auto-classified the user's first message. Rewrites the agent's system
-        message (preserving the workspace-info footer injected by
-        ``Agent.__init__``). Safe to call when ``mode`` resolves to the
-        general agent (``None``) — the session already runs as general, so
-        the call is a no-op in that case.
-        """
-        if mode is None or mode == state.session_mode:
-            state.session_mode = mode
-            return
-
-        # Recompose system prompt: base + mode + memory + preserved workspace info
-        new_prompt = self._build_session_prompt(
-            mode,
-            workspace=state.agent.workspace_dir,
-            policy=state.permission_engine.policy if state.permission_engine else None,
-            env_context=state.env_context,
-            skill_runtime_context=state.skill_runtime_context,
-            expert_context=state.expert_context,
-        )
-        if state.memory_block:
-            new_prompt = f"{new_prompt.rstrip()}\n\n{state.memory_block}"
-        workspace_info = (
-            f"\n\n## Current Workspace\n"
-            f"You are currently working in: `{state.agent.workspace_dir.absolute()}`\n"
-            f"All relative paths will be resolved relative to this directory."
-        )
-        if "Current Workspace" not in new_prompt:
-            new_prompt = new_prompt + workspace_info
-
-        state.agent.system_prompt = new_prompt
-        if state.agent.messages and state.agent.messages[0].role == "system":
-            state.agent.messages[0] = Message(role="system", content=new_prompt)
-        else:
-            state.agent.messages.insert(0, Message(role="system", content=new_prompt))
-
-        state.session_mode = mode
-
     def _has_officev3_policy(self) -> bool:
         """Check if officev3 capability policy is configured (not just defaults)."""
         return getattr(self._config.officev3, "_present", False)
@@ -730,31 +688,11 @@ class BoxACPAgent:
             except Exception as exc:
                 log.warn("skills/reload_error", session_id=session_id, message=str(exc))
 
-        # Auto-classify session_mode if the caller did not supply one.
-        # Runs once per session, before the user message is appended so that the
-        # classifier sees only the raw first prompt. Failures fall back to the
-        # general agent — never blocks the turn.
-        if state.auto_classify_pending and user_text.strip():
-            from .intent_classifier import classify_session_mode
-            classified = await classify_session_mode(self._lite_llm, user_text)
-            self._apply_session_mode(state, classified)
-            state.auto_classify_pending = False
-            log.info(
-                "session/mode_resolved",
-                session_id=session_id,
-                mode=state.session_mode or "general",
-                source="auto",
-            )
-
-        # Per-turn skill metadata filter. Keep this AFTER any session-mode
-        # rewrite so the selector binds to the final prompt template.
+        # Per-turn skill metadata filter.
         if state.skill_selector is not None:
             try:
                 from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL
                 current_system = state.agent.messages[0].content
-                # Re-bind on each turn — handles the case where
-                # _apply_session_mode replaced messages[0] (e.g. after
-                # auto-classification on the first prompt).
                 if SKILL_SLOT_SENTINEL in current_system:
                     state.skill_selector.bind(current_system)
                 new_prompt = state.skill_selector.update(user_text)
@@ -894,7 +832,7 @@ class BoxACPAgent:
     ext_method = extMethod
 
     async def _llm_prompt(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Run a single tool-free completion (titles/summaries/classification).
+        """Run a single tool-free completion (titles/summaries/rewrites).
 
         Bypasses ``newSession``: no MCP wait, no skills metadata, no tools, no
         memory recall/extraction, no conversation history. Errors are returned
@@ -911,7 +849,10 @@ class BoxACPAgent:
         prompt = params.get("prompt", "")
         system_prompt = params.get("systemPrompt") or None
         timeout_ms = params.get("timeoutMs")
-        purpose = (params.get("_meta") or {}).get("purpose") or params.get("purpose") or ""
+        meta = params.get("_meta") or {}
+        purpose = meta.get("purpose") or params.get("purpose") or ""
+        raw_session_id = meta.get("session_id")
+        session_id = raw_session_id.strip() if isinstance(raw_session_id, str) else ""
         workspace_label = params.get("workspaceLabel") or ""
 
         if not isinstance(prompt, str) or not prompt.strip():
@@ -933,6 +874,7 @@ class BoxACPAgent:
                 self._lite_llm,
                 prompt,
                 system_prompt=system_prompt,
+                session_id=session_id,
                 timeout=timeout,
             )
         except LightweightInvalidArgs as exc:
@@ -1804,9 +1746,9 @@ async def run_acp_server(config: Config | None = None) -> None:
             auth_file=config.llm.auth_file,
         )
 
-        # Lite LLM client for tool-free small tasks (titles / summaries /
-        # session_mode classification). When `lite_llm:` is absent from
-        # config, fall back to the main client so call sites stay uniform.
+        # Lite LLM client for tool-free small tasks (titles / summaries).
+        # When `lite_llm:` is absent from config, fall back to the main client
+        # so call sites stay uniform.
         if config.lite_llm._present:
             lite_rcfg = config.lite_llm.retry
             lite_provider = (

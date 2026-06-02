@@ -1,4 +1,4 @@
-"""Integration tests for automatic session_mode classification in ACP."""
+"""Integration tests for explicit ACP session modes."""
 
 from __future__ import annotations
 
@@ -21,27 +21,15 @@ class _DummyConn:
 
 
 class _TrackingLLM:
-    """LLM stub that records classifier vs main-loop calls.
-
-    Behavior:
-    - First call (no tools) is treated as the classifier: returns ``mode_label``.
-    - Subsequent calls are main-loop turns: return ``end_turn`` with no tools
-      so the agent stops after one step.
-    """
+    """LLM stub that records whether ACP uses extra non-stream LLM calls."""
 
     def __init__(self, mode_label: str = "general"):
-        self.classifier_calls = 0
+        self.generate_calls = 0
         self.main_calls = 0
         self._mode_label = mode_label
-        self.raise_in_classifier = False
 
     async def generate(self, messages, tools=None):
-        if tools is None:
-            self.classifier_calls += 1
-            if self.raise_in_classifier:
-                raise RuntimeError("classifier boom")
-            return LLMResponse(content=self._mode_label, finish_reason="stop")
-        self.main_calls += 1
+        self.generate_calls += 1
         return LLMResponse(content="ok", finish_reason="stop")
 
     async def generate_stream(self, messages, tools=None, **_):
@@ -63,8 +51,7 @@ def _make_agent(tmp_path, llm: _TrackingLLM) -> tuple[BoxACPAgent, _DummyConn]:
 
 
 @pytest.mark.asyncio
-async def test_explicit_mode_skips_classifier(tmp_path):
-    """Caller-supplied session_mode must bypass auto-classification."""
+async def test_explicit_mode_uses_requested_prompt(tmp_path):
     llm = _TrackingLLM(mode_label="ppt_outline")
     agent, _ = _make_agent(tmp_path, llm)
 
@@ -72,7 +59,6 @@ async def test_explicit_mode_skips_classifier(tmp_path):
         SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "data_analysis"})
     )
     state = agent._sessions[session.sessionId]
-    assert state.auto_classify_pending is False
     assert state.session_mode == "data_analysis"
 
     prompt = SimpleNamespace(
@@ -80,19 +66,17 @@ async def test_explicit_mode_skips_classifier(tmp_path):
     )
     await agent.prompt(prompt)
 
-    assert llm.classifier_calls == 0, "classifier must not run when mode is explicit"
+    assert llm.generate_calls == 0, "session mode must not add one-shot LLM calls"
     assert state.session_mode == "data_analysis"
 
 
 @pytest.mark.asyncio
-async def test_missing_mode_ignores_legacy_ppt_classification(tmp_path):
-    """No session_mode → legacy PPT labels fall back to the general agent."""
+async def test_missing_mode_stays_general_without_extra_llm_call(tmp_path):
     llm = _TrackingLLM(mode_label="ppt_outline")
     agent, _ = _make_agent(tmp_path, llm)
 
     session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path)))
     state = agent._sessions[session.sessionId]
-    assert state.auto_classify_pending is True
     assert state.session_mode is None
 
     await agent.prompt(
@@ -102,16 +86,14 @@ async def test_missing_mode_ignores_legacy_ppt_classification(tmp_path):
         )
     )
 
-    assert llm.classifier_calls == 0
+    assert llm.generate_calls == 0
     assert state.session_mode is None
-    assert state.auto_classify_pending is False
     # System message remains general (base prompt was "base system").
     assert state.agent.messages[0].role == "system"
 
 
 @pytest.mark.asyncio
-async def test_classification_runs_only_once(tmp_path):
-    """Classifier must not re-run on subsequent turns of the same session."""
+async def test_missing_mode_never_auto_promotes_to_data_analysis(tmp_path):
     llm = _TrackingLLM(mode_label="data_analysis")
     agent, _ = _make_agent(tmp_path, llm)
 
@@ -122,45 +104,8 @@ async def test_classification_runs_only_once(tmp_path):
             SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": msg}])
         )
 
-    assert llm.classifier_calls == 1
-    assert agent._sessions[session.sessionId].session_mode == "data_analysis"
-
-
-@pytest.mark.asyncio
-async def test_classification_failure_falls_back_to_general(tmp_path):
-    """Classifier exception must not break the session — falls back to general."""
-    llm = _TrackingLLM(mode_label="ppt_outline")
-    llm.raise_in_classifier = True
-    agent, _ = _make_agent(tmp_path, llm)
-
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path)))
-    response = await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
-    )
-
-    state = agent._sessions[session.sessionId]
-    assert state.session_mode is None  # general
-    assert state.auto_classify_pending is False
-    assert response.stopReason == "end_turn"
-
-
-@pytest.mark.asyncio
-async def test_classifier_returns_general_keeps_session_general(tmp_path):
-    """Classifier returning 'general' should leave the session unchanged."""
-    llm = _TrackingLLM(mode_label="general")
-    agent, _ = _make_agent(tmp_path, llm)
-
-    session = await agent.newSession(SimpleNamespace(cwd=str(tmp_path)))
-    await agent.prompt(
-        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "随便聊聊"}])
-    )
-
-    state = agent._sessions[session.sessionId]
-    assert llm.classifier_calls == 1
-    assert state.session_mode is None
-    assert state.auto_classify_pending is False
-    # System message should still reflect the base prompt (no mode-specific prompt injected)
-    assert "base system" in state.agent.messages[0].content
+    assert llm.generate_calls == 0
+    assert agent._sessions[session.sessionId].session_mode is None
 
 
 def test_data_analysis_prompt_includes_plot_contract_and_general_prompt_does_not(tmp_path):

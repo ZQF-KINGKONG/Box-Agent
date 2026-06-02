@@ -1737,11 +1737,13 @@ class MemoryExtractor:
         llm,
         memory_manager: MemoryManager,
         *,
+        session_id: str = "",
         cooldown: int = 300,
         step_interval: int = 10,
     ):
         self._llm = llm
         self._mgr = memory_manager
+        self._session_id = session_id
         self._cooldown = cooldown
         self._step_interval = step_interval
         self._last_time: float = 0.0
@@ -1810,7 +1812,8 @@ class MemoryExtractor:
             messages=[
                 Msg(role="system", content=_EXTRACTION_SYSTEM_PROMPT),
                 Msg(role="user", content=prompt),
-            ]
+            ],
+            session_id=self._session_id,
         )
 
         self._apply_updates(response.content)

@@ -1,6 +1,6 @@
 """Lightweight LLM completion service.
 
-Single-shot prompts (titles, summaries, classification, rewrites) that must
+Single-shot prompts (titles, summaries, rewrites) that must
 NOT spin up an Agent session, load tools/skills/MCP, touch memory, or write
 to conversation history. Wraps :func:`LLMClient.generate` with a hard
 timeout, no tools, no extended thinking, and a structured result.
@@ -61,6 +61,7 @@ async def run_lightweight_prompt(
     prompt: str,
     *,
     system_prompt: str | None = None,
+    session_id: str = "",
     timeout: float = 30.0,
 ) -> LightweightResult:
     """Run a single tool-free LLM completion.
@@ -71,6 +72,7 @@ async def run_lightweight_prompt(
         prompt: The user prompt. Must be non-empty after stripping.
         system_prompt: Optional system message. Empty/whitespace strings are
             treated as absent.
+        session_id: Optional caller-owned session id for upstream trace grouping.
         timeout: Hard wall-clock cap in seconds. Raised as
             :class:`LightweightTimeout` on expiry.
 
@@ -97,7 +99,12 @@ async def run_lightweight_prompt(
     started = perf_counter()
     try:
         response = await asyncio.wait_for(
-            llm.generate(messages=messages, tools=None, thinking_enabled=False),
+            llm.generate(
+                messages=messages,
+                tools=None,
+                thinking_enabled=False,
+                session_id=session_id,
+            ),
             timeout=timeout,
         )
     except asyncio.TimeoutError as exc:

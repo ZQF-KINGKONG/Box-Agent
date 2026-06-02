@@ -35,7 +35,7 @@ max_output_tokens: 80000
 
 # ===== Lite LLM (Optional) =====
 # Lightweight model for small, tool-free tasks: session-title generation,
-# auto session_mode classification, one-shot summaries, etc.
+# one-shot summaries, rewrites, etc.
 # Leave this block out (or comment it) to route everything to the main LLM.
 # Same auth rules as the main block: hosted gateways read auth.json when api_key is empty.
 # lite_llm:

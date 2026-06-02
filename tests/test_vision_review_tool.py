@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 from pathlib import Path
 
 import pytest
 
 from box_agent.schema import LLMResponse
 from box_agent.tools.setup import add_workspace_tools
-from box_agent.tools.vision_review_tool import VisionReviewTool
+from box_agent.tools.vision_review_tool import (
+    _MAX_LONG_EDGE_PX,
+    VisionReviewTool,
+)
 
 
 _ONE_PIXEL_PNG = base64.b64decode(
@@ -126,6 +131,72 @@ async def test_vision_review_uses_anthropic_image_blocks(tmp_path: Path):
     assert image_block["source"]["type"] == "base64"
     assert image_block["source"]["media_type"] == "image/jpeg"
     assert image_block["source"]["data"] == base64.b64encode(b"fake jpeg bytes").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_vision_review_downsamples_oversized_image(tmp_path: Path):
+    """An image whose long edge exceeds the ceiling is resized before sending."""
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    oversized = tmp_path / "huge.png"
+    Image.new("RGB", (_MAX_LONG_EDGE_PX * 2, 100), color=(10, 20, 30)).save(oversized)
+
+    llm = FakeVisionLLM()
+    llm.provider = "anthropic"
+    tool = VisionReviewTool(llm=llm, workspace_dir=str(tmp_path), allow_full_access=True)
+
+    result = await tool.execute(image_paths=["huge.png"])
+
+    assert result.success, result.error
+    blocks = llm.messages[1].content
+    image_block = next(block for block in blocks if block.get("type") == "image")
+    sent_bytes = base64.b64decode(image_block["source"]["data"])
+    with Image.open(io.BytesIO(sent_bytes)) as sent:
+        assert max(sent.size) == _MAX_LONG_EDGE_PX
+        assert sent.size == (_MAX_LONG_EDGE_PX, 50)
+
+
+@pytest.mark.asyncio
+async def test_vision_review_keeps_small_image_bytes_unchanged(tmp_path: Path):
+    """Images within the ceiling are sent byte-for-byte (no re-encode)."""
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    llm = FakeVisionLLM()
+    llm.provider = "anthropic"
+    tool = VisionReviewTool(llm=llm, workspace_dir=str(tmp_path), allow_full_access=True)
+
+    result = await tool.execute(image_paths=["slide.png"])
+
+    assert result.success, result.error
+    blocks = llm.messages[1].content
+    image_block = next(block for block in blocks if block.get("type") == "image")
+    assert base64.b64decode(image_block["source"]["data"]) == _ONE_PIXEL_PNG
+
+
+@pytest.mark.asyncio
+async def test_vision_review_times_out(tmp_path: Path, monkeypatch):
+    """A slow LLM call is bounded by the vision review timeout."""
+    import box_agent.tools.vision_review_tool as module
+
+    monkeypatch.setattr(module, "_VISION_REVIEW_TIMEOUT", 0.05)
+
+    class SlowLLM:
+        provider = "openai"
+
+        async def generate(self, messages, tools=None, *, thinking_enabled=False):
+            await asyncio.sleep(1.0)
+            return LLMResponse(content="never", finish_reason="stop")
+
+    image = tmp_path / "slide.png"
+    image.write_bytes(_ONE_PIXEL_PNG)
+    tool = VisionReviewTool(llm=SlowLLM(), workspace_dir=str(tmp_path), allow_full_access=True)
+
+    result = await tool.execute(image_paths=["slide.png"])
+
+    assert not result.success
+    assert "timed out" in result.error
+    assert not (tmp_path / "visual_review.md").exists()
 
 
 class ToolConfig:

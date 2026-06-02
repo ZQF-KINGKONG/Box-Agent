@@ -24,9 +24,11 @@ class _DummyLLM:
         self.provider = "openai"
         self.model = f"model-{label}"
         self.last_messages = None
+        self.last_kwargs = None
 
     async def generate(self, messages, tools=None, **kwargs):
         self.last_messages = messages
+        self.last_kwargs = kwargs
         return LLMResponse(
             content=f"reply-from-{self.label}",
             thinking=None,
@@ -92,6 +94,18 @@ async def test_llm_prompt_routes_to_lite_client(tmp_path):
     assert result["text"] == "reply-from-lite"
     assert lite.last_messages is not None
     assert main.last_messages is None  # main untouched
+
+
+@pytest.mark.asyncio
+async def test_llm_prompt_threads_meta_session_id_to_lite_client(tmp_path):
+    agent, _main, lite = _make_agent(tmp_path, lite=True)
+    result = await agent._llm_prompt({
+        "prompt": "title this",
+        "_meta": {"session_id": "office-session-1"},
+    })
+
+    assert "error" not in result
+    assert lite.last_kwargs["session_id"] == "office-session-1"
 
 
 def test_config_lite_llm_absent_marks_not_present():

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import mimetypes
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,7 +21,17 @@ _SUPPORTED_MIME_TYPES = {
     "image/png",
     "image/jpeg",
 }
+# Outer guard against decompression-bomb files; not the primary gate.
 _MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# Long-edge ceiling for downsampling. Matches the provider-side cap most
+# multimodal models apply before counting tokens, so staying at/under this is
+# lossless for token cost while trimming upload payload and base64 bloat.
+_MAX_LONG_EDGE_PX = 1568
+# JPEG re-encode quality used only when an image is downsampled.
+_JPEG_QUALITY = 85
+# Hard ceiling on the single blocking LLM call. Screenshot QA should never wait
+# on the SDK default (~600s).
+_VISION_REVIEW_TIMEOUT = 120.0
 _DEFAULT_OUTPUT_FILENAME = "visual_review.md"
 
 
@@ -104,7 +116,15 @@ class VisionReviewTool(Tool):
         ]
 
         try:
-            response = await self.llm.generate(messages=messages, tools=None)
+            response = await asyncio.wait_for(
+                self.llm.generate(messages=messages, tools=None),
+                timeout=_VISION_REVIEW_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            return ToolResult(
+                success=False,
+                error=f"Vision review timed out after {_VISION_REVIEW_TIMEOUT:.0f}s",
+            )
         except Exception as exc:  # pragma: no cover - exact provider exceptions vary
             return ToolResult(success=False, error=f"Vision review LLM request failed: {exc}")
 
@@ -141,7 +161,8 @@ class VisionReviewTool(Tool):
                 f"Image is too large for visual review: {path} ({size} bytes > {_MAX_IMAGE_BYTES} bytes)"
             )
 
-        data_url = f"data:{mime_type};base64,{base64.b64encode(file_path.read_bytes()).decode('ascii')}"
+        raw, mime_type = self._encode_image(file_path, mime_type)
+        data_url = f"data:{mime_type};base64,{base64.b64encode(raw).decode('ascii')}"
         return {
             "path": self._display_path(file_path),
             "file_path": str(file_path),
@@ -149,6 +170,47 @@ class VisionReviewTool(Tool):
             "data_url": data_url,
             "base64": data_url.split(",", 1)[1],
         }
+
+    def _encode_image(self, file_path: Path, mime_type: str) -> tuple[bytes, str]:
+        """Return image bytes for review, downsampling oversized images.
+
+        Images whose long edge is within ``_MAX_LONG_EDGE_PX`` are returned
+        byte-for-byte (zero re-encode). Larger images are resized down to the
+        ceiling and re-encoded in their original family (PNG stays PNG, JPEG
+        stays JPEG). Returns ``(bytes, mime_type)``; ``mime_type`` is unchanged
+        but returned for symmetry with potential format coercion.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            # Pillow is a declared dependency; if unavailable, fall back to raw.
+            return file_path.read_bytes(), mime_type
+
+        try:
+            with Image.open(file_path) as im:
+                long_edge = max(im.size)
+                if long_edge <= _MAX_LONG_EDGE_PX:
+                    return file_path.read_bytes(), mime_type
+
+                scale = _MAX_LONG_EDGE_PX / long_edge
+                new_size = (
+                    max(1, round(im.width * scale)),
+                    max(1, round(im.height * scale)),
+                )
+                resized = im.resize(new_size, Image.LANCZOS)
+
+                buf = io.BytesIO()
+                if mime_type == "image/png":
+                    resized.save(buf, format="PNG", optimize=True)
+                else:
+                    # JPEG cannot hold alpha; flatten to RGB before saving.
+                    if resized.mode not in ("RGB", "L"):
+                        resized = resized.convert("RGB")
+                    resized.save(buf, format="JPEG", quality=_JPEG_QUALITY)
+                return buf.getvalue(), mime_type
+        except Exception:
+            # Any decode/resize failure → use the original bytes unchanged.
+            return file_path.read_bytes(), mime_type
 
     def _resolve_output_path(self, output_path: str | None, first_image_path: str) -> Path:
         if output_path and output_path.strip():

@@ -38,10 +38,15 @@ class _FakeLLM:
         self.calls: list[dict[str, Any]] = []
 
     async def generate(
-        self, messages, tools=None, *, thinking_enabled: bool = False
+        self, messages, tools=None, *, thinking_enabled: bool = False, session_id: str = ""
     ) -> LLMResponse:
         self.calls.append(
-            {"messages": messages, "tools": tools, "thinking_enabled": thinking_enabled}
+            {
+                "messages": messages,
+                "tools": tools,
+                "thinking_enabled": thinking_enabled,
+                "session_id": session_id,
+            }
         )
         if self._delay:
             await asyncio.sleep(self._delay)
@@ -80,6 +85,14 @@ async def test_lightweight_passes_no_tools_and_no_thinking():
     assert call["thinking_enabled"] is False
     # No system message when none supplied.
     assert [m.role for m in call["messages"]] == ["user"]
+
+
+@pytest.mark.asyncio
+async def test_lightweight_threads_session_id():
+    llm = _FakeLLM()
+    await run_lightweight_prompt(llm, "hello", session_id="office-session-1")
+
+    assert llm.calls[0]["session_id"] == "office-session-1"
 
 
 @pytest.mark.asyncio

@@ -50,7 +50,7 @@ class LLMConfig(BaseModel):
 
 
 class LiteLLMConfig(BaseModel):
-    """Lightweight LLM for small tool-free tasks (titles, summaries, classification).
+    """Lightweight LLM for small tool-free tasks (titles, summaries, rewrites).
 
     When the ``lite_llm:`` block is absent from ``config.yaml``, ``_present``
     stays ``False`` and the ACP layer aliases the lite client to the main

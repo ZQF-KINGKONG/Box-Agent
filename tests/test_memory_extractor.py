@@ -60,6 +60,25 @@ async def test_extract_additions(mgr: MemoryManager):
     assert mgr.read_core() == ""
 
 
+async def test_extract_threads_session_id(mgr: MemoryManager):
+    from box_agent.schema import Message
+
+    llm = _make_llm('{"additions": [], "merges": []}')
+    extractor = MemoryExtractor(
+        llm=llm,
+        memory_manager=mgr,
+        session_id="office-session-1",
+    )
+
+    result = await extractor.maybe_extract(
+        [Message(role="user", content="Remember that I prefer Python")],
+        "loop_end",
+    )
+
+    assert result is True
+    assert llm.generate.await_args.kwargs["session_id"] == "office-session-1"
+
+
 async def test_extract_core_additions_write_memory_md(mgr: MemoryManager):
     """Explicit user profile/default facts can go directly to core memory."""
     from box_agent.schema import Message

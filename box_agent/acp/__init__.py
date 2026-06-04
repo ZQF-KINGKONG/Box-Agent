@@ -334,10 +334,16 @@ class BoxACPAgent:
         env_context: EnvContext | None = None
         expert_context: ExpertSessionContext | None = None
         upstream_session_id = ""
+        # Lightweight one-shot utility session (e.g. host-side title/tag
+        # generation). When set, the session carries no tools, skips memory
+        # recall injection, and skips auto memory-extraction — it is a pure
+        # text transform, not a real user conversation.
+        utility = False
         meta = getattr(params, "field_meta", None) or {}
         if isinstance(meta, dict):
             session_mode = meta.get("session_mode")
             deep_think = bool(meta.get("deep_think", False))
+            utility = bool(meta.get("utility", False))
             env_context = EnvContext.from_meta(meta.get("env_context"))
             expert_context = ExpertSessionContext.from_meta(meta)
             # Caller-owned session id (e.g. officev3 chat session id). Forwarded
@@ -443,32 +449,38 @@ class BoxACPAgent:
             expert_context=expert_context,
         )
 
-        # Inject memory context
+        # Inject memory context (skipped for lightweight utility sessions)
         memory_block: str | None = None
-        if self._memory:
+        if self._memory and not utility:
             recalled = self._memory.recall()
             if recalled:
                 memory_block = recalled
                 system_prompt = f"{system_prompt.rstrip()}\n\n{memory_block}"
                 log.info("session/memory", session_id=session_id, message="Memory context injected")
 
-        tools = list(self._base_tools)
-        if perm_engine is None:
-            log.info("session/permissions", session_id=session_id,
-                     message="No officev3 policy — using legacy allow_full_access mode")
-        # Enable sandbox mode and restrict to workspace for ACP sessions
-        add_workspace_tools(
-            tools,
-            self._config,
-            workspace,
-            sandbox_mode=True,
-            allow_full_access=self._config.tools.allow_full_access,
-            non_interactive=True,  # ACP cannot do interactive terminal prompts
-            output=lambda msg: sys.stderr.write(msg + "\n"),
-            llm=self._llm,
-            permission_engine=perm_engine,
-            skill_runtime_context=skill_runtime_context,
-        )
+        if utility:
+            # Pure text transform: no base tools, no workspace/sandbox tools.
+            tools: list = []
+            log.info("session/new", session_id=session_id,
+                     message="Utility session: tools disabled (no memory recall/extraction)")
+        else:
+            tools = list(self._base_tools)
+            if perm_engine is None:
+                log.info("session/permissions", session_id=session_id,
+                         message="No officev3 policy — using legacy allow_full_access mode")
+            # Enable sandbox mode and restrict to workspace for ACP sessions
+            add_workspace_tools(
+                tools,
+                self._config,
+                workspace,
+                sandbox_mode=True,
+                allow_full_access=self._config.tools.allow_full_access,
+                non_interactive=True,  # ACP cannot do interactive terminal prompts
+                output=lambda msg: sys.stderr.write(msg + "\n"),
+                llm=self._llm,
+                permission_engine=perm_engine,
+                skill_runtime_context=skill_runtime_context,
+            )
         agent = Agent(
             llm_client=self._llm,
             system_prompt=system_prompt,
@@ -489,7 +501,7 @@ class BoxACPAgent:
 
         # Per-session MemoryExtractor to avoid cross-session state leaks
         session_extractor = None
-        if self._memory and self._config.agent.enable_memory_extraction:
+        if self._memory and self._config.agent.enable_memory_extraction and not utility:
             from box_agent.memory import MemoryExtractor
             session_extractor = MemoryExtractor(
                 llm=self._llm,

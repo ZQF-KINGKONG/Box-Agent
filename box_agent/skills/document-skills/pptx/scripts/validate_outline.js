@@ -110,6 +110,41 @@ function validate(outline, opts) {
     "竞品",
     "competition",
   ];
+  const dataDisplayTerms = [
+    "chart",
+    "graph",
+    "plot",
+    "table",
+    "dashboard",
+    "scorecard",
+    "kpi",
+    "metric",
+    "bar",
+    "line",
+    "area",
+    "pie",
+    "donut",
+    "scatter",
+    "waterfall",
+    "funnel",
+    "heatmap",
+    "matrix",
+    "图表",
+    "表格",
+    "看板",
+    "仪表盘",
+    "指标",
+    "柱状",
+    "条形",
+    "折线",
+    "面积",
+    "饼图",
+    "散点",
+    "瀑布",
+    "漏斗",
+    "热力",
+    "矩阵",
+  ];
 
   slides.forEach((slide, index) => {
     const label = `slide-${String(index + 1).padStart(2, "0")}`;
@@ -167,8 +202,12 @@ function validate(outline, opts) {
     }
 
     const combined = [slide.title, slide.message, slide.layout, slide.visual, slide.notes].map(text).join(" ");
-    if (includesAny(combined, dataHeavyTerms) && !hasEvidence(slide)) {
+    const isDataHeavy = includesAny(combined, dataHeavyTerms);
+    if (isDataHeavy && !hasEvidence(slide)) {
       warnings.push(`${label}: appears data/evidence-heavy but evidence is empty`);
+    }
+    if (isDataHeavy && !includesAny(slide.visual, dataDisplayTerms)) {
+      warnings.push(`${label}: appears data-heavy but visual does not name a chart/table/KPI/dashboard data display`);
     }
 
     if (includesAny(message, [" and ", "；", ";", "、"]) && wordLikeLength(message) > 60) {

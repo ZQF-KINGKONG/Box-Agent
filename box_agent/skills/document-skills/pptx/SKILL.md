@@ -49,7 +49,7 @@ Mode contract:
 1. Treat the user input as a PPT creation brief even if it is only a short topic such as "茉莉花茶制作过程".
 2. The deck must include generated bitmap visuals. At minimum, the cover must use `decision: "generate"` and a successful `generate_image` output under `assets/generated/`.
 3. Prefer `generate` for cover, section divider, process hero, atmosphere/scene, poster-like, and closing slides. Dense data/table/process detail slides may use editable HTML/CSS/SVG, but they do not satisfy the mandatory generated-image requirement unless at least one other slide generated an asset.
-4. If using full-slide or background generated images, create `layout_contract` before writing the prompt and keep text regions calm, low-detail, and low-contrast.
+4. If using full-slide or background generated images, create `layout_contract` before writing the prompt and keep text regions calm, low-detail, and low-contrast. Do not make the non-focus side look empty; extend the scene with faint texture, atmospheric shapes, or soft background motifs that support the theme without competing with text.
 5. If `generate_image` is not configured or fails for all required images, stop before claiming completion. Return `BLOCKED: creative_image_mode requires generated images`, include the failure reason, the image plan, and any draft HTML/outline paths. Do not silently downgrade to a normal text-only PPT or a pure HTML-shape deck.
 6. Final delivery must list generated asset paths and the manifest path. If there are zero successful generated assets, the final status is blocked, not completed.
 
@@ -128,10 +128,11 @@ If `html-templates` is unavailable in this session, fall back to authoring the d
 
 For data presentation slides, preserve data first:
 
-1. Store chart/table data in `assets/data/*.json` or an equivalent local source file.
-2. In `deck.html`, ECharts may be used for browser preview and layout tuning, but the chart root must be marked with `data-pptx-chart` and must reference or embed a chart spec via `data-chart-spec`, `data-chart-spec-src`, or a child `<script type="application/json" data-chart-spec>`.
-3. When creating the final PPTX, convert available chart data to native PowerPoint charts/tables whenever the recipient may edit numbers. Do not flatten an ECharts canvas/SVG into a screenshot just because it looks correct in HTML.
-4. If native chart conversion is unavailable, report the chart export as `BLOCKED` or switch to the confirmed native `PptxGenJS` chart route; do not silently deliver screenshot-only chart images.
+1. When a slide contains quantities, rankings, comparisons, trends, proportions, KPIs, financials, market sizing, benchmark results, time-series data, or operational metrics, prefer a visible data display by default: native table, KPI strip, bar/line/area/pie chart, matrix, comparison table, or mini-dashboard. Use plain bullets only when the data is too sparse or the user explicitly asks for text-only slides.
+2. Store chart/table data in `assets/data/*.json` or an equivalent local source file.
+3. In `deck.html`, ECharts may be used for browser preview and layout tuning, but the chart root must be marked with `data-pptx-chart` and must reference or embed a chart spec via `data-chart-spec`, `data-chart-spec-src`, or a child `<script type="application/json" data-chart-spec>`.
+4. When creating the final PPTX, convert available chart data to native PowerPoint charts/tables whenever the recipient may edit numbers. Do not flatten an ECharts canvas/SVG into a screenshot just because it looks correct in HTML.
+5. If native chart conversion is unavailable, report the chart export as `BLOCKED` or switch to the confirmed native `PptxGenJS` chart route; do not silently deliver screenshot-only chart images.
 
 ### 3.3 Visual effects scope (decoration vs text-bearing)
 

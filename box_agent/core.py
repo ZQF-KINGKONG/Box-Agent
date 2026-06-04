@@ -1131,6 +1131,14 @@ async def run_agent_loop(
     empty_args_repeats = 0
     EMPTY_ARGS_LIMIT = 2
 
+    # Near-limit wrap-up: when only WRAPUP_REMAINING steps are left, inject a
+    # one-shot instruction telling the model to stop gathering more material
+    # (tool calls / searches) and synthesize a final answer from what it
+    # already has, instead of burning the last steps and exiting with a
+    # "couldn't be completed" failure.
+    WRAPUP_REMAINING = 3
+    wrapup_injected = False
+
     for step in range(max_steps):
         # ── Cancellation check (top of step) ────────────────
         # No cleanup needed here — messages are consistent at step boundaries.
@@ -1176,6 +1184,29 @@ async def run_agent_loop(
             yield SummarizationEvent(estimated_tokens=est_before, api_tokens=api_total_tokens, token_limit=token_limit)
             messages.clear()
             messages.extend(new_msgs)
+
+        # ── Near-limit wrap-up nudge (one-shot) ─────────────
+        # Reserve the final few steps for synthesis: stop further
+        # research and force a self-contained answer from gathered
+        # material before the step budget is exhausted.
+        if (
+            not wrapup_injected
+            and max_steps > WRAPUP_REMAINING
+            and step >= max_steps - WRAPUP_REMAINING
+        ):
+            wrapup_injected = True
+            remaining = max_steps - step
+            wrapup_text = (
+                f"⚠️ 步数预算即将用尽（已到第 {step + 1}/{max_steps} 步，约剩 {remaining} 步）。"
+                "现在请停止调用任何工具、停止继续搜索或探索。"
+                "仅基于你已经收集到的信息，在本轮直接给出完整、可独立阅读的最终答案/总结："
+                "包含关键结论、数据、以及已产出的文件路径；若有未覆盖的缺口，简要标注即可，"
+                "不要再去调查。"
+            )
+            messages.append(
+                Message(role="user", content=_format_injected_message(wrapup_text))
+            )
+            yield InjectedMessageEvent(content=wrapup_text, injection_id=None)
 
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)

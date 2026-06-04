@@ -83,6 +83,11 @@ details into `outline.json`.
    slide. If evidence is assumed or illustrative, say so in `evidence` or
    `notes`; do not imply fabricated data is sourced.
 5. Choose the intended `layout` and `visual` for each slide before writing HTML.
+   When a slide contains quantities, rankings, trends, proportions, KPIs,
+   market sizing, financials, benchmarks, or operational metrics, the `visual`
+   should normally name a concrete data display such as `KPI strip`, `bar
+   chart`, `line chart`, `matrix`, `comparison table`, `heatmap`, or
+   `mini-dashboard`, not just `cards` or `text layout`.
 6. Run `scripts/validate_outline.js outline.json` and fix failures before
    creating `deck.html`.
 
@@ -97,6 +102,8 @@ details into `outline.json`.
 - Avoid repetitive slides with the same title, message, layout, or visual.
 - Use a section-divider slide only when it helps pacing.
 - Put source assumptions in `evidence` or `notes`; do not hide missing data.
+- For data-heavy slides, prefer chart/table/KPI/dashboard visuals over plain
+  bullet lists unless the data is too sparse or text-only output was requested.
 - Keep page numbers consecutive and aligned with the final slide count.
 
 ## Validation

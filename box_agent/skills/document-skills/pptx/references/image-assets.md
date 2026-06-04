@@ -56,14 +56,14 @@ Rules:
     "visual_focus_regions": [
       { "name": "hero", "x": 900, "y": 120, "width": 860, "height": 780 }
     ],
-    "safe_background_rule": "Keep the left text column low-detail, low-contrast, and free of faces, objects, highlights, hard edges, or readable symbols."
+    "safe_background_rule": "Keep the left text column low-detail and low-contrast, but not blank: use faint thematic texture, atmospheric continuation, or pale abstract shapes. Avoid faces, strong objects, highlights, hard edges, or readable symbols."
   },
   "aspect_ratio": "16:9",
   "target_size": "2848x1600",
   "prompt": {
     "deck_context": "AI Operating Model Transformation deck for executive and product leadership; theme: moving from isolated AI pilots to governed, repeatable AI workflows",
     "subject": "Three abstract data streams converging into a central node",
-    "composition": "right-side hero inside x=900,y=120,w=860,h=780; left text-safe area x=120,y=155,w=700,h=565 remains low-detail and low-contrast",
+    "composition": "right-side hero inside x=900,y=120,w=860,h=780; left text-safe area x=120,y=155,w=700,h=565 remains low-detail and low-contrast with faint thematic texture and atmospheric continuation, not empty blank space",
     "style": "Editorial vector illustration, clean linework, soft gradients",
     "palette": "Deep indigo #1E2A5E, electric cyan #22D3EE, amber #F59E0B, off-white #F8FAFC",
     "lighting": "Soft directional rim light",
@@ -79,7 +79,7 @@ Rules:
 1. Use structured prompt fields for `generate`.
 2. Put `deck_context` first in every `generate` prompt so the image model sees the whole PPT theme before the slide-specific subject.
 3. Keep `avoid` separate from `prompt`.
-4. Put text-region coordinates into the `composition` field in human-readable form. Example: `title/body safe area x=120,y=155,w=700,h=565; keep this region calm and low contrast; place visual focus on right`.
+4. Put text-region coordinates into the `composition` field in human-readable form. Example: `title/body safe area x=120,y=155,w=700,h=565; keep this region calm and low contrast with faint thematic texture, not blank; place visual focus on right`.
 5. The final HTML must implement the same `layout_contract.text_regions` values for text-bearing elements. If the HTML positions change, update the manifest and regenerate or revise the image prompt.
 6. Each text-bearing HTML element covered by `layout_contract.text_regions` must carry `data-layout-region="<region name>"`. Run `scripts/validate_image_layout_contract.js deck.html assets/generated/manifest.json` before HTML self-check to compare actual DOM boxes with the manifest. The validator only requires contracts for generated full-slide/background images; ordinary fixed-frame hero images are not blocked by this gate.
 

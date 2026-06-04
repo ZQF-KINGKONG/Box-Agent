@@ -1,73 +1,189 @@
 ---
 name: research-synthesis
-description: Use for market research, industry analysis, competitive research, policy or company information synthesis, and deep summarization into evidence-backed reports. Helps separate facts from assumptions, structure sources, and produce decision-ready conclusions.
-keywords: [research, synthesis, summary, summarization, report, market, industry, competitor, policy, company, evidence, sources, 深度总结, 总结, 研究, 行业研究, 行业分析, 市场研究, 竞品分析, 政策分析, 公司研究, 资料综述, 报告]
+description: >
+  Evidence-first research synthesis workflow for market research, industry
+  analysis, competitive research, policy or company information synthesis,
+  file-only or file-augmented analysis, technical architecture reviews, risk
+  assessment, and report-ready conclusions. Use when the user asks for
+  comprehensive, cross-verified research or deep summarization rather than a
+  simple lookup.
+keywords:
+  [
+    research,
+    synthesis,
+    summary,
+    summarization,
+    report,
+    market,
+    industry,
+    competitor,
+    policy,
+    company,
+    evidence,
+    sources,
+    deep-research,
+    cross-verification,
+    source-backed,
+    market-research,
+    industry-analysis,
+    competitive-research,
+    policy-analysis,
+    company-research,
+    risk-assessment,
+    technical-research,
+    file-analysis,
+    multi-agent,
+    parallel-research,
+    深度总结,
+    总结,
+    研究,
+    行业研究,
+    行业分析,
+    市场研究,
+    竞品分析,
+    政策分析,
+    公司研究,
+    资料综述,
+    报告,
+    证据,
+    来源,
+    交叉验证,
+    多智能体,
+    并行研究,
+  ]
+metadata:
+  short-description: Evidence-first research synthesis
 ---
 
 # Research Synthesis
 
-Use this skill when the task is to turn scattered information into a structured analysis, research memo, market scan, competitive brief, or decision-ready report.
+Use this skill for substantial research where the answer must be grounded in
+real files, logs, sources, or current external evidence. Do not use it for
+simple factual lookup, one-source Q&A, or ordinary code changes.
 
-This skill does not replace browsing, file reading, data analysis, or document-generation skills. It governs the research method and final synthesis quality.
+## Hard Rules
 
-## Core Workflow
+- Inspect the real provided files, logs, repo paths, or source artifacts before
+  explaining behavior or generating conclusions.
+- Save every research artifact under `{workspace}/research/`; create the
+  directory before writing.
+- Never save research artifacts directly in `{workspace}/`.
+- Avoid CLI-specific assumptions. Use only tools actually available in the
+  current host runtime.
+- Use native subagents only when the user explicitly asks for multi-agent,
+  parallel-agent, or delegation work, or when the host runtime has
+  clearly authorized subagent use for the task.
+- When subagents are authorized, use multiple subagents for independent facets
+  or dimensions instead of defaulting to a single delegated worker.
+- If subagents are not authorized or unavailable, run the same workflow locally
+  in sequential rounds with a smaller but explicit evidence budget.
+- For file-only requests, do not perform external search.
+- For current or time-sensitive claims, check the current date/time before
+  analysis and make search windows explicit.
+- Match the user's search language unless the task requires a specific locale.
+- Use standard Markdown footnotes in research artifacts: `[^id]` inline plus
+  `[^id]: Title. Date. URL` definitions.
 
-1. Frame the question
-   - Identify the subject, geography, time range, audience, and intended decision.
-   - If the user did not specify a time range, state a reasonable assumption in the answer.
-   - Do not stop at "I will research"; proceed when the question is specific enough.
+## Start
 
-2. Collect and classify evidence
-   - Separate direct facts, source claims, estimates, and your own inference.
-   - Prefer primary or authoritative sources when available.
-   - If current web access or source retrieval is unavailable, clearly mark the evidence boundary and list what should be verified.
+1. Resolve `{workspace}` to the current working directory.
+2. Resolve `{skill_dir}` to the active installed directory containing this
+   `SKILL.md`. Do not assume the current working directory is the skill
+   directory.
+3. Create `{workspace}/research/`.
+4. Pick a stable topic slug:
+   - Prefer short ASCII, lowercase, hyphenated words.
+   - If the topic is mostly non-ASCII or ambiguous, use
+     `research-YYYYMMDD-HHMMSS`.
+5. State the selected route and one-sentence rationale before researching.
+6. Follow the route details in [routes.md](references/routes.md).
 
-3. Build the analysis spine
-   - Start from 3-5 answer-first conclusions.
-   - Then organize evidence under clear dimensions such as market size, demand drivers, supply landscape, user/customer segments, competition, regulation, risks, and recommended actions.
-   - For employment or hiring questions, include demand scale, role structure, skill requirements, compensation/region patterns, trend risks, and hiring or career advice.
+## Routing
 
-4. Synthesize, do not pile up notes
-   - Combine repeated findings into one stronger point.
-   - Explain why evidence matters for the user's decision.
-   - Avoid long undifferentiated lists unless the user explicitly asks for a source dump.
+| Signal | Route |
+| --- | --- |
+| Files plus "only based on files", "no search", or equivalent | C: File-only |
+| Files plus "refer to", "combine with", or no explicit restriction | D: File-augmented |
+| No files plus broad landscape question | A: Wide search |
+| No files plus specific bounded question | B: Focused search |
 
-5. Mark uncertainty
-   - Use labels such as "Fact", "Inference", "Assumption", and "Needs verification" when the distinction matters.
-   - Do not present weak estimates as precise facts.
-   - Surface contradictions across sources instead of hiding them.
+When unclear, prefer Route D over Route C for file tasks, and Route A over
+Route B for broad multi-faceted topics. If that would conflict with an explicit
+user constraint, honor the constraint.
 
-## Recommended Output Shapes
+## Subagent Policy
 
-For a short research answer:
+This skill supports multi-agent research but does not require it.
 
-- Core conclusions
-- Evidence and reasoning
-- Risks / uncertainty
-- Suggested next steps
+When subagents are authorized:
 
-For a full industry or market analysis:
+- Dispatch multiple bounded, independent research tasks using the host's native
+  subagent tool. Prefer one subagent per facet, dimension, or validation
+  conflict when those tasks can write separate artifacts.
+- Default to up to 8 concurrent subagents per round unless the host states a
+  different limit. For larger decompositions, launch additional bounded rounds.
+- Give each agent the mission, context, allowed/disallowed sources, exact output
+  format, and exact output path.
+- Do not assume subagents inherit main-agent context; pass paths or excerpts.
+- Do not launch duplicate agents on the same question.
+- Do not let two subagents write the same artifact path; merge or synthesize in
+  the main agent after their outputs are complete.
 
-- Executive summary
-- Scope and assumptions
-- Market / demand landscape
-- Supply / competitor landscape
-- Key drivers and constraints
-- Risks and uncertainty
-- Recommendations
-- Source notes or verification checklist
+When subagents are not authorized or unavailable:
 
-For a deep summary of provided materials:
+- Execute dimensions sequentially in the main agent.
+- Preserve the same artifact names and citation contract.
+- Reduce search counts pragmatically and record the reduced budget in
+  `{topic}_cross_verification.md`.
 
-- One-paragraph brief
-- Key points grouped by theme
-- Decisions / implications
-- Open questions
-- Source-specific notes only when they are useful
+Use [prompts.md](references/prompts.md) for subagent/local-round templates.
 
-## Quality Bar
+## Required Outputs
 
-- The final answer must contain useful analysis, not only a workflow.
-- Do not repeat the same framework multiple times.
-- Keep conclusions traceable to evidence or clearly labeled inference.
-- If the user asks for a deliverable file, use the relevant document skill after the synthesis is done.
+All files live under `{workspace}/research/`.
+
+| File | Route | Purpose |
+| --- | --- | --- |
+| `{topic}_file_analysis.md` | C, D | File inventory, extraction, cross-file mapping |
+| `{topic}_wideNN.md` | A | Wide exploration facets |
+| `{topic}_dimNN.md` | A, B, C, D | Dimension-specific evidence |
+| `{topic}_validationNN.md` | Optional | Conflict-specific validation output before merge |
+| `{topic}_cross_verification.md` | A, B, C, D | Confidence tiers and conflict zones |
+| `{topic}_insight.md` | A, B, C, D | Cross-dimension insights |
+| `{topic}_final.md` | Optional | Final Markdown report when no writing skill is available |
+
+Before final handoff, run:
+
+```bash
+RESEARCH_SYNTHESIS_SKILL_DIR="${BOX_AGENT_RESEARCH_SYNTHESIS_SKILL_DIR:-${RESEARCH_SYNTHESIS_SKILL_DIR:-{skill_dir}}}"
+if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" ] && [ -f "$HOME/.box-agent/skills/research-synthesis/scripts/validate_research_artifacts.py" ]; then
+  RESEARCH_SYNTHESIS_SKILL_DIR="$HOME/.box-agent/skills/research-synthesis"
+fi
+if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" ] && [ -f "$HOME/.box-agent/skills/deep-research-swarm-officev3/scripts/validate_research_artifacts.py" ]; then
+  RESEARCH_SYNTHESIS_SKILL_DIR="$HOME/.box-agent/skills/deep-research-swarm-officev3"
+fi
+if [ ! -f "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" ]; then
+  echo "ERROR: validate_research_artifacts.py not found under $RESEARCH_SYNTHESIS_SKILL_DIR/scripts" >&2
+  exit 1
+fi
+${BOX_AGENT_PYTHON:-python3} "$RESEARCH_SYNTHESIS_SKILL_DIR/scripts/validate_research_artifacts.py" --research-dir "{workspace}/research" --topic "{topic}" --route A
+```
+
+Adjust `--route` for the selected route. Add `--min-dimensions N` when the
+dimension count differs from the default.
+
+## Final Handoff
+
+If a report-writing, paper-writing, document, or presentation skill is available
+and the user requested that output type, hand off explicit file paths and state
+that research is complete. Otherwise, produce `{topic}_final.md` from the
+verified research artifacts.
+
+For technical product or codebase research tasks:
+
+- Preserve product/runtime ownership boundaries in the synthesis when relevant.
+- Distinguish UI assumptions from runtime evidence.
+- Call out whether a finding is source-tree evidence, runtime-bundled evidence,
+  log evidence, user-file evidence, or external-source evidence.
+- Keep recommendations narrow and reversible unless the user asked for broader
+  strategy.

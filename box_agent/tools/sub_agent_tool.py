@@ -64,7 +64,7 @@ class SubAgentTool(EventEmittingTool):
         llm,
         parent_tools: dict[str, Tool],
         workspace_dir: str | None = None,
-        max_steps: int = 20,
+        max_steps: int = 60,
         token_limit: int = 40_000,
         parent_system_prompt: str | None = None,
     ):

@@ -61,6 +61,20 @@ same underlying data. Use ECharts in `deck.html` when it helps render a faithful
 browser preview, interactions, or complex analytical styling, but treat it as a
 preview surface, not the final PPT representation.
 
+Default data-display decision:
+
+- If a slide has numbers, percentages, rankings, change over time,
+  before/after comparisons, market sizing, benchmarks, KPIs, revenue, costs, or
+  operational metrics, choose a visible data display first.
+- Prefer a KPI strip for 2-4 headline metrics, a bar chart for ranked or
+  categorical comparison, a line/area chart for trends, a matrix or heatmap for
+  two-dimensional comparison, and a table only when exact values or labels
+  matter.
+- Use text-only bullets only when the available data is too sparse, the numbers
+  are merely supporting detail, or the user asked for text-only slides.
+- If the data is illustrative or assumed, label that in the outline evidence or
+  notes; do not make invented values look sourced.
+
 Required chart authoring pattern:
 
 1. Store the chart data/spec in `assets/data/*.json` or in a local JSON script
@@ -250,9 +264,11 @@ Use a generated full-slide background only for:
 
 When using a generated background, reserve a text-safe area before writing the
 prompt. The background must leave enough low-detail space for the title and key
-copy, and the HTML should add a controlled overlay when needed. Do not use
-complex generated backgrounds behind dense body text, data labels, charts, or
-tables.
+copy, and the HTML should add a controlled overlay when needed. Low-detail does
+not mean blank: ask for faint environmental continuation, soft texture, pale
+linework, atmospheric particles, or abstract shapes in the text-safe area so the
+composition feels balanced while preserving readability. Do not use complex
+generated backgrounds behind dense body text, data labels, charts, or tables.
 
 The text-safe area must come from a slide layout contract, not from a vague
 visual preference. For generated full-slide/background slides, first choose the
@@ -311,7 +327,7 @@ by every `generate` entry, plus an `image_plan` array. Use this shape:
       "prompt": {
         "deck_context": "AI Operating Model Transformation deck for executive and product leadership; theme: moving from isolated AI pilots to governed, repeatable AI workflows; narrative arc: fragmented experiments to unified orchestration to measurable business impact",
         "subject": "Three abstract data streams converging into a central neural core, floating geometric nodes orbit the core, translucent flow lines connect them",
-        "composition": "Off-center hero on the right two-thirds, generous negative space on the left for the title overlay, eye-level perspective, balanced rule-of-thirds framing",
+        "composition": "Off-center hero on the right two-thirds, left text-safe area stays calm with faint low-contrast linework and atmospheric continuation instead of blank space, eye-level perspective, balanced rule-of-thirds framing",
         "style": "Editorial vector illustration, clean linework, soft gradient fills, subtle grain texture",
         "palette": "Deep indigo #1E2A5E base, electric cyan #22D3EE accents, warm amber #F59E0B highlights, off-white #F8FAFC background",
         "lighting": "Soft directional light from upper-left, gentle rim light on focal node, no harsh shadows",
@@ -394,7 +410,7 @@ modern image models ignore them.
 - vector/illustration anchors: "consistent line weight", "even stroke", "limited color count"
 - photoreal/3D anchors: "studio lighting", "soft shadows", "global illumination", "subsurface scattering"
 - cinematic anchors: "subtle film grain", "muted contrast", "anamorphic flare", "color graded"
-- backgrounds: "low-detail text-safe area", "smooth gradient where copy lands"
+- backgrounds: "low-detail text-safe area with faint thematic texture", "smooth gradient where copy lands"
 
 ### Required Negatives
 
@@ -409,7 +425,7 @@ slide-specific negatives:
 Add when relevant:
 
 - humans involved: "distorted hands, extra fingers, deformed faces, uncanny anatomy"
-- background images: "busy patterns where copy lands, high-contrast detail in the text-safe area"
+- background images: "busy patterns where copy lands, high-contrast detail in the text-safe area, empty blank text-side composition"
 - product mockups: "fake brand logos, misspelled labels, plastic-looking materials"
 - vector style: "raster artifacts, photographic noise, gradient banding"
 - photoreal style: "over-saturated colors, HDR halos, plastic skin"
@@ -426,7 +442,7 @@ Good (structured, anchored, specific):
 
 ```text
 Subject: three abstract data streams converging into a glowing neural core, floating geometric nodes orbit the core, translucent flow lines connect them.
-Composition: off-center hero on the right two-thirds, generous negative space on the left for title overlay, eye-level perspective, rule-of-thirds framing.
+Composition: off-center hero on the right two-thirds, left title-safe area remains calm with faint low-contrast circuit-like linework and soft atmospheric continuation instead of blank space, eye-level perspective, rule-of-thirds framing.
 Style: editorial vector illustration, clean linework, soft gradient fills, subtle grain texture.
 Palette: deep indigo #1E2A5E, electric cyan #22D3EE accents, warm amber #F59E0B highlights, off-white #F8FAFC background.
 Lighting: soft directional light from upper-left, gentle rim light on focal node, no harsh shadows.
@@ -438,8 +454,8 @@ Quality: high detail, crisp edges, 4K poster quality, magazine-grade finish, bal
 
 Tune the prompt by image `kind`. Anchor stays the same; subject/composition/quality vary.
 
-- **hero_illustration**: lead with subject + composition; reserve text-safe area on one side; pair with `editorial-vector-soft`, `isometric-tech`, or `3d-soft-render`; quality booster: "consistent line weight" or "soft ambient occlusion".
-- **full_bleed_background**: emphasize palette + lighting + low-detail center or lower-third band for text; pair with `cinematic-scene` or `abstract-texture`; quality booster: "low-detail text-safe area in the upper third", "smooth gradient where copy lands".
+- **hero_illustration**: lead with subject + composition; reserve text-safe area on one side, but keep it visually alive with faint thematic texture or atmospheric continuation; pair with `editorial-vector-soft`, `isometric-tech`, or `3d-soft-render`; quality booster: "consistent line weight" or "soft ambient occlusion".
+- **full_bleed_background**: emphasize palette + lighting + low-detail center or lower-third band for text; add subtle low-contrast motifs in the safe area instead of pure empty space; pair with `cinematic-scene` or `abstract-texture`; quality booster: "low-detail text-safe area with faint texture", "smooth gradient where copy lands".
 - **product_mockup**: pair with `photoreal-product`; specify surface, material, reflection, depth of field, one hero angle, neutral seamless backdrop; quality booster: "studio lighting", "soft shadows", "subsurface scattering".
 - **scene**: pair with `cinematic-scene`; specify environment, time of day, atmosphere, single focal subject, foreground/midground/background; quality booster: "volumetric light", "subtle film grain".
 - **spot_illustration**: pair with `flat-minimal` or `editorial-vector-soft`; square `2048x2048`; single centered object, neutral background; quality booster: "limited color count", "even stroke".

@@ -397,6 +397,58 @@ def test_user_source_not_filtered_by_manifest():
         assert loader.get_skill("builtin-orphan") is None
 
 
+def test_skill_settings_disable_filters_loaded_skills():
+    """officev3 disabled skills must not be listed or loadable via get_skill."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        skills_dir = root / "skills"
+        skills_dir.mkdir()
+
+        for name in ("enabled-skill", "disabled-skill"):
+            sd = skills_dir / name
+            sd.mkdir()
+            create_test_skill(sd, name, f"{name} desc", f"{name} content")
+
+        settings_path = root / "skill-settings.json"
+        settings_path.write_text(
+            '{"disabledSkillNames":["disabled-skill"]}', encoding="utf-8"
+        )
+
+        loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
+        loader.discover_skills()
+
+        assert loader.get_skill("enabled-skill") is not None
+        assert loader.get_skill("disabled-skill") is None
+        assert set(loader.list_skills()) == {"enabled-skill"}
+
+
+def test_skill_settings_change_triggers_reload():
+    """Changing officev3 skill settings should affect the next get_skill path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        skills_dir = root / "skills"
+        skills_dir.mkdir()
+
+        sd = skills_dir / "toggle-skill"
+        sd.mkdir()
+        create_test_skill(sd, "toggle-skill", "toggle desc", "toggle content")
+
+        settings_path = root / "skill-settings.json"
+        settings_path.write_text('{"disabledSkillNames":[]}', encoding="utf-8")
+
+        loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
+        loader.discover_skills()
+
+        assert loader.get_skill("toggle-skill") is not None
+
+        settings_path.write_text(
+            '{"disabledSkillNames":["toggle-skill"]}', encoding="utf-8"
+        )
+
+        assert loader.maybe_reload() is True
+        assert loader.get_skill("toggle-skill") is None
+
+
 def test_missing_manifest_falls_back_to_unfiltered():
     """No manifest in builtin dir → behave like before (load everything)."""
     with tempfile.TemporaryDirectory() as tmpdir:

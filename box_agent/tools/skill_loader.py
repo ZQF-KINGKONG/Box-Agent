@@ -54,6 +54,31 @@ def _tokenize(text: str) -> Set[str]:
 
 
 SKILL_SLOT_SENTINEL = "__BOX_AGENT_SKILLS_SLOT__"
+SKILL_SETTINGS_PATH = Path.home() / ".box-agent" / "config" / "skill-settings.json"
+_SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _read_disabled_skill_names(settings_path: Path) -> Set[str]:
+    """Read officev3 skill enable/disable state.
+
+    The file is optional and owned by the desktop app. Missing or malformed
+    settings should never break agent startup; they simply mean all skills are
+    enabled.
+    """
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    raw_names = data.get("disabledSkillNames") if isinstance(data, dict) else None
+    if not isinstance(raw_names, list):
+        return set()
+
+    return {
+        name
+        for name in raw_names
+        if isinstance(name, str) and _SKILL_NAME_RE.match(name)
+    }
 
 
 @dataclass
@@ -121,6 +146,7 @@ class SkillLoader:
         self,
         sources: Optional[List[Tuple[str | Path, SkillSource]] | str | Path] = None,
         skills_dir: Optional[str] = None,
+        skill_settings_path: Optional[str | Path] = None,
     ):
         """
         Initialize Skill Loader.
@@ -142,6 +168,12 @@ class SkillLoader:
         self._sources: List[_SourceEntry] = [
             _SourceEntry(directory=Path(d).expanduser(), source=s) for d, s in sources
         ]
+        self._skill_settings_path = (
+            Path(skill_settings_path).expanduser()
+            if skill_settings_path
+            else SKILL_SETTINGS_PATH
+        )
+        self._skill_settings_signature: tuple[str, int, int] | None = None
         self.loaded_skills: Dict[str, Skill] = {}
 
     # Backward compatibility — expose the first source directory
@@ -248,6 +280,7 @@ class SkillLoader:
         """Discover skills from all sources; user overrides builtin on name conflict."""
         self.loaded_skills = {}
         discovered: List[Skill] = []
+        disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
 
         # Reverse order: load lower-priority sources first, then higher-priority
         # ones overwrite by dict assignment.
@@ -280,6 +313,9 @@ class SkillLoader:
                     )
                     continue
 
+                if skill.name in disabled_skill_names:
+                    continue
+
                 self.loaded_skills[skill.name] = skill
 
             # Cache a cheap signature for reload detection. Keep last_mtime for
@@ -287,6 +323,7 @@ class SkillLoader:
             entry.signature = self._source_signature(entry)
             entry.last_mtime = max((mtime for _, mtime, _ in entry.signature), default=0) / 1_000_000_000
 
+        self._skill_settings_signature = self._file_signature(self._skill_settings_path)
         discovered = list(self.loaded_skills.values())
         return discovered
 
@@ -375,6 +412,14 @@ class SkillLoader:
             rel = str(path)
         return (rel, stat.st_mtime_ns, stat.st_size)
 
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[str, int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return (str(path), stat.st_mtime_ns, stat.st_size)
+
     def _source_signature(self, entry: _SourceEntry) -> Tuple[Tuple[str, int, int], ...]:
         """Return a lightweight signature for files that affect skill loading."""
         if not entry.directory.exists():
@@ -429,6 +474,12 @@ class SkillLoader:
             True if a reload was performed, False otherwise.
         """
         changed = False
+        if hasattr(self, "_skill_settings_path"):
+            if (
+                self._file_signature(self._skill_settings_path)
+                != self._skill_settings_signature
+            ):
+                changed = True
         for entry in self._sources:
             current = self._source_signature(entry)
             if current != entry.signature:
@@ -610,6 +661,7 @@ class SkillSelector:
         """
         if self._prefix is None or self._suffix is None:
             return None
+        self._loader.maybe_reload()
         if user_input and user_input.strip():
             self._cumulative.append(user_input.strip())
         query = " ".join(self._cumulative)

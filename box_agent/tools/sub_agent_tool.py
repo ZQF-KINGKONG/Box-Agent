@@ -11,7 +11,7 @@ concurrently via ``asyncio.gather`` in the core loop.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from ..events import (
@@ -70,8 +70,18 @@ class SubAgentTool(EventEmittingTool):
     ):
         super().__init__()
         self._llm = llm
-        # Exclude ourselves to prevent recursive sub-agent spawning.
-        self._child_tools = {n: t for n, t in parent_tools.items() if n != self.name}
+        # Snapshot taken at construction time. Used as a fallback only; the
+        # live parent tool map is preferred (see ``set_tool_provider``) so that
+        # tools that load *after* construction — notably MCP tools such as
+        # ``web_search`` which arrive asynchronously — are still inherited by
+        # child agents. Exclude ourselves to prevent recursive spawning.
+        self._child_tools_snapshot = {
+            n: t for n, t in parent_tools.items() if n != self.name
+        }
+        # Callable returning the parent agent's *live* tool map. Wired by
+        # ``Agent.__init__`` after the agent's ``self.tools`` dict (which
+        # ``register_mcp_tools`` mutates in place) is built.
+        self._tool_provider: Callable[[], dict[str, Tool]] | None = None
         self._workspace_dir = workspace_dir
         self._max_steps = max_steps
         self._token_limit = token_limit
@@ -80,6 +90,28 @@ class SubAgentTool(EventEmittingTool):
     def set_parent_system_prompt(self, system_prompt: str) -> None:
         """Attach the finalized parent prompt so child agents inherit constraints."""
         self._parent_system_prompt = system_prompt
+
+    def set_tool_provider(self, provider: Callable[[], dict[str, Tool]]) -> None:
+        """Wire a callable returning the parent agent's live tool map.
+
+        The provider is invoked at ``execute`` time so child agents inherit the
+        parent's current toolset — including MCP tools (e.g. ``web_search``)
+        registered after this tool was constructed. Without this, the child
+        would be frozen with the construction-time snapshot and silently lose
+        late-loading tools, forcing it into brittle fallbacks (raw ``curl``).
+        """
+        self._tool_provider = provider
+
+    def _resolve_child_tools(self) -> dict[str, Tool]:
+        """Return the child toolset: live parent map minus ``sub_agent``."""
+        if self._tool_provider is not None:
+            try:
+                live = self._tool_provider()
+            except Exception:
+                live = None
+            if live:
+                return {n: t for n, t in live.items() if n != self.name}
+        return dict(self._child_tools_snapshot)
 
     @property
     def name(self) -> str:
@@ -104,7 +136,10 @@ class SubAgentTool(EventEmittingTool):
             "The parent agent must own coordination: choose the split, merge results, resolve conflicts, "
             "write final deliverables, package/release outputs, update shared files, and run final "
             "validation. The sub-agent must report changed/created paths, findings, assumptions, and "
-            "remaining risks."
+            "remaining risks.\n\n"
+            "When launching parallel sub-agents, give each call a short, distinct `title` naming only "
+            "what differs between siblings (the page/file/slice), not the shared context — this is what "
+            "the user sees as the per-task label."
         )
 
     @property
@@ -112,6 +147,17 @@ class SubAgentTool(EventEmittingTool):
         return {
             "type": "object",
             "properties": {
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "A short, distinct label (about 4-12 characters / 2-6 words) "
+                        "naming what makes THIS unit different from its siblings — e.g. "
+                        "the page topic, file name, or data slice. Do NOT repeat the "
+                        "shared context that every sibling shares (the company name, "
+                        "the common task stem); put only the distinguishing part here. "
+                        "Used as the display label in parallel-task UIs."
+                    ),
+                },
                 "task": {
                     "type": "string",
                     "description": (
@@ -136,7 +182,7 @@ class SubAgentTool(EventEmittingTool):
         ErrorEvent,
     )
 
-    async def execute(self, task: str) -> ToolResult:  # type: ignore[override]
+    async def execute(self, task: str, title: str | None = None) -> ToolResult:  # type: ignore[override]
         # Import here to avoid circular dependency (core → tools → core).
         from ..core import run_agent_loop
 
@@ -156,9 +202,16 @@ class SubAgentTool(EventEmittingTool):
             Message(role="user", content=task),
         ]
 
+        # Resolve the child toolset from the parent's *live* tool map so
+        # late-loaded tools (e.g. MCP web_search) are inherited.
+        child_tools = self._resolve_child_tools()
+
         queue = self._event_queue
         # Single-line preview: collapse whitespace, truncate
         task_preview = " ".join(task.split())[:50]
+        # Short, distinct label provided by the parent model. Falls back to the
+        # task preview when omitted so older callers / hosts still get a label.
+        sub_title = " ".join((title or "").split())[:60] or task_preview
         sub_agent_id = f"subagent-{uuid4().hex}"
 
         final_content = ""
@@ -172,7 +225,7 @@ class SubAgentTool(EventEmittingTool):
             async for event in run_agent_loop(
                 llm=self._llm,
                 messages=messages,
-                tools=self._child_tools,
+                tools=child_tools,
                 max_steps=self._max_steps,
                 token_limit=self._token_limit,
                 workspace_dir=self._workspace_dir,
@@ -191,6 +244,7 @@ class SubAgentTool(EventEmittingTool):
                             task_preview=task_preview,
                             event=event,
                             sub_agent_id=sub_agent_id,
+                            title=sub_title,
                         )
                     )
         except Exception as exc:
@@ -211,6 +265,7 @@ class SubAgentTool(EventEmittingTool):
                                 ),
                             ),
                             sub_agent_id=sub_agent_id,
+                            title=sub_title,
                         )
                     )
             return ToolResult(

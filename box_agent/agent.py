@@ -127,6 +127,12 @@ class Agent:
         for tool in self.tools.values():
             if hasattr(tool, "set_parent_system_prompt"):
                 tool.set_parent_system_prompt(system_prompt)
+            # Give sub-agents a live view of this agent's tool map so tools
+            # registered after construction (e.g. MCP web_search, merged in by
+            # register_mcp_tools which mutates self.tools in place) are still
+            # inherited by child agents instead of a stale snapshot.
+            if hasattr(tool, "set_tool_provider"):
+                tool.set_tool_provider(lambda: self.tools)
         self.messages: list[Message] = [Message(role="system", content=system_prompt)]
         self.logger = AgentLogger()
         self.api_total_tokens: int = 0
@@ -285,8 +291,9 @@ class Agent:
                 size_label = _format_size(sz)
                 print(f"{Colors.BRIGHT_CYAN}📎 {kind}{Colors.RESET} {fname} · {size_label} · {Colors.DIM}{rel}{Colors.RESET}")
 
-            case SubAgentEvent(task_preview=preview, event=inner, sub_agent_id=_):
-                label = preview[:40] + "..." if len(preview) > 40 else preview
+            case SubAgentEvent(task_preview=preview, event=inner, sub_agent_id=_, title=sub_title):
+                raw_label = sub_title or preview
+                label = raw_label[:40] + "..." if len(raw_label) > 40 else raw_label
                 prefix = f"{Colors.DIM}  ┊ [{label}]{Colors.RESET}"
                 match inner:
                     case StepStart(step=s, max_steps=mx):

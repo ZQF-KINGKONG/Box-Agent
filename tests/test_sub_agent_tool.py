@@ -101,6 +101,9 @@ def test_schema():
     schema = tool.to_schema()
     assert schema["name"] == "sub_agent"
     assert "task" in schema["input_schema"]["properties"]
+    # `title` is an optional short distinct label, not required.
+    assert "title" in schema["input_schema"]["properties"]
+    assert schema["input_schema"]["required"] == ["task"]
 
     openai_schema = tool.to_openai_schema()
     assert openai_schema["function"]["name"] == "sub_agent"
@@ -132,8 +135,39 @@ def test_child_tools_exclude_sub_agent():
     dummy = DummyTool()
     parent = {"dummy": dummy, "sub_agent": SubAgentTool(llm=llm, parent_tools={})}
     tool = SubAgentTool(llm=llm, parent_tools=parent)
-    assert "sub_agent" not in tool._child_tools
-    assert "dummy" in tool._child_tools
+    resolved = tool._resolve_child_tools()
+    assert "sub_agent" not in resolved
+    assert "dummy" in resolved
+
+
+def test_resolve_child_tools_prefers_live_provider():
+    """Child toolset follows the parent's live tool map, not the snapshot.
+
+    Tools registered after construction (e.g. MCP web_search merged in via
+    register_mcp_tools) must be inherited by child agents.
+    """
+    llm = AsyncMock()
+    snapshot = {"dummy": DummyTool()}
+    tool = SubAgentTool(llm=llm, parent_tools=snapshot)
+
+    # Live parent map gains a tool after construction; provider points at it.
+    live: dict = {"dummy": DummyTool(), "sub_agent": tool}
+    tool.set_tool_provider(lambda: live)
+    live["web_search"] = DummyTool()  # simulate late MCP merge (in-place mutation)
+
+    resolved = tool._resolve_child_tools()
+    assert "web_search" in resolved  # late tool inherited
+    assert "sub_agent" not in resolved  # still excludes itself
+
+
+def test_resolve_child_tools_falls_back_to_snapshot():
+    """Without a provider (or if it fails), fall back to the snapshot."""
+    llm = AsyncMock()
+    tool = SubAgentTool(llm=llm, parent_tools={"dummy": DummyTool()})
+    assert "dummy" in tool._resolve_child_tools()  # no provider → snapshot
+
+    tool.set_tool_provider(lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert "dummy" in tool._resolve_child_tools()  # provider raised → snapshot
 
 
 # ── Execution ────────────────────────────────────────────────
@@ -146,6 +180,47 @@ async def test_basic_execution():
     result = await tool.execute(task="Analyze revenue data")
     assert result.success is True
     assert "revenue up 20%" in result.content
+
+
+async def test_forwarded_events_carry_short_title():
+    """A provided `title` becomes the SubAgentEvent label; task is unchanged."""
+    llm = _make_llm(text="done")
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    queue = asyncio.Queue()
+    tool._event_queue = queue
+    tool._parent_tool_call_id = "parent-sub-agent"
+
+    await tool.execute(
+        task="围绕商汤科技（SenseTime, 0020.HK）做一个独立研究切片：财务表现与业务结构",
+        title="财务表现与业务结构",
+    )
+
+    events = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+    sub_events = [e for e in events if isinstance(e, SubAgentEvent)]
+    assert sub_events
+    assert all(e.title == "财务表现与业务结构" for e in sub_events)
+    # task_preview still reflects the (long, shared-prefix) task.
+    assert all(e.title != e.task_preview for e in sub_events)
+
+
+async def test_title_falls_back_to_task_preview_when_omitted():
+    """Without a title, the label falls back to the task preview (no break)."""
+    llm = _make_llm(text="done")
+    tool = SubAgentTool(llm=llm, parent_tools={})
+    queue = asyncio.Queue()
+    tool._event_queue = queue
+    tool._parent_tool_call_id = "parent-sub-agent"
+
+    await tool.execute(task="Analyze revenue data for Q3")
+
+    events = []
+    while not queue.empty():
+        events.append(queue.get_nowait())
+    sub_events = [e for e in events if isinstance(e, SubAgentEvent)]
+    assert sub_events
+    assert all(e.title == e.task_preview for e in sub_events)
 
 
 async def test_sub_agent_inherits_parent_system_prompt_constraints():

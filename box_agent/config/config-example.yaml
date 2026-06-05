@@ -55,6 +55,7 @@ retry:
 
 # ===== Agent Configuration =====
 max_steps: 200 # Maximum execution steps
+max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_agent, generate_image) per step
 workspace_dir: "./workspace" # Working directory
 system_prompt_path: "system_prompt.md" # System prompt file (same config directory)
 

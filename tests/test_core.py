@@ -725,6 +725,66 @@ async def test_no_progress_resets_on_successful_tool():
 
 
 @pytest.mark.asyncio
+async def test_max_parallel_tools_caps_concurrency():
+    """Even when the model emits many parallel_safe calls in one step, no more
+    than max_parallel_tools execute concurrently; all still run."""
+
+    class ConcurrencyProbeTool(Tool):
+        parallel_safe = True
+
+        def __init__(self):
+            self.current = 0
+            self.peak = 0
+            self.total = 0
+
+        @property
+        def name(self):
+            return "probe"
+
+        @property
+        def description(self):
+            return "probe"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {"i": {"type": "string"}}}
+
+        async def execute(self, **kwargs):
+            self.current += 1
+            self.total += 1
+            self.peak = max(self.peak, self.current)
+            await asyncio.sleep(0.02)
+            self.current -= 1
+            return ToolResult(success=True, content="ok")
+
+    probe = ConcurrencyProbeTool()
+    n_calls = 10
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id=f"p{i}", type="function", function=FunctionCall(name="probe", arguments={"i": str(i)}))
+                for i in range(n_calls)
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ]
+    await collect(
+        run_agent_loop(
+            llm=MockLLM(responses),
+            messages=_msgs(),
+            tools={"probe": probe},
+            max_steps=5,
+            max_parallel_tools=3,
+        )
+    )
+
+    assert probe.total == n_calls  # all calls ran
+    assert probe.peak <= 3  # never exceeded the cap
+
+
+@pytest.mark.asyncio
 async def test_llm_error():
     """LLM exception yields ErrorEvent + Done(ERROR)."""
 

@@ -1067,6 +1067,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         workspace_dir=str(workspace_dir),
         token_limit=config.llm.context_token_limit,
         hooks=hooks,
+        max_parallel_tools=config.agent.max_parallel_tools,
         memory_promotion_enabled=config.agent.memory_promotion_proposal_enabled,
         memory_promotion_hit_threshold=config.agent.memory_promotion_hit_threshold,
         memory_promotion_cooldown_days=config.agent.memory_promotion_cooldown_days,

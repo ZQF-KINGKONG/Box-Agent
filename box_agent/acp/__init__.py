@@ -489,6 +489,7 @@ class BoxACPAgent:
             workspace_dir=str(workspace),
             token_limit=self._config.llm.context_token_limit,
             thinking_enabled=deep_think,
+            max_parallel_tools=self._config.agent.max_parallel_tools,
             memory_promotion_enabled=self._config.agent.memory_promotion_proposal_enabled,
             memory_promotion_hit_threshold=self._config.agent.memory_promotion_hit_threshold,
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,

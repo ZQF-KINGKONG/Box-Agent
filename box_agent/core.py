@@ -983,6 +983,7 @@ async def run_agent_loop(
     thinking_enabled: bool = False,
     session_id: str = "",
     no_progress_limit: int | None = None,
+    max_parallel_tools: int = 8,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1736,13 +1737,20 @@ async def run_agent_loop(
                     tool._parent_tool_call_id = tc.id
                     emitting_tools.append(tool)
 
+            # Hard concurrency cap: even if the model emits dozens of
+            # parallel_safe calls in one step, only max_parallel_tools run at
+            # once; the rest queue on the semaphore. Bounds resource use (LLM
+            # rate limits, subprocesses, memory) against runaway fan-out.
+            par_semaphore = asyncio.Semaphore(max(1, max_parallel_tools))
+
             async def _run_parallel(tc):
                 fn_name = tc.function.name
                 fn_args = par_args_map[tc.id]
                 if fn_name not in tools:
                     return tc, ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
                 try:
-                    r = await tools[fn_name].execute(**fn_args)
+                    async with par_semaphore:
+                        r = await tools[fn_name].execute(**fn_args)
                 except Exception as exc:
                     detail = f"{type(exc).__name__}: {exc!s}"
                     trace = traceback.format_exc()

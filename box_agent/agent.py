@@ -96,10 +96,12 @@ class Agent:
         memory_promotion_enabled: bool = False,
         memory_promotion_hit_threshold: int = 5,
         memory_promotion_cooldown_days: int = 14,
+        max_parallel_tools: int = 8,
     ):
         self.llm = llm_client
         self.tools = {tool.name: tool for tool in tools}
         self.max_steps = max_steps
+        self.max_parallel_tools = max_parallel_tools
         self.token_limit = token_limit
         self.workspace_dir = Path(workspace_dir)
         self.cancel_event: Optional[asyncio.Event] = None
@@ -186,6 +188,7 @@ class Agent:
             memory_promotion_cooldown_days=self.memory_promotion_cooldown_days,
             inject_queue=self.inject_queue,
             thinking_enabled=self.thinking_enabled,
+            max_parallel_tools=self.max_parallel_tools,
         ):
             # Track token usage on Agent instance for backward compat
             if isinstance(event, TokenUsageEvent):

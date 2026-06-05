@@ -87,6 +87,12 @@ class AgentConfig(BaseModel):
 
     max_steps: int = 200
     workspace_dir: str = "./workspace"
+    # Hard ceiling on how many parallel_safe tool calls (sub_agent,
+    # generate_image) run concurrently within a single step, regardless of how
+    # many the model emits. Excess calls queue and run as slots free up. Guards
+    # against a prompt like "spawn as many sub-agents as possible" exhausting
+    # LLM rate limits / processes / memory.
+    max_parallel_tools: int = 8
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
     # Memory
@@ -352,6 +358,7 @@ class Config(BaseModel):
         agent_config = AgentConfig(
             max_steps=data.get("max_steps", 200),
             workspace_dir=data.get("workspace_dir", "./workspace"),
+            max_parallel_tools=data.get("max_parallel_tools", 8),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             enable_memory=data.get("enable_memory", True),
             memory_dir=data.get("memory_dir", "~/.box-agent/memory"),

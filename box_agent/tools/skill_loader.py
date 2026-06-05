@@ -58,13 +58,16 @@ SKILL_SETTINGS_PATH = Path.home() / ".box-agent" / "config" / "skill-settings.js
 _SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 
-def _read_disabled_skill_names(settings_path: Path) -> Set[str]:
+def _read_disabled_skill_names(settings_path: Optional[Path]) -> Set[str]:
     """Read officev3 skill enable/disable state.
 
     The file is optional and owned by the desktop app. Missing or malformed
     settings should never break agent startup; they simply mean all skills are
     enabled.
     """
+    if settings_path is None:
+        return set()
+
     try:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -168,10 +171,10 @@ class SkillLoader:
         self._sources: List[_SourceEntry] = [
             _SourceEntry(directory=Path(d).expanduser(), source=s) for d, s in sources
         ]
-        self._skill_settings_path = (
+        self._skill_settings_path: Optional[Path] = (
             Path(skill_settings_path).expanduser()
             if skill_settings_path
-            else SKILL_SETTINGS_PATH
+            else self._default_skill_settings_path()
         )
         self._skill_settings_signature: tuple[str, int, int] | None = None
         self.loaded_skills: Dict[str, Skill] = {}
@@ -180,6 +183,22 @@ class SkillLoader:
     @property
     def skills_dir(self) -> Path:
         return self._sources[0].directory if self._sources else Path("./skills")
+
+    def _default_skill_settings_path(self) -> Optional[Path]:
+        """Use officev3 skill settings only for the officev3 user-skill source.
+
+        Tests and standalone loaders often point at temporary skill roots; they
+        must not be affected by the developer machine's real desktop settings.
+        """
+        user_skills_dir = Path.home() / ".box-agent" / "skills"
+        for entry in self._sources:
+            try:
+                if entry.directory.expanduser().resolve() == user_skills_dir.resolve():
+                    return SKILL_SETTINGS_PATH
+            except OSError:
+                if entry.directory.expanduser() == user_skills_dir:
+                    return SKILL_SETTINGS_PATH
+        return None
 
     def load_skill(self, skill_path: Path, source: SkillSource = "builtin") -> Optional[Skill]:
         """Load a single skill from a SKILL.md file."""
@@ -413,7 +432,9 @@ class SkillLoader:
         return (rel, stat.st_mtime_ns, stat.st_size)
 
     @staticmethod
-    def _file_signature(path: Path) -> tuple[str, int, int] | None:
+    def _file_signature(path: Optional[Path]) -> tuple[str, int, int] | None:
+        if path is None:
+            return None
         try:
             stat = path.stat()
         except OSError:

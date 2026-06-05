@@ -257,6 +257,7 @@ class SubAgentEvent:
     task_preview: str  # first ~80 chars of the task
     event: AgentEvent  # the nested event
     sub_agent_id: str = ""  # stable child-run id for host-side grouping
+    title: str = ""  # short, distinct label for this sub-agent (no shared prefix)
 
 
 # ── PPT structured progress ───────────────────────────────────

@@ -1234,11 +1234,17 @@ class BoxACPAgent:
 
                     case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args):
                         log.info("tool/start", session_id=session_id, tool_call_id=tid, tool_name=name, arguments=args)
-                        args_preview = (
-                            ", ".join(f"{k}={repr(v)[:50]}" for k, v in list(args.items())[:2])
-                            if isinstance(args, dict) else ""
-                        )
-                        label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
+                        if name == "sub_agent" and isinstance(args, dict):
+                            # Surface the short distinct label as the title so the
+                            # host doesn't fall back to the long, near-identical task.
+                            sub_title = " ".join(str(args.get("title") or "").split())
+                            label = f"🔧 sub_agent: {sub_title}" if sub_title else "🔧 sub_agent()"
+                        else:
+                            args_preview = (
+                                ", ".join(f"{k}={repr(v)[:50]}" for k, v in list(args.items())[:2])
+                                if isinstance(args, dict) else ""
+                            )
+                            label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
                         await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
 
                     case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err, raw_output=raw_output):
@@ -1308,7 +1314,7 @@ class BoxACPAgent:
                         log.debug("done", session_id=session_id, stop_reason=reason.value)
                         return reason.value
 
-                    case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id):
+                    case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id, title=sub_title):
                         if isinstance(inner, WebSearchEvent):
                             web_search_payload = {**inner.payload, "type": "web_search"}
                             log.debug("sub_agent/web_search", session_id=session_id, tool_call_id=tid, payload=web_search_payload)
@@ -1321,6 +1327,7 @@ class BoxACPAgent:
                             "parent_tool_call_id": tid,
                             "sub_agent_id": sub_agent_id,
                             "task_preview": preview,
+                            "title": sub_title or preview,
                         }
                         match inner:
                             case StepStart(step=s, max_steps=mx):

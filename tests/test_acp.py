@@ -133,7 +133,7 @@ class SubAgentLLM:
                     ToolCall(
                         id="sub1",
                         type="function",
-                        function=FunctionCall(name="sub_agent", arguments={"task": "Inspect one file"}),
+                        function=FunctionCall(name="sub_agent", arguments={"task": "Inspect one file", "title": "file probe"}),
                     )
                 ],
             )
@@ -609,5 +609,7 @@ async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
     assert {item["parent_tool_call_id"] for item in progress} == {"sub1"}
     assert all(item["sub_agent_id"].startswith("subagent-") for item in progress)
     assert {item["sub_agent_id"] for item in progress}
+    # Short distinct label is forwarded for host-side rendering.
+    assert all(item["title"] == "file probe" for item in progress)
     assert any(item["event"] == "tool_start" and item["tool_name"] == "echo" for item in progress)
     assert any(item["event"] == "llm_output" and item["content"] == "child summary" for item in progress)

@@ -982,6 +982,7 @@ async def run_agent_loop(
     inject_queue: asyncio.Queue[str] | None = None,
     thinking_enabled: bool = False,
     session_id: str = "",
+    no_progress_limit: int | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1139,6 +1140,15 @@ async def run_agent_loop(
     WRAPUP_REMAINING = 3
     wrapup_injected = False
 
+    # No-progress circuit breaker (opt-in via ``no_progress_limit``). Counts
+    # consecutive steps in which no tool call returned a success with usable
+    # (non-empty) content. After the limit is hit, inject the same wrap-up
+    # synthesis nudge instead of letting a stuck agent flail to max_steps —
+    # the failure mode seen when a sub-agent has no web_search and retries raw
+    # curl scraping dozens of times. Disabled (None) for the top-level agent to
+    # preserve existing behavior.
+    no_progress_steps = 0
+
     for step in range(max_steps):
         # ── Cancellation check (top of step) ────────────────
         # No cleanup needed here — messages are consistent at step boundaries.
@@ -1207,6 +1217,30 @@ async def run_agent_loop(
                 Message(role="user", content=_format_injected_message(wrapup_text))
             )
             yield InjectedMessageEvent(content=wrapup_text, injection_id=None)
+
+        # ── No-progress circuit breaker (one-shot) ──────────
+        # The agent has gone no_progress_limit consecutive steps without a
+        # single useful tool result. Stop the flailing and force a synthesis
+        # from whatever was gathered, rather than burning the rest of the
+        # step budget on the same failing approach.
+        if (
+            not wrapup_injected
+            and no_progress_limit
+            and no_progress_steps >= no_progress_limit
+        ):
+            wrapup_injected = True
+            stall_text = (
+                f"⚠️ 已连续 {no_progress_steps} 步没有取得有效进展"
+                "（工具调用持续失败或无有用输出）。"
+                "现在请立即停止调用任何工具、停止重试当前路径。"
+                "仅基于你已经收集到的信息，在本轮直接给出完整、可独立阅读的"
+                "最终答案/总结：包含关键结论、已知数据与已产出的文件路径；"
+                "对未能获取的信息，简要标注为缺口即可，不要再继续调查。"
+            )
+            messages.append(
+                Message(role="user", content=_format_injected_message(stall_text))
+            )
+            yield InjectedMessageEvent(content=stall_text, injection_id=None)
 
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)
@@ -1489,6 +1523,10 @@ async def run_agent_loop(
             else:
                 regular_calls.append(tc)
 
+        # Track whether this step produced any useful tool result, for the
+        # no-progress circuit breaker. Set True in either execution branch.
+        step_made_progress = False
+
         # 1. Sequential execution for regular tools (preserves ordering)
         for tc in regular_calls:
             tc_id = tc.id
@@ -1596,6 +1634,11 @@ async def run_agent_loop(
                             result_error=result.error if not result.success else None,
                             raw_output=result.raw_output,
                         )
+
+            # Progress signal for the no-progress breaker: a successful tool
+            # call with non-empty content counts as making progress.
+            if result.success and (result.content or "").strip():
+                step_made_progress = True
 
             # Hook: tool result (interceptor — may modify content/error)
             tc_content = result.content
@@ -1827,6 +1870,10 @@ async def run_agent_loop(
                                 raw_output=result.raw_output,
                             )
 
+                # Progress signal for the no-progress breaker.
+                if result.success and (result.content or "").strip():
+                    step_made_progress = True
+
                 # Hook: tool result (interceptor)
                 par_content = result.content
                 par_error = result.error
@@ -1884,6 +1931,14 @@ async def run_agent_loop(
                 return
 
         # ── Step end ────────────────────────────────────────
+        # Update the no-progress counter (only steps that ran tools reach
+        # here — the no-tool-call path returns earlier with END_TURN).
+        if no_progress_limit:
+            if step_made_progress:
+                no_progress_steps = 0
+            else:
+                no_progress_steps += 1
+
         elapsed = perf_counter() - step_start
         total = perf_counter() - run_start
         yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)

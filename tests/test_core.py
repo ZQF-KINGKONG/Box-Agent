@@ -15,6 +15,7 @@ from box_agent.events import (
     ContentEvent,
     DoneEvent,
     ErrorEvent,
+    InjectedMessageEvent,
     ProgressEvent,
     StepEnd,
     StepStart,
@@ -632,6 +633,95 @@ async def test_max_steps():
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert len(done) == 1
     assert done[0].stop_reason == StopReason.MAX_STEPS
+
+
+@pytest.mark.asyncio
+async def test_no_progress_breaker_injects_wrapup_and_stops():
+    """After no_progress_limit consecutive failing steps, the breaker injects a
+    synthesis nudge so the agent stops flailing instead of running to max_steps."""
+
+    def fail_call(i):
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id=f"f{i}", type="function", function=FunctionCall(name="fail", arguments={"reason": str(i)}))],
+            finish_reason="tool",
+        )
+
+    responses = [
+        fail_call(0),  # step 0 → no_progress_steps = 1
+        fail_call(1),  # step 1 → no_progress_steps = 2 (== limit)
+        LLMResponse(content="Final answer from what I have.", finish_reason="stop"),  # step 2
+    ]
+    events = await collect(
+        run_agent_loop(
+            llm=MockLLM(responses),
+            messages=_msgs(),
+            tools={"fail": FailTool()},
+            max_steps=20,
+            no_progress_limit=2,
+        )
+    )
+
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert any("没有取得有效进展" in e.content for e in injected)
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert len(done) == 1
+    assert done[0].stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+async def test_no_progress_breaker_disabled_by_default():
+    """Without no_progress_limit, no stall nudge is injected (parent behavior)."""
+
+    def fail_call(i):
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id=f"f{i}", type="function", function=FunctionCall(name="fail", arguments={"reason": str(i)}))],
+            finish_reason="tool",
+        )
+
+    events = await collect(
+        run_agent_loop(
+            llm=MockLLM([fail_call(0), fail_call(1), fail_call(2)]),
+            messages=_msgs(),
+            tools={"fail": FailTool()},
+            max_steps=3,  # exhausts without any breaker injection
+        )
+    )
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert not any("没有取得有效进展" in e.content for e in injected)
+
+
+@pytest.mark.asyncio
+async def test_no_progress_resets_on_successful_tool():
+    """A successful tool call with content resets the no-progress counter."""
+
+    def fail_call(i):
+        return LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id=f"f{i}", type="function", function=FunctionCall(name="fail", arguments={"reason": str(i)}))],
+            finish_reason="tool",
+        )
+
+    echo_call = LLMResponse(
+        content="",
+        tool_calls=[ToolCall(id="e", type="function", function=FunctionCall(name="echo", arguments={"text": "ok"}))],
+        finish_reason="tool",
+    )
+    # fail, success (resets), fail — never 2 consecutive failures, so no breaker.
+    responses = [fail_call(0), echo_call, fail_call(1),
+                 LLMResponse(content="done", finish_reason="stop")]
+    events = await collect(
+        run_agent_loop(
+            llm=MockLLM(responses),
+            messages=_msgs(),
+            tools={"fail": FailTool(), "echo": EchoTool()},
+            max_steps=20,
+            no_progress_limit=2,
+        )
+    )
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert not any("没有取得有效进展" in e.content for e in injected)
 
 
 @pytest.mark.asyncio

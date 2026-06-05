@@ -64,9 +64,10 @@ class SubAgentTool(EventEmittingTool):
         llm,
         parent_tools: dict[str, Tool],
         workspace_dir: str | None = None,
-        max_steps: int = 60,
+        max_steps: int = 40,
         token_limit: int = 40_000,
         parent_system_prompt: str | None = None,
+        no_progress_limit: int = 6,
     ):
         super().__init__()
         self._llm = llm
@@ -86,6 +87,7 @@ class SubAgentTool(EventEmittingTool):
         self._max_steps = max_steps
         self._token_limit = token_limit
         self._parent_system_prompt = parent_system_prompt
+        self._no_progress_limit = no_progress_limit
 
     def set_parent_system_prompt(self, system_prompt: str) -> None:
         """Attach the finalized parent prompt so child agents inherit constraints."""
@@ -126,7 +128,7 @@ class SubAgentTool(EventEmittingTool):
             "to answer one question, deep codebase search, exploratory data analysis, reviewing one "
             "slice of outputs, processing one input file, or drafting one independent page/section/file.\n\n"
             "Mandatory trigger: when a task needs generating or reviewing more than 5 structurally "
-            "similar units that can be isolated, launch 3-5 sub_agent calls first unless the user "
+            "similar units that can be isolated, launch 3-7 sub_agent calls first unless the user "
             "explicitly says not to parallelize or the units cannot be safely isolated. Each call "
             "must be scoped to a single small unit such as 1 page, 1 file, 1 data slice, or 1 QA dimension. Each sub-agent "
             "may create draft files or artifacts only in an explicitly assigned unique path, directory, "
@@ -229,6 +231,7 @@ class SubAgentTool(EventEmittingTool):
                 max_steps=self._max_steps,
                 token_limit=self._token_limit,
                 workspace_dir=self._workspace_dir,
+                no_progress_limit=self._no_progress_limit,
             ):
                 if isinstance(event, ToolCallStart):
                     pending_child_tc[event.tool_call_id] = event.tool_name

@@ -116,7 +116,7 @@ def test_description_encourages_bounded_parallel_units_with_parent_merge():
 
     assert "Mandatory trigger" in description
     assert "more than 5 structurally similar units" in description
-    assert "launch 3-5 sub_agent calls first" in description
+    assert "launch 3-7 sub_agent calls first" in description
     assert "single small unit" in description
     assert "unique path, directory, or filename prefix" in description
     assert "If the final deliverable is a single file" in description

@@ -82,6 +82,9 @@ def test_expert_session_context_parses_camel_and_snake_case() -> None:
     assert "团长定题" in rendered
     assert "Delegation task template" in rendered
     assert "Required workstreams for non-trivial tasks: 行业研究线" in rendered
+    assert "Visible member-output contract" in rendered
+    assert "专家动作" in rendered
+    assert "Do not hide member work only in tool progress" in rendered
     assert "Review panel" in rendered
     assert "结论必须有证据支撑" in rendered
     assert ctx.to_metadata()["expert_team"]["execution_mode"] == "orchestrated"

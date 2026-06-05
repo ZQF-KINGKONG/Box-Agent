@@ -395,6 +395,17 @@ class ExpertTeamProfile:
         if self.review_rules:
             lines.append("- Review rules:")
             lines.extend(f"  - {rule}" for rule in self.review_rules)
+        if self.orchestration and self.orchestration.workstreams:
+            lines.extend(
+                [
+                    "- Visible member-output contract:",
+                    "  - For non-trivial team tasks, the final user-facing answer must include a visible section named `专家动作` or `Expert actions` before final synthesis or file delivery.",
+                    "  - In that section, list each required workstream by member name and workstream title. Do not hide member work only in tool progress, internal notes, or sub-agent status.",
+                    "  - Each member output must contain concrete substance, not just a status line: task focus, evidence or assumptions, 3-5 findings/decisions, risks, and the produced artifact or handoff.",
+                    "  - If a member used a tool or generated a file/asset, include the relevant path or result. If a required tool was unavailable, mark that member output as blocked and explain the next executable step.",
+                    "  - The leader synthesis must explicitly say how member outputs changed the final deliverable.",
+                ]
+            )
         if self.execution_mode == "orchestrated":
             if self.orchestration and self.orchestration.workstreams:
                 required = [stream.title for stream in self.orchestration.workstreams if stream.required]

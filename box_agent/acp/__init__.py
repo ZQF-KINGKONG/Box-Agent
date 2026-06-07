@@ -1802,29 +1802,37 @@ async def run_acp_server(config: Config | None = None) -> None:
                 dedup_jaccard_threshold=config.agent.memory_dedup_jaccard,
             )
 
-        # One-time OpenClaw import (LLM-filtered into Core)
+        # Memory bootstrap (one-time OpenClaw import + maintenance) runs OFF the
+        # critical path. Both steps can issue slow LLM calls — OpenClaw filtering
+        # on first launch, and the maintainer's compact phase on a large
+        # CONTEXT.md — which used to blow the host's ACP init timeout: stdio
+        # (and thus the `initialize` response) is only set up *after* this block,
+        # so an awaited LLM call here delays readiness and the host kills the
+        # process before it ever answers. Fire-and-forget instead — errors are
+        # logged but never block stdio readiness; results land in memory for
+        # subsequent turns. Same pattern as the background MCP loader.
+        #
+        # Import and maintenance run sequentially within the one task so the
+        # maintainer observes freshly-imported content and they never race on
+        # MEMORY.md writes.
+        memory_bootstrap_task: asyncio.Task | None = None
         if memory_mgr:
-            try:
-                await memory_mgr.import_openclaw(llm)
-            except Exception:
-                log.warn("server/start", message="OpenClaw import failed (non-fatal)")
+            _maintainer_enabled = config.agent.memory_maintainer_enabled
 
-        # Memory maintenance (decay / archive cleanup / dedup / compact).
-        # Off the critical path — the compact phase can issue a slow LLM call
-        # on large CONTEXT.md, which used to blow the host's init timeout.
-        # Same pattern as the background MCP loader: fire-and-forget, errors
-        # logged but never block stdio readiness.
-        maintainer_task: asyncio.Task | None = None
-        if memory_mgr and config.agent.memory_maintainer_enabled:
-            from box_agent.memory_maintainer import MemoryMaintainer
-
-            async def _run_maintainer() -> None:
+            async def _memory_bootstrap() -> None:
                 try:
-                    await MemoryMaintainer(memory_mgr, config.agent, llm=llm).run_if_due()
+                    await memory_mgr.import_openclaw(llm)
                 except Exception:
-                    log.warn("server/start", message="Memory maintainer failed (non-fatal)")
+                    log.warn("server/start", message="OpenClaw import failed (non-fatal)")
+                if _maintainer_enabled:
+                    from box_agent.memory_maintainer import MemoryMaintainer
 
-            maintainer_task = asyncio.create_task(_run_maintainer(), name="memory-maintainer")
+                    try:
+                        await MemoryMaintainer(memory_mgr, config.agent, llm=llm).run_if_due()
+                    except Exception:
+                        log.warn("server/start", message="Memory maintainer failed (non-fatal)")
+
+            memory_bootstrap_task = asyncio.create_task(_memory_bootstrap(), name="memory-bootstrap")
 
         base_tools, skill_loader, mcp_task = await initialize_base_tools(config, output=_stderr_print, memory_manager=memory_mgr, llm=llm)
         prompt_path = Config.find_config_file(config.agent.system_prompt_path)

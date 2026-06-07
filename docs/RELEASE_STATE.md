@@ -1,5 +1,30 @@
 # Release State
 
+## v0.8.65 (2026-06-07)
+
+- **Commit:** `80908f81fd2e872e8db336a2aa79b65df597a909` (main)
+- **PyPI:** https://pypi.org/project/box-agent/0.8.65/
+- **GitHub release:** https://github.com/Raccoon-Office/Box-Agent/releases/tag/v0.8.65
+- **Compare:** https://github.com/Raccoon-Office/Box-Agent/compare/v0.8.64...v0.8.65
+
+### Artifacts (SHA256)
+
+| File | SHA256 |
+|------|--------|
+| `box_agent-0.8.65-py3-none-any.whl` | `f6867fd22817c4fba3ae8b305baa361a0eb61e273f75879d3864c4582989cf0b` |
+| `box_agent-0.8.65.tar.gz` | `f670ec1fa9efbe7ed3db4d7d3c0540675837a2c89c9ed4561aa435f0e3fc7963` |
+
+### What shipped
+
+ACP startup reliability:
+- **Fix:** the one-time OpenClaw memory import ran a blocking `await llm.generate()` *before* the ACP stdio transport was established, so a slow/stalled first-launch LLM call tripped the host's 15 s `initialize` timeout and the process was killed before becoming ready. The import marker is written only after the call, so every restart re-hit the same stall — symptom: perpetual `box-agent ACP 初始化超时（15s）`.
+- Moved OpenClaw import off the critical path, merged with the already-backgrounded memory maintainer into one fire-and-forget `memory-bootstrap` task (import → maintain kept sequential to avoid racing on `MEMORY.md`). Startup now reaches stdio readiness with only local work on the critical path.
+
+### Follow-ups / known gaps
+
+- **Runtime artifacts not built this release.** PyPI wheel/sdist only. The fix reaches the officev3 desktop app **only** after the bundled `box-agent-runtime` is rebuilt and repackaged — in particular the **Windows** runtime (`scripts/build_win_runtime.py`), which cannot be built from macOS. The failing office-raccoon install will not pick up this fix until that runtime ships.
+- Host-side mitigations from the incident (raising the 15 s ACP timeout; pinning `BOX_AGENT_ACP_COMMAND`) are now unnecessary for this root cause and can be reverted.
+
 ## v0.8.64 (2026-06-05)
 
 - **Commit:** `f5882f315b09668d8385cc674431300d272a436f` (main)

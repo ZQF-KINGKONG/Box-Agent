@@ -1,5 +1,39 @@
 # Release State
 
+## v0.8.66 (2026-06-08)
+
+- **Commit:** `0441b2e81be46f2bb2a668cc78d849e1d3937410` (main)
+- **PyPI:** https://pypi.org/project/box-agent/0.8.66/
+- **GitHub release:** https://github.com/Raccoon-Office/Box-Agent/releases/tag/v0.8.66
+- **Compare:** https://github.com/Raccoon-Office/Box-Agent/compare/v0.8.65...v0.8.66
+
+### Artifacts (SHA256)
+
+| File | SHA256 |
+|------|--------|
+| `box_agent-0.8.66-py3-none-any.whl` | `571bfd72a822285dd8d485a3f3ec8ddb27b29c9ba0d3638993cd55157425d9ed` |
+| `box_agent-0.8.66.tar.gz` | `fddfa0da35b526d41411ef61cfbf04de0677bb48888fe1b8b60e03a589fbeebd` |
+| `box-agent-runtime-v0.8.66-darwin-arm64.tar.gz` | `97f9e2c8d8a2d017f61d820bf99b82617ddaa408e09e3b288ac74b9d288eb5fc` |
+
+### What shipped
+
+LLM error humanization:
+- New `box_agent/llm/error_messages.py` — `classify_llm_error` / `humanize_llm_error` map opaque provider exceptions (content_filter, auth, permission, rate_limit, quota, context_length, model_not_found, server_error, timeout, connection) to short Chinese messages. Bulletproof by contract: runs inside the error path, never raises, unwraps `RetryExhaustedError`/`StreamInterrupted` to inspect the underlying provider error, SDK-agnostic attribute + substring detection.
+- `core.py`: soft errors (content moderation) end the turn as a **normal assistant reply** (no `Error:` banner, no red), persisted to history; all other errors surfaced humanized.
+- `lightweight.py`: new `LightweightContentFiltered` (`code=content_filter`) lets `_llm/prompt` callers (title/summary) fall back to a neutral default; provider raw JSON never leaks.
+- `acp`: content_filter logged at info, returned as a stable error code.
+
+pptx skill — content & outline gate:
+- The outline gate (`references/outline.md` + `scripts/validate_outline.js`) was **orphaned** — SKILL.md's new-deck route jumped straight to image planning/HTML, so the gate never fired. Now wired in as route step 1 (§1.1), listed in §2 commands and §7 references.
+- **Warm reject, not cold:** under-specified → ask 1-3 focused questions with a sensible default; under-sourced → route to `research-synthesis`, then build the slide plan from sourced findings; never fabricate. Hard `BLOCKED` stays reserved for `creative_image_mode` images; carve-out so creative short topics aren't pushed into research.
+- Canvas-contract docs (html-first / html-editable): copy `references/starter/common.css` verbatim for the locked 1920×1080 `.slide`; `--canvas WxH` opt-in for nonstandard sizes.
+
+### Follow-ups / known gaps
+
+- **Runtime artifact:** only `darwin-arm64` built/uploaded. `darwin-x64` / Windows runtimes not built this release; the officev3 desktop app picks up these fixes only after the bundled runtime is rebuilt per platform.
+- **Test hygiene:** full `pytest` still shows the same ~13 env-dependent permission/symlink-scoping failures documented since v0.8.64 — confirmed pre-existing (they fail identically on clean `v0.8.65` HEAD), unrelated to this release.
+- **Upstream dependency:** the warm gate routes to `research-synthesis` for the deck's *content*; the officev3 expert layer still needs its "普通 PPT 设计师" role to add the research pre-step so the two layers interlock end-to-end.
+
 ## v0.8.65 (2026-06-07)
 
 - **Commit:** `80908f81fd2e872e8db336a2aa79b65df597a909` (main)

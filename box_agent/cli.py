@@ -560,6 +560,7 @@ async def cmd_doctor():
                 retry_config=no_retry,
                 max_output_tokens=config.llm.max_output_tokens,
                 auth_file=config.llm.auth_file,
+                timeout=config.llm.timeout,
             )
             from box_agent.schema import Message
 
@@ -847,6 +848,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         retry_config=retry_config if config.llm.retry.enabled else None,
         max_output_tokens=config.llm.max_output_tokens,
         auth_file=config.llm.auth_file,
+        timeout=config.llm.timeout,
     )
 
     # Set retry callback
@@ -868,6 +870,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             retry_config=VerifyRetryConfig(enabled=False),
             max_output_tokens=config.llm.max_output_tokens,
             auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
         )
         await _verify_client.generate(
             messages=[Msg(role="user", content="hi")],
@@ -903,6 +906,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                         retry_config=retry_config if config.llm.retry.enabled else None,
                         max_output_tokens=config.llm.max_output_tokens,
                         auth_file=config.llm.auth_file,
+                        timeout=config.llm.timeout,
                     )
                     if config.llm.retry.enabled:
                         llm_client.retry_callback = on_retry
@@ -915,6 +919,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                         retry_config=VerifyRetryConfig(enabled=False),
                         max_output_tokens=config.llm.max_output_tokens,
                         auth_file=config.llm.auth_file,
+                        timeout=config.llm.timeout,
                     )
                     await _verify_client2.generate(messages=[Msg(role="user", content="hi")])
                     print(f"{Colors.GREEN}OK{Colors.RESET}")

@@ -1777,6 +1777,7 @@ async def run_acp_server(config: Config | None = None) -> None:
             ),
             max_output_tokens=config.llm.max_output_tokens,
             auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
         )
 
         # Lite LLM client for tool-free small tasks (titles / summaries).
@@ -1803,6 +1804,7 @@ async def run_acp_server(config: Config | None = None) -> None:
                 ),
                 max_output_tokens=config.lite_llm.max_output_tokens,
                 auth_file=config.lite_llm.auth_file,
+                timeout=config.lite_llm.timeout,
             )
         else:
             lite_llm = llm

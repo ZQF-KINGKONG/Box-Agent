@@ -31,6 +31,7 @@ class LLMClientBase(ABC):
         retry_config: RetryConfig | None = None,
         auth_token: str = "",
         auth_file: str = "",
+        timeout: float = 600.0,
     ):
         """Initialize the LLM client.
 
@@ -41,6 +42,7 @@ class LLMClientBase(ABC):
             retry_config: Optional retry configuration
             auth_token: Optional in-memory product login token.
             auth_file: Optional auth.json path read before every request.
+            timeout: Wall-clock cap (seconds) handed to the provider SDK.
         """
         self.api_key = api_key
         self.api_base = api_base
@@ -48,6 +50,7 @@ class LLMClientBase(ABC):
         self.retry_config = retry_config or RetryConfig()
         self.auth_token = auth_token
         self.auth_file = auth_file
+        self.timeout = timeout
 
         # Callback for tracking retry count
         self.retry_callback = None

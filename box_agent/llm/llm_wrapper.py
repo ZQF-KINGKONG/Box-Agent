@@ -35,6 +35,7 @@ class LLMClient:
         max_output_tokens: int = 64000,
         auth_token: str = "",
         auth_file: str = "",
+        timeout: float = 600.0,
     ):
         """Initialize LLM client with specified provider.
 
@@ -48,6 +49,7 @@ class LLMClient:
                 underlying provider as ``max_tokens``.
             auth_token: Optional in-memory product login token.
             auth_file: Optional auth.json path read before every request.
+            timeout: Wall-clock cap (seconds) handed to the provider SDK.
         """
         self.provider = provider
         self.api_key = api_key
@@ -56,6 +58,7 @@ class LLMClient:
         self.max_output_tokens = max_output_tokens
         self.auth_token = auth_token
         self.auth_file = auth_file
+        self.timeout = timeout
 
         # Normalize api_base (remove trailing slash)
         api_base = api_base.rstrip("/")
@@ -72,6 +75,7 @@ class LLMClient:
                 max_output_tokens=max_output_tokens,
                 auth_token=auth_token,
                 auth_file=auth_file,
+                timeout=timeout,
             )
         elif provider == LLMProvider.OPENAI:
             self._client = OpenAIClient(
@@ -82,6 +86,7 @@ class LLMClient:
                 max_output_tokens=max_output_tokens,
                 auth_token=auth_token,
                 auth_file=auth_file,
+                timeout=timeout,
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")

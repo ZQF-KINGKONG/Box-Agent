@@ -53,6 +53,7 @@ class OpenAIClient(LLMClientBase):
         max_output_tokens: int = _DEFAULT_MAX_TOKENS,
         auth_token: str = "",
         auth_file: str = "",
+        timeout: float = 600.0,
     ):
         """Initialize OpenAI client.
 
@@ -64,14 +65,19 @@ class OpenAIClient(LLMClientBase):
             max_output_tokens: Per-request ``max_tokens`` value sent to the API.
             auth_token: Optional in-memory product login token.
             auth_file: Optional auth.json path read before every request.
+            timeout: Wall-clock cap (seconds) for each request to the API.
         """
-        super().__init__(api_key, api_base, model, retry_config, auth_token=auth_token, auth_file=auth_file)
+        super().__init__(
+            api_key, api_base, model, retry_config,
+            auth_token=auth_token, auth_file=auth_file, timeout=timeout,
+        )
         self.max_output_tokens = max_output_tokens
 
         # Initialize OpenAI client
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
+            timeout=timeout,
         )
 
     async def _make_api_request(

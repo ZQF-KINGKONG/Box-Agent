@@ -1,5 +1,37 @@
 # Release State
 
+## v0.8.67 (2026-06-08)
+
+- **Commit:** `7a59269814340a50b6b9a1e4a0a285c90f53a28c` (main)
+- **PyPI:** https://pypi.org/project/box-agent/0.8.67/
+- **GitHub release:** https://github.com/Raccoon-Office/Box-Agent/releases/tag/v0.8.67
+- **Compare:** https://github.com/Raccoon-Office/Box-Agent/compare/v0.8.66...v0.8.67
+
+### Artifacts (SHA256)
+
+| File | SHA256 |
+|------|--------|
+| `box_agent-0.8.67-py3-none-any.whl` | `989e0961f458d7a5ab25f5daf42375fe68d4afe25de648b5309c0d35c06cc7dc` |
+| `box_agent-0.8.67.tar.gz` | `f37535890a057187118f67378cd7268cbd2faa2794af8c4056d0935684dc4390` |
+
+### What shipped
+
+Configurable LLM client timeout:
+- The provider SDK clients (`AsyncOpenAI`/`AsyncAnthropic`) were constructed **without** a `timeout`, so the SDK default (600s) always applied and there was no way to tune it. When a gateway stalls before the first token, the call hangs for the full default before an `APITimeoutError` surfaces.
+- New `timeout` field on `LLMConfig` and `LiteLLMConfig` (default `600.0`, behavior unchanged), threaded end to end: `config.yaml` → `LLMConfig`/`LiteLLMConfig` → `LLMClient` → `OpenAIClient`/`AnthropicClient` → `AsyncOpenAI`/`AsyncAnthropic(timeout=)`. All 7 `LLMClient` call sites (CLI + ACP main/lite) forward `config.*.timeout`.
+- Hosts can now lower it to fail fast with a clean error instead of hanging. Tests: `tests/test_llm_timeout.py` (SDK propagation, wrapper threading, defaults, YAML parsing).
+- **Origin:** customer log analysis (Windows office-raccoon 0.7.37). 3 consecutive turns each died at **~72s** with "Request timed out" — a **server-side gateway cutoff** (the endpoint was healthy: a lightweight call to the same model succeeded in 8s right after). This release makes the client timeout tunable; it does not change the gateway behavior that caused the incident.
+
+Factual & search reliability guardrails:
+- Stop the model from treating a todo list or sparse search results as evidence. A "completed" todo means steps ran, not that facts were verified; conclusions must rest on retrieval/file evidence.
+- New system-prompt "Factual & Search Reliability" section + a Plan-step note that `todo_write` is progress-tracking only and must not narrow the user's request or lower verification standards. `todo_tool` description tightened to match.
+
+### Follow-ups / known gaps
+
+- **Runtime artifacts not built this release.** PyPI wheel/sdist only. The reporting customer runs the **Windows** desktop runtime, which cannot be built from macOS (`scripts/build_win_runtime.py`); the timeout fix reaches that app only after the Windows runtime is rebuilt and repackaged.
+- **Gateway-side root cause is upstream.** The ~72s timeout was the model gateway not returning a first token for a large-context request; investigate gateway first-token latency / `proxy_read_timeout` separately. Consider in-turn retry / degraded-mode messaging on timeout as a follow-up.
+- **Test hygiene:** full `pytest` still shows the same ~14 env-dependent permission/symlink-scoping + MCP-timeout failures documented since v0.8.64 — confirmed pre-existing (they fail identically on the pre-change tree), unrelated to this release.
+
 ## v0.8.66 (2026-06-08)
 
 - **Commit:** `0441b2e81be46f2bb2a668cc78d849e1d3937410` (main)

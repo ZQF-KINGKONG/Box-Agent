@@ -1,6 +1,7 @@
 """Tests for the shared agent execution core (box_agent.core)."""
 
 import asyncio
+import json
 
 import pytest
 
@@ -1144,6 +1145,46 @@ def test_micro_compact_first_line_hint():
     ]
     _micro_compact(msgs)
     assert "Revenue: $1.2M" in msgs[1].content
+
+
+def test_micro_compact_web_search_retains_evidence_from_json_payload():
+    """Old web_search results should keep useful evidence, not a bare JSON brace."""
+    payload = json.dumps(
+        {
+            "Query": "2026 AI model releases",
+            "ResultCount": 2,
+            "AuthLevel": 1,
+            "Results": [
+                {
+                    "Title": "OpenAI announces GPT example",
+                    "Url": "https://openai.com/example",
+                    "Snippet": "Official release notes for a model update.",
+                },
+                {
+                    "Title": "Anthropic announces Claude example",
+                    "Url": "https://anthropic.com/example",
+                    "Snippet": "Company news page for a model release.",
+                },
+            ],
+        },
+        indent=2,
+    )
+    msgs = [
+        Message(role="system", content="sys"),
+        _make_tool_msg("web_search", payload, "tc-1"),
+        _make_tool_msg("bash", "ok", "tc-2"),
+        _make_tool_msg("read", "a" * 500, "tc-3"),
+        _make_tool_msg("bash", "b" * 500, "tc-4"),
+    ]
+
+    _micro_compact(msgs)
+
+    assert "compacted evidence retained" in msgs[1].content
+    assert "query=2026 AI model releases" in msgs[1].content
+    assert "OpenAI announces GPT example" in msgs[1].content
+    assert "https://openai.com/example" in msgs[1].content
+    assert "Official release notes" in msgs[1].content
+    assert msgs[1].content != "[Previous result from web_search: {...]"
 
 
 # ── Artifact envelope / helpers ──────────────────────────────

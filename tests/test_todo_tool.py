@@ -220,3 +220,11 @@ def test_openai_schema(writer, reader):
 
     schema = reader.to_openai_schema()
     assert schema["function"]["name"] == "todo_read"
+
+
+def test_todo_write_description_keeps_todo_as_progress_tracker(writer):
+    description = writer.description
+
+    assert "only a progress tracker" in description
+    assert "not factual evidence" in description
+    assert "not narrow the user's request" in description

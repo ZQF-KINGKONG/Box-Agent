@@ -148,7 +148,9 @@ class TodoWriteTool(Tool):
             "Manage a todo list for tracking multi-step tasks. "
             "Actions: 'create' a new item, 'update' an existing item's status or text, "
             "or 'delete' an item. Use this to decompose complex work into trackable steps "
-            "and mark progress as you go."
+            "and mark progress as you go. This tool is only a progress tracker: it is not "
+            "factual evidence, a search strategy, or a source for final conclusions. Do not "
+            "narrow the user's request or lower verification standards because a todo exists."
         )
 
     @property

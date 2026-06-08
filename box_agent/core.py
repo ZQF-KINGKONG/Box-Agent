@@ -793,6 +793,126 @@ def _approx_tokens_for_content(content: Any) -> int:
         return max(1, len(text) // 4)
 
 
+def _short_tool_text(value: Any, limit: int = 180) -> str:
+    """Return a one-line text fragment suitable for compacted history."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] not in (None, ""):
+            return mapping[key]
+    lower_mapping = {str(k).lower(): v for k, v in mapping.items()}
+    for key in keys:
+        value = lower_mapping.get(key.lower())
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _candidate_search_items(payload: Any) -> list[dict[str, Any]]:
+    """Extract likely search-result rows from common web_search payload shapes."""
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+
+    if not isinstance(payload, dict):
+        return []
+
+    preferred_keys = (
+        "refs",
+        "results",
+        "Results",
+        "web_results",
+        "items",
+        "value",
+        "organic_results",
+        "data",
+    )
+    for key in preferred_keys:
+        value = payload.get(key)
+        if isinstance(value, list):
+            items = [item for item in value if isinstance(item, dict)]
+            if items:
+                return items
+
+    for value in payload.values():
+        if isinstance(value, dict):
+            nested = _candidate_search_items(value)
+            if nested:
+                return nested
+        elif isinstance(value, list):
+            items = [item for item in value if isinstance(item, dict)]
+            if any(_first_present(item, ("title", "Title", "url", "Url", "href", "link")) for item in items):
+                return items
+
+    return []
+
+
+def _compact_web_search_result_for_model(content: str) -> str | None:
+    """Preserve usable search evidence when compacting old web_search results."""
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+
+    query = None
+    result_count = None
+    auth_level = None
+    if isinstance(payload, dict):
+        query = _first_present(payload, ("query", "Query", "q"))
+        result_count = _first_present(payload, ("result_count", "ResultCount", "count", "Count"))
+        auth_level = _first_present(payload, ("auth_level", "AuthLevel"))
+
+    details: list[str] = []
+    if query:
+        details.append(f"query={_short_tool_text(query, 120)}")
+    if result_count is not None:
+        details.append(f"count={result_count}")
+    if auth_level is not None:
+        details.append(f"auth_level={auth_level}")
+
+    lines = ["[Previous result from web_search; compacted evidence retained"]
+    if details:
+        lines[0] += ": " + ", ".join(details)
+    lines[0] += "]"
+
+    items = _candidate_search_items(payload)
+    for index, item in enumerate(items[:5], start=1):
+        title = _first_present(item, ("title", "Title", "name", "Name"))
+        url = _first_present(item, ("url", "Url", "href", "link", "Link"))
+        snippet = _first_present(
+            item,
+            (
+                "snippet",
+                "Snippet",
+                "summary",
+                "Summary",
+                "description",
+                "Description",
+                "content",
+                "Content",
+            ),
+        )
+        parts = []
+        if title:
+            parts.append(_short_tool_text(title, 120))
+        if url:
+            parts.append(_short_tool_text(url, 160))
+        if snippet:
+            parts.append(_short_tool_text(snippet, 220))
+        if parts:
+            lines.append(f"{index}. " + " | ".join(parts))
+
+    if len(lines) == 1:
+        first_line = _short_tool_text(content.split("\n", 1)[0], 180)
+        lines.append(first_line)
+
+    return "\n".join(lines)
+
+
 def _micro_compact(messages: list[Message]) -> int:
     """Replace old tool-result content with short placeholders.
 
@@ -837,11 +957,15 @@ def _micro_compact(messages: list[Message]) -> int:
         if len(content) <= _MIN_COMPACT_LEN:
             continue
         tool_name = msg.name or "unknown"
+        if tool_name == "web_search":
+            compacted_content = _compact_web_search_result_for_model(content)
+        else:
+            compacted_content = None
         # Preserve the first line as a hint (often contains the key result)
         first_line = content.split("\n", 1)[0][:100]
         messages[idx] = Message(
             role="tool",
-            content=f"[Previous result from {tool_name}: {first_line}...]",
+            content=compacted_content or f"[Previous result from {tool_name}: {first_line}...]",
             tool_call_id=msg.tool_call_id,
             name=msg.name,
         )

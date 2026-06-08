@@ -93,6 +93,27 @@ class EchoTool(Tool):
         return ToolResult(success=True, content=f"echo:{text}")
 
 
+class CountingWebSearchTool(Tool):
+    def __init__(self):
+        self.calls = 0
+
+    @property
+    def name(self):
+        return "web_search"
+
+    @property
+    def description(self):
+        return "Searches the web"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    async def execute(self, query: str = ""):
+        self.calls += 1
+        return ToolResult(success=True, content=f"result:{query}")
+
+
 class RawOutputTool(Tool):
     @property
     def name(self):
@@ -634,6 +655,50 @@ async def test_max_steps():
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert len(done) == 1
     assert done[0].stop_reason == StopReason.MAX_STEPS
+
+
+@pytest.mark.asyncio
+async def test_web_search_budget_synthesizes_result_and_allows_final_answer():
+    """Repeated web_search calls are capped and converted into protocol-valid
+    tool results so the model can stop cleanly instead of searching forever."""
+
+    def web_call(i):
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=f"web-{i}",
+                    type="function",
+                    function=FunctionCall(name="web_search", arguments={"query": f"q{i}"}),
+                )
+            ],
+            finish_reason="tool",
+        )
+
+    responses = [web_call(i) for i in range(13)]
+    responses.append(LLMResponse(content="final from gathered evidence", finish_reason="stop"))
+    web_search = CountingWebSearchTool()
+
+    events = await collect(
+        run_agent_loop(
+            llm=MockLLM(responses),
+            messages=_msgs(),
+            tools={"web_search": web_search},
+            max_steps=20,
+        )
+    )
+
+    assert web_search.calls == 12
+    tool_results = [e for e in events if isinstance(e, ToolCallResult)]
+    assert any(
+        not e.success and e.tool_name == "web_search" and "budget reached" in (e.error or "")
+        for e in tool_results
+    )
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert any("web_search 调用已达到预算上限" in e.content for e in injected)
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert len(done) == 1
+    assert done[0].stop_reason == StopReason.END_TURN
 
 
 @pytest.mark.asyncio

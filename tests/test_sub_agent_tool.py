@@ -115,12 +115,19 @@ def test_description_encourages_bounded_parallel_units_with_parent_merge():
     description = tool.description
 
     assert "Mandatory trigger" in description
+    assert "independent evidence gathering" in description
+    assert "fact checking" in description
+    assert "analysis, comparison, drafting" in description
     assert "more than 5 structurally similar units" in description
     assert "launch 3-7 sub_agent calls first" in description
     assert "single small unit" in description
+    assert "1 candidate" in description
+    assert "1 source range" in description
+    assert "1 sub-question" in description
     assert "unique path, directory, or filename prefix" in description
     assert "If the final deliverable is a single file" in description
-    assert "draft fragments or local partial files" in description
+    assert "draft fragments, local partial files" in description
+    assert "evidence/finding summaries" in description
     assert "Do not assign two sub-agents to write the same file" in description
     assert "parent agent must own coordination" in description
     assert "write final deliverables" in description

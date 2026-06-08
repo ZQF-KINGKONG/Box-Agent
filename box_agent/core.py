@@ -61,6 +61,27 @@ from .tools.base import EventEmittingTool, Tool, ToolResult
 # when the execution should be cancelled.
 CancelChecker = Callable[[], bool]
 
+_TOOL_CALL_LIMITS: Final[dict[str, int]] = {
+    "web_search": 12,
+}
+
+
+def _tool_call_budget_message(tool_name: str, limit: int) -> str:
+    return (
+        f"Tool call budget reached for {tool_name} ({limit} calls this turn). "
+        f"Do not call {tool_name} again; synthesize the final answer from the "
+        "evidence and tool results already collected. If anything is missing, "
+        "briefly mark it as a gap instead of searching again."
+    )
+
+
+def _tool_call_budget_wrapup_text(tool_name: str, limit: int) -> str:
+    return (
+        f"⚠️ 本轮 {tool_name} 调用已达到预算上限（{limit} 次）。"
+        f"现在请停止继续调用 {tool_name} 或继续联网搜索，"
+        "仅基于已经获得的资料直接给出完整最终答案；缺口简要标注即可。"
+    )
+
 # Regex to match file references like [foo.png] in tool output.
 _ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
 
@@ -1274,6 +1295,13 @@ async def run_agent_loop(
     # preserve existing behavior.
     no_progress_steps = 0
 
+    # Per-turn guard for tools that can be repeatedly requested by the model
+    # after it already has enough evidence. Once a budget is reached, later
+    # calls are answered with synthetic tool errors so the protocol remains
+    # valid while nudging the model to synthesize.
+    tool_call_counts: dict[str, int] = {}
+    tool_budget_wrapup_injected: set[str] = set()
+
     for step in range(max_steps):
         # ── Cancellation check (top of step) ────────────────
         # No cleanup needed here — messages are consistent at step boundaries.
@@ -1303,6 +1331,18 @@ async def run_agent_loop(
                     Message(role="user", content=_format_injected_message(injected_text))
                 )
                 yield InjectedMessageEvent(content=injected_text, injection_id=injection_id)
+
+        for tool_name, limit in _TOOL_CALL_LIMITS.items():
+            if (
+                tool_call_counts.get(tool_name, 0) >= limit
+                and tool_name not in tool_budget_wrapup_injected
+            ):
+                tool_budget_wrapup_injected.add(tool_name)
+                budget_text = _tool_call_budget_wrapup_text(tool_name, limit)
+                messages.append(
+                    Message(role="user", content=_format_injected_message(budget_text))
+                )
+                yield InjectedMessageEvent(content=budget_text, injection_id=None)
 
         # ── Micro-compact (Layer 1) ────────────────────────
         # Cheap: replace old tool results with placeholders
@@ -1663,6 +1703,15 @@ async def run_agent_loop(
         # no-progress circuit breaker. Set True in either execution branch.
         step_made_progress = False
 
+        def _reserve_tool_budget(tool_name: str) -> tuple[bool, str | None]:
+            limit = _TOOL_CALL_LIMITS.get(tool_name)
+            if limit is None:
+                return True, None
+            if tool_call_counts.get(tool_name, 0) >= limit:
+                return False, _tool_call_budget_message(tool_name, limit)
+            tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
+            return True, None
+
         # 1. Sequential execution for regular tools (preserves ordering)
         for tc in regular_calls:
             tc_id = tc.id
@@ -1682,7 +1731,10 @@ async def run_agent_loop(
             if workspace_dir:
                 pre_files = _snapshot_workspace(workspace_dir)
 
-            if fn_name not in tools:
+            allowed_by_budget, budget_error = _reserve_tool_budget(fn_name)
+            if not allowed_by_budget:
+                result = ToolResult(success=False, content="", error=budget_error or "")
+            elif fn_name not in tools:
                 result = ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
             else:
                 tool = tools[fn_name]
@@ -1849,6 +1901,7 @@ async def run_agent_loop(
         if parallel_calls:
             # Emit all ToolCallStart events and apply hook interceptors
             par_args_map: dict[str, dict[str, Any]] = {}  # tc.id → (possibly modified) args
+            par_budget_errors: dict[str, str] = {}
             for tc in parallel_calls:
                 yield ToolCallStart(
                     tool_call_id=tc.id,
@@ -1861,6 +1914,9 @@ async def run_agent_loop(
                         tool_call_id=tc.id, tool_name=tc.function.name, arguments=par_fn_args,
                     )
                 par_args_map[tc.id] = par_fn_args
+                allowed_by_budget, budget_error = _reserve_tool_budget(tc.function.name)
+                if not allowed_by_budget:
+                    par_budget_errors[tc.id] = budget_error or ""
 
             # Wire a shared event queue onto EventEmittingTool instances
             par_event_queue: asyncio.Queue[SubAgentEvent] = asyncio.Queue()
@@ -1881,6 +1937,8 @@ async def run_agent_loop(
             async def _run_parallel(tc):
                 fn_name = tc.function.name
                 fn_args = par_args_map[tc.id]
+                if tc.id in par_budget_errors:
+                    return tc, ToolResult(success=False, content="", error=par_budget_errors[tc.id])
                 if fn_name not in tools:
                     return tc, ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
                 try:

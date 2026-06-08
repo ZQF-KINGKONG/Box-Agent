@@ -16,3 +16,14 @@ def test_system_prompt_requires_authoritative_sources_for_current_facts():
     assert "必须按今天日期检索或核对当前权威来源" in prompt
     assert "优先使用官方公告、模型卡、开发者文档、透明度页面或权威一手来源" in prompt
     assert "不要用“公开资料不多”替代答案" in prompt
+
+
+def test_system_prompt_sub_agent_trigger_covers_separable_evidence_units():
+    prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    assert "可隔离的小单元任务" in prompt
+    assert "分别收集证据、核验事实、分析判断、起草内容或检查质量" in prompt
+    assert "候选项、来源范围、时间段" in prompt
+    assert "不限于写作或 QA" in prompt
+    assert "只返回局部证据/结论" in prompt
+    assert "最终合并、交叉校验" in prompt

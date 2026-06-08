@@ -27,18 +27,35 @@ process.env.NODE_PATH = process.env.NODE_PATH
   : managedNodeModules;
 Module._initPaths();
 
+// Single source of truth for the slide canvas contract. Every `.slide` is
+// asserted against this exact size — NOT auto-detected from the first slide,
+// which used to let an entire deck drift to 1280x720 / 1400x840 and still pass.
+const CANONICAL_WIDTH = 1920;
+const CANONICAL_HEIGHT = 1080;
+
 function usage() {
-  console.error("Usage: html_self_check.js deck.html [--width W] [--height H] [--dom-to-pptx] [--allow-local-images] [--report qa/html_self_check.json] [--verbose]");
-  console.error("  If --width/--height are omitted, the first .slide element's CSS size is auto-detected.");
+  console.error("Usage: html_self_check.js deck.html [--canvas WxH] [--dom-to-pptx] [--allow-local-images] [--report qa/html_self_check.json] [--verbose]");
+  console.error(`  The canvas contract is ${CANONICAL_WIDTH}x${CANONICAL_HEIGHT} (16:9). Every .slide must match it exactly.`);
+  console.error("  --canvas WxH overrides the contract for a deliberately non-standard deck (e.g. --canvas 1280x720).");
+  console.error("  --width/--height are NOT accepted; set .slide CSS to the canvas size instead.");
   process.exit(2);
+}
+
+function parseCanvas(value) {
+  const m = /^(\d+)\s*[xX*]\s*(\d+)$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  return { w, h };
 }
 
 function parseArgs(argv) {
   if (argv.length < 1) usage();
   const opts = {
     html: argv[0],
-    width: null,
-    height: null,
+    width: CANONICAL_WIDTH,
+    height: CANONICAL_HEIGHT,
     domToPptx: false,
     allowLocalImages: false,
     report: null,
@@ -47,12 +64,25 @@ function parseArgs(argv) {
   for (let i = 1; i < argv.length; i += 1) {
     const arg = argv[i];
     const value = argv[i + 1];
-    if (arg === "--width" && value) {
-      opts.width = Number(value);
+    if (arg === "--canvas" && value) {
+      const canvas = parseCanvas(value);
+      if (!canvas) {
+        console.error(`Invalid --canvas value "${value}". Expected WxH, e.g. --canvas 1280x720.`);
+        process.exit(2);
+      }
+      opts.width = canvas.w;
+      opts.height = canvas.h;
       i += 1;
-    } else if (arg === "--height" && value) {
-      opts.height = Number(value);
-      i += 1;
+    } else if (arg === "--width" || arg === "--height") {
+      console.error(
+        `Refusing to run: ${arg} is not a valid flag for html_self_check.js. ` +
+        `The canvas contract is fixed at ${CANONICAL_WIDTH}x${CANONICAL_HEIGHT}.`
+      );
+      console.error(
+        "Per SKILL.md §0 rule 7: set .slide { width; height } in the HTML to the canvas size. " +
+        "For a deliberately non-standard deck, pass --canvas WxH instead of --width/--height."
+      );
+      process.exit(2);
     } else if (arg === "--dom-to-pptx") {
       opts.domToPptx = true;
     } else if (arg === "--allow-local-images") {
@@ -66,8 +96,6 @@ function parseArgs(argv) {
       usage();
     }
   }
-  if (opts.width !== null && !Number.isFinite(opts.width)) usage();
-  if (opts.height !== null && !Number.isFinite(opts.height)) usage();
   return opts;
 }
 
@@ -321,12 +349,28 @@ async function runHtmlSelfCheck(page, expectedWidth, expectedHeight, domToPptx =
           }
 
           const text = (el.innerText || "").trim();
-          if (text && (el.scrollWidth > el.clientWidth + 2 || el.scrollHeight > el.clientHeight + 2)) {
-            const overflowX = el.scrollWidth > el.clientWidth + 2;
-            const overflowY = el.scrollHeight > el.clientHeight + 2;
-            issues.push(
-              `${name}: text/content overflow detected (${overflowX ? "x" : ""}${overflowY ? "y" : ""}).`
-            );
+          if (text) {
+            // Graduated text/content overflow tolerance. A dense creative slide
+            // almost always carries a few px of sub-pixel / line-box overflow;
+            // failing hard at 2px turned export into an un-winnable
+            // edit -> recheck loop. Within the authored text slack (SKILL §3.1,
+            // 16-24px) we ignore it; a moderate overflow is a soft warning that
+            // goes to Limitations; only a large overflow signalling a real
+            // layout break stays a hard issue that blocks export.
+            const OVERFLOW_SLACK = 16;
+            const OVERFLOW_ISSUE = 64;
+            const overX = el.scrollWidth - el.clientWidth;
+            const overY = el.scrollHeight - el.clientHeight;
+            const over = Math.max(overX, overY);
+            if (over > OVERFLOW_SLACK) {
+              const axis = `${overX > OVERFLOW_SLACK ? "x" : ""}${overY > OVERFLOW_SLACK ? "y" : ""}`;
+              const detail = `${name}: text/content overflow detected (${axis}, ${Math.round(over)}px).`;
+              if (over > OVERFLOW_ISSUE) {
+                issues.push(detail);
+              } else {
+                warnings.push(detail);
+              }
+            }
           }
           if (domToPptx && text) {
             const bgColor = style.backgroundColor || "";
@@ -473,72 +517,25 @@ async function main() {
     throw error;
   }
 
-  const probeViewport = { width: opts.width || 1920, height: opts.height || 1080 };
+  // The contract size is fixed (canonical 1920x1080, or an explicit --canvas
+  // override). We probe at that size and assert every .slide matches it. The
+  // first slide's CSS is NEVER treated as the source of truth — that auto-detect
+  // behavior used to let an entire deck drift off-contract and still pass.
+  const expectedWidth = opts.width;
+  const expectedHeight = opts.height;
+  const probeViewport = { width: expectedWidth, height: expectedHeight };
   let page = await browser.newPage({
     viewport: probeViewport,
-    deviceScaleFactor: 1,
+    deviceScaleFactor: 2,
   });
   await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
   await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
   await page.evaluate(() => document.fonts && document.fonts.ready);
 
-  const detected = await page.evaluate(() => {
-    const s = document.querySelector(".slide");
-    if (!s) return null;
-    const cs = getComputedStyle(s);
-    return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
-  });
-
-  let detectedWidth = detected && detected.w > 0 ? detected.w : null;
-  let detectedHeight = detected && detected.h > 0 ? detected.h : null;
-
-  if (opts.width !== null || opts.height !== null) {
-    const cssW = detectedWidth;
-    const cssH = detectedHeight;
-    const mismatchW = opts.width !== null && cssW && Math.abs(opts.width - cssW) > 2;
-    const mismatchH = opts.height !== null && cssH && Math.abs(opts.height - cssH) > 2;
-    if (mismatchW || mismatchH) {
-      console.error(
-        `Refusing to run: --width/--height (${opts.width ?? "auto"}x${opts.height ?? "auto"}) ` +
-        `do not match the .slide CSS size (${Math.round(cssW || 0)}x${Math.round(cssH || 0)}).`
-      );
-      console.error(
-        "Per SKILL.md §0 rule 7, do NOT pass --width/--height to html_self_check.js. " +
-        "Either remove these flags so the script auto-detects from .slide CSS, " +
-        "or fix .slide { width; height } in the HTML to the intended canvas size."
-      );
-      await browser.close();
-      process.exit(1);
-    }
-    if (opts.width !== null) detectedWidth = opts.width;
-    if (opts.height !== null) detectedHeight = opts.height;
-  }
-
-  if (detectedWidth === null || detectedHeight === null) {
-    detectedWidth = detectedWidth || 1920;
-    detectedHeight = detectedHeight || 1080;
-  }
-
-  const needsResize =
-    Math.abs(probeViewport.width - detectedWidth) > 2 ||
-    Math.abs(probeViewport.height - detectedHeight) > 2;
-  if (needsResize) {
-    await page.close();
-    page = await browser.newPage({
-      viewport: { width: detectedWidth, height: detectedHeight },
-      deviceScaleFactor: 2,
-    });
-    await page.goto(`file://${htmlPath}`, { waitUntil: "domcontentloaded" });
-    await page.waitForLoadState("networkidle", { timeout: 10000 }).catch(() => {});
-    await page.evaluate(() => document.fonts && document.fonts.ready);
-  } else {
-    await page.setViewportSize({ width: detectedWidth, height: detectedHeight });
-  }
-
   const report = await runHtmlSelfCheck(
     page,
-    detectedWidth,
-    detectedHeight,
+    expectedWidth,
+    expectedHeight,
     opts.domToPptx,
     opts.allowLocalImages
   );

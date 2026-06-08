@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from box_agent.llm.lightweight import (
+    LightweightContentFiltered,
     LightweightInvalidArgs,
     LightweightPromptError,
     LightweightTimeout,
@@ -144,6 +145,41 @@ async def test_lightweight_wraps_llm_exception():
 
 
 @pytest.mark.asyncio
+async def test_lightweight_does_not_leak_raw_json_blob():
+    # A generic provider error must be humanized, not dumped raw.
+    blob = "Error code: 500 - {'error': {'message': 'kaboom', 'type': 'server_error'}}"
+    llm = _FakeLLM(raises=RuntimeError(blob))
+    with pytest.raises(LightweightPromptError) as ei:
+        await run_lightweight_prompt(llm, "hi")
+    # server_error is humanized to a friendly sentence; no raw dict leaks.
+    assert "{" not in str(ei.value)
+    assert ei.value.code == "lightweight_failed"
+
+
+@pytest.mark.asyncio
+async def test_lightweight_content_filter_distinct_error():
+    blob = (
+        "Error code: 400 - {'error': {'code': 'content_filter', "
+        "'message': 'Inappropriate input/output rejected', "
+        "'type': 'invalid_request_error'}}"
+    )
+    llm = _FakeLLM(raises=RuntimeError(blob))
+    with pytest.raises(LightweightContentFiltered) as ei:
+        await run_lightweight_prompt(llm, "习明泽 怎么了")
+    assert ei.value.code == "content_filter"
+    # Message is a neutral technical note — NOT the chat refusal copy, and not
+    # suitable as a title value.
+    assert "换个问题" not in str(ei.value)
+    assert "{" not in str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_lightweight_content_filter_is_subclass():
+    # Existing `except LightweightPromptError` callers still catch it.
+    assert issubclass(LightweightContentFiltered, LightweightPromptError)
+
+
+@pytest.mark.asyncio
 async def test_lightweight_cancellation_propagates():
     llm = _FakeLLM(delay=10)
 
@@ -223,6 +259,23 @@ async def test_extmethod_llm_prompt_timeout_returns_error():
     resp = await agent.extMethod("llm/prompt", {"prompt": "hi", "timeoutMs": 10})
 
     assert resp["error"]["code"] == "timeout"
+
+
+@pytest.mark.asyncio
+async def test_extmethod_llm_prompt_content_filter_returns_code():
+    """A moderation refusal surfaces a stable `content_filter` code so the host
+    can fall back to a neutral default (e.g. a generic title)."""
+    blob = "Error code: 400 - {'error': {'code': 'content_filter', 'message': 'x'}}"
+    agent = _StubAgent(_FakeLLM(raises=RuntimeError(blob)))
+    resp = await agent.extMethod(
+        "llm/prompt",
+        {"prompt": "习明泽 怎么了", "_meta": {"purpose": "local_agent_title"}},
+    )
+
+    assert resp["error"]["code"] == "content_filter"
+    # Never the chat refusal copy, never a raw blob.
+    assert "换个问题" not in resp["error"]["message"]
+    assert "{" not in resp["error"]["message"]
 
 
 @pytest.mark.asyncio

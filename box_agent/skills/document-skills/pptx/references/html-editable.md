@@ -21,8 +21,9 @@ editable-export details; do not use it to weaken the top-level workflow.
 Before export, create `deck.html` with one `.slide` element per page. Prefer this
 `dom-to-pptx` authoring profile:
 
-- Before adding slide content, set every `.slide` to exactly fixed
-  `width: 1920px; height: 1080px;`.
+- Copy `references/starter/common.css` to `drafts/common.css` and use its locked
+  `.slide` block verbatim — every `.slide` is fixed at `width: 1920px;
+  height: 1080px;`. Do not re-author these dimensions.
 - Put `.slide` directly under `<body>` or a plain non-transformed wrapper.
 - Set every `.slide` to `position: relative; overflow: hidden`.
 - Prefer inline styles for slide content; keep `<style>` for page chrome only.

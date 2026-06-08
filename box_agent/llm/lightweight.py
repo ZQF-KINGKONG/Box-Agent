@@ -56,6 +56,19 @@ class LightweightInvalidArgs(LightweightPromptError):
     code = "invalid_args"
 
 
+class LightweightContentFiltered(LightweightPromptError):
+    """The provider refused the prompt on content-moderation grounds.
+
+    Distinct from a generic failure: this is a *model refusal*, not a system
+    error. The host should fall back to a purpose-appropriate default (e.g. a
+    neutral title like "新对话") rather than surfacing the message — the
+    ``message`` here is a short technical note for logs only, NOT user-facing
+    copy and NOT suitable as a title/summary value.
+    """
+
+    code = "content_filter"
+
+
 async def run_lightweight_prompt(
     llm: "LLMClient",
     prompt: str,
@@ -83,6 +96,7 @@ async def run_lightweight_prompt(
     Raises:
         LightweightInvalidArgs: ``prompt`` is empty or ``timeout`` is non-positive.
         LightweightTimeout: The LLM call exceeded ``timeout`` seconds.
+        LightweightContentFiltered: The provider refused on moderation grounds.
         LightweightPromptError: Any other LLM-side failure.
     """
     cleaned_prompt = (prompt or "").strip()
@@ -114,7 +128,19 @@ async def run_lightweight_prompt(
     except asyncio.CancelledError:
         raise
     except Exception as exc:  # noqa: BLE001 - surface as structured error
-        raise LightweightPromptError(str(exc) or repr(exc)) from exc
+        # Classify so the host can distinguish a model refusal (content
+        # moderation) from a real failure, and so we never leak the provider's
+        # raw JSON blob. Unlike the chat path, lightweight callers (title /
+        # summary) consume this programmatically — the friendly message is for
+        # logging, the *code* drives the host's fallback.
+        from .error_messages import classify_llm_error
+
+        friendly = classify_llm_error(exc)
+        if friendly.is_soft:
+            raise LightweightContentFiltered(
+                "content moderation refused the prompt"
+            ) from exc
+        raise LightweightPromptError(friendly.message) from exc
 
     duration_ms = int((perf_counter() - started) * 1000)
     text = getattr(response, "content", "") or ""

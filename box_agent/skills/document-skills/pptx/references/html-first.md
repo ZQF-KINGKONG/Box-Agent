@@ -28,8 +28,9 @@ DOM-to-PPTX exporter.
 
 ## Contract
 
-- Build a fixed-size HTML slide deck first. Before adding slide content, set
-  every `.slide` to exactly `width: 1920px; height: 1080px;`.
+- Build a fixed-size HTML slide deck first. Copy `references/starter/common.css`
+  to `drafts/common.css` and use its locked `.slide` block (`width: 1920px;
+  height: 1080px;`) verbatim — do not re-author these dimensions.
 - If the requested deliverable is final `.pptx`, preflight the browser export
   environment before writing the full HTML deck.
 - Before writing HTML, decide whether `references/outline.md` calls for a
@@ -38,8 +39,10 @@ DOM-to-PPTX exporter.
   Never invent extra claims, data, or strategy just to make an outline look
   deeper.
 - Use one `.slide` element per page. Do not author at `1280px × 720px`,
-  `1280px × 760px`, viewport-relative sizes, or scaled wrappers unless the user
-  explicitly requested a nonstandard output size.
+  `1280px × 760px`, viewport-relative sizes, or scaled wrappers. For a
+  deliberately nonstandard size the user must opt in: pass `--canvas WxH` to both
+  `html_self_check.js` and `html_to_editable_pptx.js` and set the same `WxH` in
+  the `.slide` CSS.
 - Run the stricter HTML self-check profile with `--dom-to-pptx`.
 - Export with `scripts/html_to_editable_pptx.js`.
 - Keep the source HTML and generated preview images beside the output deck for

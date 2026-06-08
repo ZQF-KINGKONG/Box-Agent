@@ -17,10 +17,11 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable.
 5. Visual QA via rendering is optional, not required. See §4.2 for triggers.
 6. If render is attempted but blocked (missing `soffice`/PDF renderer), continue without it; do not treat it as a delivery blocker.
 8. Before writing any slide HTML, invoke the `html-templates` skill to fetch the Visual DNA profile (palette / typography / decoration tokens). See §3.0. This applies to every new HTML-first deck without exception.
-7. `.slide` must be exactly `1920px × 1080px`. **NEVER** pass `--width` / `--height` to `html_self_check.js` or `html_to_editable_pptx.js`; the scripts auto-detect from the `.slide` CSS. Mismatched dimensions are a hard failure, not a fixable warning.
+7. `.slide` must be exactly `1920px × 1080px` (16:9). **Do not author these dimensions from memory** — copy `references/starter/common.css` to `drafts/common.css` and use its `.slide` block verbatim. `html_self_check.js` and `html_to_editable_pptx.js` hard-assert this exact size against **every** slide (not auto-detected from slide 1), so 1280×720 / 1400×840 / 1600×900 / viewport units / scaled wrappers all fail. **Do not pass `--width`/`--height`** — those flags are rejected. For a deliberately non-standard deck the user must opt in: pass `--canvas WxH` to **both** scripts and set the same `WxH` in the `.slide` CSS. Mismatched dimensions are a hard failure, not a fixable warning.
 9. **Never re-serialize a whole multi-slide deck through a single `write_file` call.** Writing every slide's HTML in one tool call routinely overruns the provider output-token limit and the call is truncated mid-stream (`finish_reason=length`), losing the entire turn. For decks of 6+ slides, author per-range fragment files and merge them (see §3.4). When you already hold sub-agent drafts, the orchestrator merges them with `merge_html_fragments.js` — it must not paste their combined content back into one `write_file`.
 10. Any PPTX line geometry written by direct generation paths (`PptxGenJS` / OOXML / python-pptx / other direct generators, i.e., not `dom-to-pptx` HTML export) must avoid negative width/height. Normalize line geometry from start/end coordinates (`x1`,`y1`,`x2`,`y2`) into non-negative geometry before writing geometry boxes: `x=min(x1,x2)`, `y=min(y1,y2)`, `w=abs(x2-x1)`, `h=abs(y2-y1)`.
 11. When the task declares `creative_image_mode`, successful image generation is mandatory: at least one `generate_image` call must complete and the generated asset must be referenced in `assets/generated/manifest.json`. If `generate_image` is unavailable or every call fails, mark the deck as blocked and do not present the PPT as completed.
+12. New decks pass the content & outline gate before any HTML or image work (§1.1). A slide plan is the prerequisite for authoring slides. When the request is under-specified or under-sourced, **reject warmly, not coldly**: ask the user a focused clarifying question, or route the topic to `research-synthesis` — never fabricate facts and never write a flat refusal. (Hard `BLOCKED` is reserved for the `creative_image_mode` image rule above.)
 
 ## 1. Route Decision
 
@@ -28,17 +29,60 @@ Use this skill whenever a PowerPoint deck is an input, output, or deliverable.
 
 Use this path by default:
 
-1. invoke the `html-templates` skill to fetch the Visual DNA profile (see §3.0)
-2. plan slide-level image decisions in `assets/generated/manifest.json`; record the whole deck theme in `deck_context`, and when the image service is available, covers, dividers, campaign/launch/vision pages, and abstract concept pages should normally choose `generate`
-3. call `generate_image` for every `generate` item before writing final slide HTML
-4. for data charts, keep the source dataset/chart spec and use ECharts only as an HTML preview; final PPT must preserve chart data through native PowerPoint chart/table output, not through screenshots
-5. create the slide HTML using the Visual DNA profile and generated local assets as hard constraints. For decks with **6 or more slides** (or dense source material / likely-large HTML), you **must** use the fragment-drafting workflow in §3.4 — author per-range draft files and combine them with `merge_html_fragments.js`. Smaller decks may write `deck.html` directly in one pass.
-6. when `assets/generated/manifest.json` contains `layout_contract`, run image layout contract validation
-7. when `assets/generated/manifest.json` declares `creative_image_mode`, run image manifest validation before HTML self-check
-8. run HTML self-check
-9. export with `scripts/html_to_editable_pptx.js`
-10. run structural QA (package validation, text extraction, placeholder scan)
-11. render and inspect only if §4.2 triggers apply
+1. **Pass the content & outline gate first (see §1.1 and `references/outline.md`).** Do not write any slide HTML — and do not start image planning — until a slide plan exists whose page-level content is either supplied by the user, carried over from an upstream expert/research step, or grounded by `research-synthesis`. If the material is too thin to build a faithful deck, do not fabricate and do not cold-reject — **ask the user one focused question, or route to `research-synthesis`** (§1.1).
+2. invoke the `html-templates` skill to fetch the Visual DNA profile (see §3.0)
+3. plan slide-level image decisions in `assets/generated/manifest.json`; record the whole deck theme in `deck_context`, and when the image service is available, covers, dividers, campaign/launch/vision pages, and abstract concept pages should normally choose `generate`
+4. call `generate_image` for every `generate` item before writing final slide HTML
+5. for data charts, keep the source dataset/chart spec and use ECharts only as an HTML preview; final PPT must preserve chart data through native PowerPoint chart/table output, not through screenshots
+6. create the slide HTML using the slide plan, Visual DNA profile, and generated local assets as hard constraints. For decks with **6 or more slides** (or dense source material / likely-large HTML), you **must** use the fragment-drafting workflow in §3.4 — author per-range draft files and combine them with `merge_html_fragments.js`. Smaller decks may write `deck.html` directly in one pass.
+7. when `assets/generated/manifest.json` contains `layout_contract`, run image layout contract validation
+8. when `assets/generated/manifest.json` declares `creative_image_mode`, run image manifest validation before HTML self-check
+9. run HTML self-check
+10. export with `scripts/html_to_editable_pptx.js`
+11. run structural QA (package validation, text extraction, placeholder scan)
+12. render and inspect only if §4.2 triggers apply
+
+### 1.1 Content & outline gate (new decks)
+
+The deck's page-level content is decided **before** layout and images. The skill
+owns the *slide plan* (page → message → layout intent → visual), not deep
+research. Run this gate at the start of every new deck:
+
+1. **Enough content already?** If the user (or an upstream expert/research step)
+   already supplied page-by-page content — titles, order, key points, data —
+   treat that as the source of truth, build/confirm the slide plan per
+   `references/outline.md`, and continue. This is the common case; do not invent
+   a new storyline over usable input.
+2. **Only structure is unclear?** If the *facts* are available but the framing is
+   ambiguous (audience, page count, ordering, what to emphasise, plan-vs-build),
+   **ask back** — one to three focused questions, and where reasonable propose a
+   sensible default so the user can just confirm. Do not silently guess a whole
+   narrative, and do not stall with an open-ended "tell me more".
+3. **Topic needs facts you don't have?** If the deck needs evidence, market/
+   industry/company/policy data, or claims that must be sourced, and the material
+   is thin or absent, **do not fabricate and do not write a cold rejection.**
+   Hand off to research first:
+
+   ```
+   Skill(skill="research-synthesis",
+         args="<the deck topic + what facts/evidence the slides need>")
+   ```
+
+   Then build the slide plan from the returned, sourced findings. If
+   `research-synthesis` is unavailable in this session, say so and ask the user to
+   provide the source material, rather than presenting unsourced content as fact.
+
+Reserve a hard `BLOCKED` for the `creative_image_mode` image requirement (§0
+rule 11) — a normal deck that is merely under-specified is handled by asking back
+or routing to research, never by a flat refusal. Mark assumed or illustrative
+figures as such in the slide plan's `evidence`/`notes`; never imply fabricated
+data is sourced.
+
+**`creative_image_mode` carve-out:** in `creative_image_mode` a short topic (e.g.
+"茉莉花茶制作过程") is a *creative brief* — expand it imaginatively into a visual
+storyline; do **not** route it to `research-synthesis` or stall on questions
+unless the user explicitly wants sourced facts/figures. Branch 3 above applies to
+fact/evidence-driven decks, not creative/atmospheric ones.
 
 ### `creative_image_mode`
 
@@ -82,13 +126,14 @@ Do not switch routes based on convenience.
 
 | Task | Command |
 |---|---|
+| Validate outline | `${BOX_AGENT_NODE:-node} scripts/validate_outline.js outline.json` |
 | Extract text | `${BOX_AGENT_PYTHON:-python3} scripts/extract_text.py input.pptx` |
 | Validate package | `${BOX_AGENT_PYTHON:-python3} scripts/validate_pptx_package.py input.pptx` |
 | Render PPTX | `${BOX_AGENT_PYTHON:-python3} scripts/render_pptx.py input.pptx --out rendered` |
 | Validate image manifest | `${BOX_AGENT_NODE:-node} scripts/validate_image_manifest.js assets/generated/manifest.json --mode creative_image_mode --min-generated 1 --report qa/image_manifest.json` |
 | Validate image layout contract | `${BOX_AGENT_NODE:-node} scripts/validate_image_layout_contract.js deck.html assets/generated/manifest.json --report qa/image_layout_contract.json` |
-| HTML self-check | `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` ⚠️ 不要追加 `--width/--height` |
-| Export HTML | `${BOX_AGENT_NODE:-node} scripts/html_to_editable_pptx.js deck.html output.pptx` ⚠️ 不要追加 `--width/--height` |
+| HTML self-check | `${BOX_AGENT_NODE:-node} scripts/html_self_check.js deck.html --dom-to-pptx --allow-local-images --report qa/html_self_check.json` ⚠️ 画布固定 1920×1080，不要追加 `--width/--height`（已被拒绝）；非标准尺寸用 `--canvas WxH` |
+| Export HTML | `${BOX_AGENT_NODE:-node} scripts/html_to_editable_pptx.js deck.html output.pptx` ⚠️ 画布固定 1920×1080，不要追加 `--width/--height`（已被拒绝）；非标准尺寸用 `--canvas WxH` |
 | Check local deps | `${BOX_AGENT_PYTHON:-python3} scripts/setup_check.py` |
 | Check HTML export env | `${BOX_AGENT_NODE:-node} scripts/check_html_export_env.js` |
 
@@ -111,7 +156,7 @@ If `html-templates` is unavailable in this session, fall back to authoring the d
 
 ### 3.1 Layout constraints
 
-1. `.slide` must be exactly `1920px × 1080px` (see §0 rule 7 — do **not** pass `--width/--height` to the scripts).
+1. `.slide` must be exactly `1920px × 1080px` — copy `references/starter/common.css` rather than authoring the dimensions (see §0 rule 7; `--width/--height` are rejected, use `--canvas WxH` only for an opt-in non-standard deck).
 2. Leave 16-24px text slack to reduce PowerPoint wrap drift.
 3. For top/middle/bottom layouts, center the main content group in the available middle area. Do not build slides by stacking blocks from the top with repeated `margin-top`; compute the content group's height and balance top/bottom whitespace with flex/grid alignment or explicit `top` values.
 4. Use relative asset paths.
@@ -170,9 +215,12 @@ script — the model never has to stream the entire deck in one tool call.
 
 **Workflow:**
 
-1. Put all shared CSS **once** into `drafts/common.css` (the `.slide` rules,
-   palette variables, typography, reusable component classes). Do not repeat
-   styles inline on every slide — define a class in `common.css` and reference it.
+1. Copy `references/starter/common.css` to `drafts/common.css` — it already
+   contains the locked `.slide` 1920×1080 frame. Add the deck's shared CSS
+   (palette variables, typography, reusable component classes) into this same
+   file **once**; do not edit the `.slide` width/height/position/overflow, and do
+   not repeat styles inline on every slide — define a class in `common.css` and
+   reference it.
 2. Author each contiguous slide range into its own draft file, e.g.
    `drafts/slides_01_04.html`, `drafts/slides_05_08.html`,
    `drafts/slides_09_12.html`. Each draft contains **only**
@@ -224,8 +272,14 @@ Required for every created or modified deck:
 4. slide count and order check
 
 For HTML-first, `qa/html_self_check.json` must exist before export.
-Fix self-check failures and retry up to 3 times.
-Use `--allow-self-check-issues` only after 3 repair rounds for small accepted issues.
+Fix self-check **issues** and retry up to 3 times. Self-check **warnings** never
+block export — record them in `Limitations` and move on; do not spend repair
+rounds on warnings.
+**Convergence cap (hard rule):** if the same issue set persists — or stops
+shrinking — after 3 repair rounds, STOP. Export with `--allow-self-check-issues`
+and record the residual issues in `Limitations`. Do **not** edit the same node a
+4th time, and never loop edit -> recheck on overflow/cosmetic nits — a recheck
+loop that fails to reduce the issue count is a failure mode, not progress.
 If `assets/generated/manifest.json` contains `layout_contract`, `qa/image_layout_contract.json` must exist and pass before HTML self-check.
 
 Rendered visual inspection is **not** in the required list. See §4.2.
@@ -235,7 +289,8 @@ Rendered visual inspection is **not** in the required list. See §4.2.
 When rendered visual inspection surfaces a problem, classify it before reacting. Do **not** change route or strategy for cosmetic issues.
 
 **Blocker — must fix:**
-- Text overflow, content extending outside slide bounds
+- Content extending outside the slide bounds, or a large overflow (>64px) that
+  breaks the layout — self-check reports these as `issues`
 - Image failed to load, broken asset references
 - Wrong slide order, missing pages, misaligned page numbers
 - Layout collapse (overlapping blocks, zero-size containers)
@@ -243,6 +298,8 @@ When rendered visual inspection surfaces a problem, classify it before reacting.
 - dom-to-pptx drift that hides a whole element
 
 **Cosmetic — accept and move on:**
+- Minor text overflow within the authored slack (≤64px) — self-check reports
+  these as `warnings`, not `issues`; they do not block export
 - Watermark / signature artifacts on generated images
 - A single line wrap on a long title or trailing punctuation
 - Minor kerning / leading drift after dom-to-pptx export
@@ -307,16 +364,17 @@ If a QA step is blocked, write `BLOCKED` for that step.
 
 ## 7. References
 
-1. `references/html-first.md`
-2. `references/html-editable.md`
-3. `references/pptxgenjs.md`
-4. `references/ooxml-editing.md`
-5. `references/qa.md`
-6. `references/api-integration.md`
-7. `references/runtime-office-raccoon.md`
-8. `references/dependency-policy.md`
-9. `references/shell-safety.md`
-10. `references/image-assets.md`
+1. `references/outline.md`
+2. `references/html-first.md`
+3. `references/html-editable.md`
+4. `references/pptxgenjs.md`
+5. `references/ooxml-editing.md`
+6. `references/qa.md`
+7. `references/api-integration.md`
+8. `references/runtime-office-raccoon.md`
+9. `references/dependency-policy.md`
+10. `references/shell-safety.md`
+11. `references/image-assets.md`
 
 ## 8. Mode lock and fallback
 

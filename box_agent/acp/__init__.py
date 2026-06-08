@@ -853,6 +853,7 @@ class BoxACPAgent:
         without parsing free-form text.
         """
         from box_agent.llm.lightweight import (
+            LightweightContentFiltered,
             LightweightInvalidArgs,
             LightweightPromptError,
             LightweightTimeout,
@@ -891,6 +892,18 @@ class BoxACPAgent:
                 timeout=timeout,
             )
         except LightweightInvalidArgs as exc:
+            return {"error": {"code": exc.code, "message": str(exc)}}
+        except LightweightContentFiltered as exc:
+            # Model refusal, not a failure: log at info and hand the host a
+            # stable `content_filter` code so it can fall back to a neutral
+            # default (e.g. a generic title) instead of showing this message.
+            log.info(
+                "llm/prompt_content_filter",
+                purpose=purpose,
+                workspace=workspace_label,
+                provider=str(provider),
+                model=model,
+            )
             return {"error": {"code": exc.code, "message": str(exc)}}
         except LightweightTimeout as exc:
             log.warn(

@@ -385,7 +385,9 @@ async def test_llm_exception_returns_error():
     result = await tool.execute(task="Try this")
     # run_agent_loop catches the exception and yields DoneEvent with error as final_content,
     # so SubAgentTool wraps it as a successful result containing the error text.
-    assert "API timeout" in result.content
+    # The error is humanized via classify_llm_error: "API timeout" classifies as a
+    # timeout, so the friendly Chinese message is surfaced rather than the raw string.
+    assert "超时" in result.content
 
 
 async def test_max_steps_respected():

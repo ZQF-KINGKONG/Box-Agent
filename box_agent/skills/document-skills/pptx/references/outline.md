@@ -31,6 +31,47 @@ Only skip the outline when **all** of these are true:
 - The structure is complete enough to write `deck.html` directly.
 - No grouping, prioritization, or narrative arc decisions are needed.
 
+## When the request is under-specified or under-sourced
+
+A new deck must not start from too little. But "too little" is never answered
+with a cold refusal — it is answered by **asking back** or **routing to
+research**. Pick the branch that fits:
+
+1. **Content is sufficient.** The user or an upstream expert/research step
+   already gave usable page-level material (titles, order, key points, data).
+   Treat it as the source of truth and build the outline. Do not invent a
+   competing storyline over usable input.
+
+2. **Only the structure/framing is unclear** (facts are available, but audience,
+   page count, ordering, emphasis, or plan-vs-build is ambiguous). **Ask back** —
+   one to three focused questions, and where reasonable offer a sensible default
+   the user can simply confirm. Examples:
+   - "这套面向投资人还是内部评审?大概几页?" (then propose a default count)
+   - "你已有这些要点,我按 问题→方案→市场→进展 的顺序排,可以吗?"
+   Do not stall with an open-ended "tell me more", and do not silently guess an
+   entire narrative the user never asked for.
+
+3. **The topic needs facts you don't have** (claims, market/industry/company/
+   policy data, anything that must be sourced) and the material is thin or
+   absent. **Do not fabricate, and do not write a flat rejection.** Route to
+   research first, then build the outline from the sourced findings:
+
+   ```
+   Skill(skill="research-synthesis",
+         args="<the deck topic + exactly what facts/evidence the slides need>")
+   ```
+
+   If `research-synthesis` is unavailable in this session, say so plainly and ask
+   the user to supply the source material — never present unsourced content as
+   fact. Keep the boundary clear: this skill turns researched/supplied content
+   into a slide plan; it does not itself perform deep research, fact-checking, or
+   source-credibility judgement.
+
+Reserve a hard `BLOCKED` for the `creative_image_mode` image requirement only. A
+normal deck that is merely under-specified is handled by asking back or routing
+to research — warmly, with a concrete next step — never by a cold "I can't do
+this".
+
 ## Required Output
 
 When the decision gate says an outline is needed, create an `outline.json`

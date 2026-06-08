@@ -1,0 +1,181 @@
+"""Tests for box_agent.llm.error_messages.humanize_llm_error."""
+
+from box_agent.llm.error_messages import classify_llm_error, humanize_llm_error
+from box_agent.retry import RetryExhaustedError, StreamInterrupted
+
+
+class _FakeAPIError(Exception):
+    """Mimic an openai/anthropic style exception with structured attrs."""
+
+    def __init__(self, message, *, code=None, status_code=None, body=None):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
+        self.body = body
+
+
+def test_content_filter_from_raw_string():
+    exc = Exception(
+        "Error code: 400 - {'error': {'code': 'content_filter', "
+        "'message': 'Inappropriate input/output rejected for security reasons', "
+        "'param': None, 'type': 'invalid_request_error'}}"
+    )
+    fe = classify_llm_error(exc)
+    assert fe.category == "content_filter"
+    assert "换个问题" in fe.message
+
+
+def test_content_filter_is_soft():
+    exc = Exception("content_filter triggered")
+    assert classify_llm_error(exc).is_soft is True
+
+
+def test_non_soft_errors_are_hard():
+    for raw, _cat in (
+        ("Rate limit reached", "rate_limit"),
+        ("Incorrect API key", "auth"),
+        ("Internal server error", "server_error"),
+        ("totally novel boom", "unknown"),
+    ):
+        assert classify_llm_error(Exception(raw)).is_soft is False
+
+
+def test_content_filter_from_attrs():
+    exc = _FakeAPIError("bad request", code="content_filter", status_code=400)
+    assert classify_llm_error(exc).category == "content_filter"
+
+
+def test_auth_error():
+    exc = _FakeAPIError("Incorrect API key provided", status_code=401)
+    assert classify_llm_error(exc).category == "auth"
+
+
+def test_rate_limit_error():
+    exc = _FakeAPIError("Rate limit reached for requests", status_code=429)
+    assert classify_llm_error(exc).category == "rate_limit"
+
+
+def test_quota_error():
+    exc = Exception("You exceeded your current quota, please check your billing")
+    assert classify_llm_error(exc).category == "quota"
+
+
+def test_context_length_error():
+    exc = Exception("This model's maximum context length is 128000 tokens")
+    assert classify_llm_error(exc).category == "context_length"
+
+
+def test_server_error():
+    exc = _FakeAPIError("Internal server error", status_code=500)
+    assert classify_llm_error(exc).category == "server_error"
+
+
+def test_unwraps_retry_exhausted():
+    inner = _FakeAPIError("content_filter triggered", code="content_filter")
+    wrapped = RetryExhaustedError(inner, attempts=3)
+    assert classify_llm_error(wrapped).category == "content_filter"
+
+
+def test_unwraps_stream_interrupted():
+    inner = Exception("rate limit exceeded (429)")
+    wrapped = StreamInterrupted(inner, partial_text="hi")
+    assert classify_llm_error(wrapped).category == "rate_limit"
+
+
+def test_unknown_falls_back_to_trimmed_raw():
+    exc = Exception("some totally novel boom")
+    fe = classify_llm_error(exc)
+    assert fe.category == "unknown"
+    assert "some totally novel boom" in fe.message
+
+
+def test_unknown_long_message_is_truncated():
+    exc = Exception("x" * 5000)
+    msg = humanize_llm_error(exc)
+    assert msg.endswith("…")
+    assert len(msg) < 400
+
+
+def test_no_raw_json_blob_in_content_filter_message():
+    exc = Exception(
+        "Error code: 400 - {'error': {'code': 'content_filter', 'message': 'x'}}"
+    )
+    msg = humanize_llm_error(exc)
+    assert "{" not in msg and "error code" not in msg.lower()
+
+
+# ── Bulletproofing: error-handling code must never raise ──────────────────
+
+
+class _ExplodingStr(Exception):
+    """An exception whose __str__ itself raises — must not crash classification."""
+
+    def __str__(self):
+        raise RuntimeError("boom in __str__")
+
+
+class _ExplodingAttr(Exception):
+    """An exception whose attributes raise on access."""
+
+    @property
+    def code(self):
+        raise RuntimeError("boom in code")
+
+    @property
+    def status_code(self):
+        raise RuntimeError("boom in status_code")
+
+    @property
+    def body(self):
+        raise RuntimeError("boom in body")
+
+
+class _ExplodingBodyRepr:
+    """An object that raises on str()/repr() — used as a .body value."""
+
+    def __str__(self):
+        raise RuntimeError("boom")
+
+    __repr__ = __str__
+
+
+class _BodyAttrError(Exception):
+    def __init__(self):
+        super().__init__("wrapper")
+        self.body = _ExplodingBodyRepr()
+
+
+def test_exploding_str_does_not_raise():
+    fe = classify_llm_error(_ExplodingStr())
+    assert isinstance(fe.message, str) and fe.message
+    assert fe.category == "unknown"
+
+
+def test_exploding_attrs_do_not_raise():
+    fe = classify_llm_error(_ExplodingAttr("rate limit reached"))
+    # str() still works here, so the rate_limit token is found.
+    assert fe.category == "rate_limit"
+
+
+def test_exploding_body_value_does_not_raise():
+    fe = classify_llm_error(_BodyAttrError())
+    assert isinstance(fe.message, str) and fe.message
+
+
+def test_humanize_never_raises_on_weird_input():
+    for weird in (_ExplodingStr(), _ExplodingAttr("x"), _BodyAttrError(),
+                  Exception(""), RuntimeError()):
+        msg = humanize_llm_error(weird)
+        assert isinstance(msg, str) and msg  # always non-empty string
+
+
+def test_self_referential_last_exception_does_not_loop():
+    exc = Exception("rate limit")
+    exc.last_exception = exc  # pathological self-reference
+    fe = classify_llm_error(exc)
+    assert fe.category == "rate_limit"
+
+
+def test_empty_exception_falls_back_to_generic():
+    msg = humanize_llm_error(Exception(""))
+    assert "模型调用失败" in msg or "请稍后重试" in msg

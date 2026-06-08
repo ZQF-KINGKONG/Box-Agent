@@ -1334,7 +1334,8 @@ async def run_agent_loop(
             )
 
         except Exception as exc:
-            from .retry import RetryExhaustedError, StreamInterrupted
+            from .llm.error_messages import classify_llm_error
+            from .retry import StreamInterrupted
 
             provider_request_id = None
             if isinstance(exc, StreamInterrupted):
@@ -1360,10 +1361,20 @@ async def run_agent_loop(
                 yield ErrorEvent(message=msg, is_fatal=False, exception=exc)
                 yield DoneEvent(stop_reason=StopReason.INTERRUPTED, final_content=partial_text)
                 return
-            if isinstance(exc, RetryExhaustedError):
-                msg = f"LLM call failed after {exc.attempts} retries\nLast error: {exc.last_exception!s}"
-            else:
-                msg = f"LLM call failed: {exc!s}"
+            # classify_llm_error unwraps RetryExhaustedError to inspect the
+            # underlying provider error.
+            friendly = classify_llm_error(exc)
+            msg = friendly.message
+            if friendly.is_soft:
+                # Model refusal (e.g. content moderation): present as a normal
+                # assistant reply — the turn ended cleanly, it's not a crash.
+                # No "Error:" prefix, no red banner; persisted to history.
+                messages.append(Message(role="assistant", content=msg, tool_calls=None))
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_done(stop_reason=StopReason.END_TURN, final_content=msg)
+                yield ContentEvent(content=msg)
+                yield DoneEvent(stop_reason=StopReason.END_TURN, final_content=msg)
+                return
             if hook_mgr.hooks:
                 await hook_mgr.fire_error(message=msg, is_fatal=True, exception=exc)
                 await hook_mgr.fire_done(stop_reason=StopReason.ERROR, final_content=msg)

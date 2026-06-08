@@ -35,11 +35,29 @@ process.env.NODE_PATH = process.env.NODE_PATH
   : managedNodeModules;
 Module._initPaths();
 
+// Single source of truth for the slide canvas contract — mirrors
+// html_self_check.js. The PPTX always exports at LAYOUT_WIDE (13.333x7.5in,
+// 16:9); a `.slide` authored at any other aspect ratio silently distorts on
+// export, so we assert the canvas size here instead of auto-detecting it.
+const CANONICAL_WIDTH = 1920;
+const CANONICAL_HEIGHT = 1080;
+
 function usage() {
   console.log(
-    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--width W] [--height H] [--svg-vector true|false] [--bg-capture always|never] [--allow-self-check-issues] (default: --svg-vector false for pixel fidelity, --bg-capture always for visual fidelity)"
+    "Usage: html_to_editable_pptx.js deck.html output.pptx [--out slides] [--canvas WxH] [--svg-vector true|false] [--bg-capture always|never] [--allow-self-check-issues] (default: --svg-vector false for pixel fidelity, --bg-capture always for visual fidelity)"
   );
-  console.log("  If --width/--height are omitted, the first .slide element's CSS size is auto-detected.");
+  console.log(`  The canvas contract is ${CANONICAL_WIDTH}x${CANONICAL_HEIGHT} (16:9). Every .slide must match it exactly.`);
+  console.log("  --canvas WxH overrides the contract for a deliberately non-standard deck (e.g. --canvas 1280x720).");
+  console.log("  --width/--height are NOT accepted; set .slide CSS to the canvas size instead.");
+}
+
+function parseCanvas(value) {
+  const m = /^(\d+)\s*[xX*]\s*(\d+)$/.exec(String(value || "").trim());
+  if (!m) return null;
+  const w = Number(m[1]);
+  const h = Number(m[2]);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return null;
+  return { w, h };
 }
 
 function imageMimeType(filePath) {
@@ -133,8 +151,8 @@ function parseArgs(argv) {
     html: argv[0],
     pptx: argv[1],
     out: "slides",
-    width: null,
-    height: null,
+    width: CANONICAL_WIDTH,
+    height: CANONICAL_HEIGHT,
     svgVector: false,
     allowSelfCheckIssues: false,
     bgCapture: "always",
@@ -145,12 +163,25 @@ function parseArgs(argv) {
     if (arg === "--out" && value) {
       opts.out = value;
       i += 1;
-    } else if (arg === "--width" && value) {
-      opts.width = Number(value);
+    } else if (arg === "--canvas" && value) {
+      const canvas = parseCanvas(value);
+      if (!canvas) {
+        console.error(`Invalid --canvas value "${value}". Expected WxH, e.g. --canvas 1280x720.`);
+        process.exit(2);
+      }
+      opts.width = canvas.w;
+      opts.height = canvas.h;
       i += 1;
-    } else if (arg === "--height" && value) {
-      opts.height = Number(value);
-      i += 1;
+    } else if (arg === "--width" || arg === "--height") {
+      console.error(
+        `Refusing to export: ${arg} is not a valid flag for html_to_editable_pptx.js. ` +
+        `The canvas contract is fixed at ${CANONICAL_WIDTH}x${CANONICAL_HEIGHT}.`
+      );
+      console.error(
+        "Per SKILL.md §0 rule 7: set .slide { width; height } in the HTML to the canvas size. " +
+        "For a deliberately non-standard deck, pass --canvas WxH instead of --width/--height."
+      );
+      process.exit(2);
     } else if (arg === "--svg-vector" && value) {
       opts.svgVector = value !== "false";
       i += 1;
@@ -164,8 +195,6 @@ function parseArgs(argv) {
       failUsage();
     }
   }
-  if (opts.width !== null && !Number.isFinite(opts.width)) failUsage();
-  if (opts.height !== null && !Number.isFinite(opts.height)) failUsage();
   return opts;
 }
 
@@ -208,10 +237,8 @@ function runSelfCheck(htmlPath, width, height, reportPath, allowIssues) {
       [
         checker,
         htmlPath,
-        "--width",
-        String(width),
-        "--height",
-        String(height),
+        "--canvas",
+        `${width}x${height}`,
         "--dom-to-pptx",
         "--allow-local-images",
         "--report",
@@ -271,7 +298,13 @@ async function main() {
     throw error;
   }
 
-  const probeViewport = { width: opts.width || 1920, height: opts.height || 1080 };
+  // The canvas size is fixed by the contract (canonical 1920x1080, or an
+  // explicit --canvas override). We probe at that size, then assert the actual
+  // .slide CSS matches it before exporting — exporting a mismatched .slide would
+  // silently distort it into the 16:9 LAYOUT_WIDE PPTX frame.
+  const expectedWidth = opts.width;
+  const expectedHeight = opts.height;
+  const probeViewport = { width: expectedWidth, height: expectedHeight };
   let page = await browser.newPage({
     viewport: probeViewport,
     deviceScaleFactor: 1,
@@ -288,38 +321,30 @@ async function main() {
     return { w: parseFloat(cs.width) || 0, h: parseFloat(cs.height) || 0 };
   });
 
-  let detectedWidth = detected && detected.w > 0 ? detected.w : null;
-  let detectedHeight = detected && detected.h > 0 ? detected.h : null;
-
-  if (opts.width !== null || opts.height !== null) {
-    const cssW = detectedWidth;
-    const cssH = detectedHeight;
-    const mismatchW = opts.width !== null && cssW && Math.abs(opts.width - cssW) > 2;
-    const mismatchH = opts.height !== null && cssH && Math.abs(opts.height - cssH) > 2;
-    if (mismatchW || mismatchH) {
-      console.error(
-        `Refusing to export: --width/--height (${opts.width ?? "auto"}x${opts.height ?? "auto"}) ` +
-        `do not match the .slide CSS size (${Math.round(cssW || 0)}x${Math.round(cssH || 0)}).`
-      );
-      console.error(
-        "Per SKILL.md §0 rule 7, do NOT pass --width/--height to html_to_editable_pptx.js. " +
-        "Either remove these flags so the script auto-detects from .slide CSS, " +
-        "or fix .slide { width; height } in the HTML to the intended canvas size."
-      );
-      await browser.close();
-      process.exit(1);
-    }
-    if (opts.width !== null) detectedWidth = opts.width;
-    if (opts.height !== null) detectedHeight = opts.height;
+  const cssW = detected && detected.w > 0 ? detected.w : null;
+  const cssH = detected && detected.h > 0 ? detected.h : null;
+  const mismatchW = cssW !== null && Math.abs(expectedWidth - cssW) > 2;
+  const mismatchH = cssH !== null && Math.abs(expectedHeight - cssH) > 2;
+  if (cssW === null || cssH === null) {
+    console.error("Refusing to export: no .slide element with a CSS size was found.");
+    await browser.close();
+    process.exit(1);
+  }
+  if (mismatchW || mismatchH) {
+    console.error(
+      `Refusing to export: .slide CSS size is ${Math.round(cssW)}x${Math.round(cssH)}, ` +
+      `but the canvas contract is ${expectedWidth}x${expectedHeight}.`
+    );
+    console.error(
+      `Set .slide { width: ${expectedWidth}px; height: ${expectedHeight}px; } in the HTML. ` +
+      "For a deliberately non-standard deck, pass --canvas WxH to match the HTML."
+    );
+    await browser.close();
+    process.exit(1);
   }
 
-  if (detectedWidth === null || detectedHeight === null) {
-    detectedWidth = detectedWidth || 1920;
-    detectedHeight = detectedHeight || 1080;
-    console.log(`Auto-detected slide size: ${detectedWidth}x${detectedHeight}`);
-  } else if (opts.width === null && opts.height === null) {
-    console.log(`Auto-detected slide size: ${detectedWidth}x${detectedHeight}`);
-  }
+  const detectedWidth = expectedWidth;
+  const detectedHeight = expectedHeight;
 
   const needsResize =
     Math.abs(probeViewport.width - detectedWidth) > 2 ||

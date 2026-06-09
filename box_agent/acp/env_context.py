@@ -133,10 +133,10 @@ def _sanitize_runtimes(raw: Any) -> dict[str, dict[str, Any]]:
         return {}
 
     allowed_runtime_fields = {
-        "python": ("path", "ready", "provider"),
+        "python": ("path", "shell_path", "sandbox_path", "ready", "provider"),
         "node": ("path", "npm", "npx", "node_modules", "ready", "provider"),
     }
-    path_fields = {"path", "npm", "npx", "node_modules"}
+    path_fields = {"path", "shell_path", "sandbox_path", "npm", "npx", "node_modules"}
     cleaned: dict[str, dict[str, Any]] = {}
 
     for kind, value in raw.items():
@@ -199,6 +199,8 @@ class HostRuntime(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     path: str | None = None
+    shell_path: str | None = None
+    sandbox_path: str | None = None
     npm: str | None = None
     npx: str | None = None
     node_modules: str | None = None

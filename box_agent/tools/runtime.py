@@ -62,7 +62,7 @@ def build_skill_runtime_context(
     node_runtime_root: Path | None = None,
 ) -> SkillRuntimeContext:
     """Discover runtimes available to skills for this session."""
-    host_runtimes = getattr(env_context, "runtimes", {}) if env_context is not None else {}
+    host_runtimes = _env_context_runtimes(env_context)
     return SkillRuntimeContext(
         runtimes={
             "python": _build_python_runtime(sandbox_mode, host_runtimes, sandbox_env),
@@ -87,7 +87,13 @@ def build_skill_runtime_prompt(ctx: SkillRuntimeContext) -> str:
     lines.append(py_line)
 
     if node.available:
-        node_line = f"- Node: {node.provider} via `$BOX_AGENT_NODE` / `$BOX_AGENT_NPM` / `$BOX_AGENT_NPX`"
+        node_env_vars = [
+            name
+            for name in ("BOX_AGENT_NODE", "BOX_AGENT_NPM", "BOX_AGENT_NPX")
+            if name in node.env_vars
+        ]
+        via = " / ".join(f"`${name}`" for name in node_env_vars) or "configured runtime"
+        node_line = f"- Node: {node.provider} via {via}"
     else:
         node_line = "- Node: 不可用——skill 若依赖 Node 应直接报告依赖缺失，不要回退系统 node"
     if node.notes:
@@ -106,14 +112,27 @@ def _build_python_runtime(
     sandbox_env: SandboxEnvironment | None,
 ) -> SkillRuntime:
     host = _runtime(host_runtimes, "python")
-    if host is not None and bool(getattr(host, "ready", False)) and getattr(host, "path", None):
-        path = str(getattr(host, "path"))
+    if host is not None and bool(_runtime_field(host, "ready", False)) and _runtime_field(host, "path"):
+        path = _safe_host_executable_path(_runtime_field(host, "path"))
+        shell_path = _safe_host_executable_path(_runtime_field(host, "shell_path")) or path
+        sandbox_path = _safe_host_executable_path(_runtime_field(host, "sandbox_path")) or path
+        if path is None or shell_path is None or sandbox_path is None:
+            return SkillRuntime(
+                kind="python",
+                status="unavailable",
+                provider="host",
+                notes=("Host Python runtime path was rejected or is not executable.",),
+            )
         return SkillRuntime(
             kind="python",
             status="available",
             provider="host",
-            executable_path=path,
-            env_vars={"BOX_AGENT_PYTHON": path, "BOX_AGENT_PYTHON3": path},
+            executable_path=shell_path,
+            env_vars={
+                "BOX_AGENT_PYTHON": shell_path,
+                "BOX_AGENT_PYTHON3": shell_path,
+                "BOX_AGENT_SANDBOX_PYTHON": sandbox_path,
+            },
             notes=_host_note(host),
         )
 
@@ -138,7 +157,11 @@ def _build_python_runtime(
                     status="available",
                     provider="box_agent",
                     executable_path=path,
-                    env_vars={"BOX_AGENT_PYTHON": path, "BOX_AGENT_PYTHON3": path},
+                    env_vars={
+                        "BOX_AGENT_PYTHON": path,
+                        "BOX_AGENT_PYTHON3": path,
+                        "BOX_AGENT_SANDBOX_PYTHON": path,
+                    },
                     notes=("Bundled Windows portable Python.",),
                 )
         return SkillRuntime(
@@ -157,7 +180,11 @@ def _build_python_runtime(
             status="available",
             provider="box_agent",
             executable_path=path,
-            env_vars={"BOX_AGENT_PYTHON": path, "BOX_AGENT_PYTHON3": path},
+            env_vars={
+                "BOX_AGENT_PYTHON": path,
+                "BOX_AGENT_PYTHON3": path,
+                "BOX_AGENT_SANDBOX_PYTHON": path,
+            },
         )
 
     return SkillRuntime(
@@ -484,14 +511,25 @@ class NodeRuntimeManager:
 
 def _build_node_runtime(host_runtimes: Any, *, node_runtime_root: Path | None = None) -> SkillRuntime:
     host = _runtime(host_runtimes, "node")
-    if host is not None and bool(getattr(host, "ready", False)) and getattr(host, "path", None):
-        env_vars = {"BOX_AGENT_NODE": str(getattr(host, "path"))}
-        if getattr(host, "npm", None):
-            env_vars["BOX_AGENT_NPM"] = str(getattr(host, "npm"))
-        if getattr(host, "npx", None):
-            env_vars["BOX_AGENT_NPX"] = str(getattr(host, "npx"))
-        if getattr(host, "node_modules", None):
-            env_vars["NODE_PATH"] = str(getattr(host, "node_modules"))
+    if host is not None and bool(_runtime_field(host, "ready", False)) and _runtime_field(host, "path"):
+        node_path = _safe_host_executable_path(_runtime_field(host, "path"))
+        if node_path is None:
+            return SkillRuntime(
+                kind="node",
+                status="unavailable",
+                provider="host",
+                notes=("Host Node runtime path was rejected or is not executable.",),
+            )
+        env_vars = {"BOX_AGENT_NODE": node_path}
+        npm_path = _safe_host_executable_path(_runtime_field(host, "npm"))
+        npx_path = _safe_host_executable_path(_runtime_field(host, "npx"))
+        node_modules_path = _safe_host_runtime_path(_runtime_field(host, "node_modules"))
+        if npm_path:
+            env_vars["BOX_AGENT_NPM"] = npm_path
+        if npx_path:
+            env_vars["BOX_AGENT_NPX"] = npx_path
+        if node_modules_path:
+            env_vars["NODE_PATH"] = node_modules_path
         return SkillRuntime(
             kind="node",
             status="available",
@@ -504,17 +542,62 @@ def _build_node_runtime(host_runtimes: Any, *, node_runtime_root: Path | None = 
     return NodeRuntimeManager(root=node_runtime_root).discover()
 
 
+def _env_context_runtimes(env_context: Any | None) -> Any:
+    if env_context is None:
+        return {}
+    if isinstance(env_context, dict):
+        return env_context.get("runtimes", {})
+    return getattr(env_context, "runtimes", {})
+
+
 def _runtime(host_runtimes: Any, kind: RuntimeKind) -> Any | None:
     if isinstance(host_runtimes, dict):
         return host_runtimes.get(kind)
     return getattr(host_runtimes, kind, None)
 
 
+def _runtime_field(runtime: Any, field: str, default: Any = None) -> Any:
+    if isinstance(runtime, dict):
+        return runtime.get(field, default)
+    return getattr(runtime, field, default)
+
+
 def _host_note(host: Any) -> tuple[str, ...]:
-    provider = getattr(host, "provider", None)
+    provider = _safe_host_runtime_provider(_runtime_field(host, "provider"))
     if provider:
         return (f"Host runtime provider: {provider}.",)
     return ()
+
+
+def _safe_host_runtime_path(raw: Any) -> str | None:
+    if raw is None or not isinstance(raw, str):
+        return None
+    if not raw or len(raw) > _MAX_RUNTIME_PATH_LEN:
+        return None
+    if "`" in raw or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return None
+    if raw.startswith("/") or (len(raw) >= 3 and raw[1:3] == ":\\"):
+        return raw
+    return None
+
+
+def _safe_host_executable_path(raw: Any) -> str | None:
+    path = _safe_host_runtime_path(raw)
+    if path is None:
+        return None
+    return path if _is_executable_file(path) else None
+
+
+def _safe_host_runtime_provider(raw: Any) -> str | None:
+    if raw is None or not isinstance(raw, str):
+        return None
+    if not raw or len(raw) > 64:
+        return None
+    if "`" in raw or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return None
+    if all(ch.isalnum() or ch in "_-" for ch in raw):
+        return raw
+    return None
 
 
 def _safe_manifest_path(raw: Any, *, base: Path) -> str | None:
@@ -534,6 +617,14 @@ def _safe_manifest_path(raw: Any, *, base: Path) -> str | None:
 
 def _is_executable_file(path: str) -> bool:
     return Path(path).is_file() and os.access(path, os.X_OK)
+
+
+def _sandbox_python_runtime_from_env() -> Path | None:
+    for env_name in ("BOX_AGENT_SANDBOX_PYTHON", "BOX_AGENT_BUNDLED_PYTHON"):
+        raw = os.environ.get(env_name)
+        if raw and _is_executable_file(raw):
+            return Path(raw)
+    return None
 
 
 def _bundled_node_runtime_root() -> Path | None:
@@ -593,6 +684,9 @@ def bundled_win_python() -> Path | None:
     """Locate the Windows-bundled portable ``python.exe`` if present."""
     if sys.platform != "win32":
         return None
+    override = _sandbox_python_runtime_from_env()
+    if override is not None:
+        return override
     root = _bundled_runtime_root()
     if root is None:
         return None

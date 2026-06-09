@@ -19,6 +19,7 @@ from box_agent.config import (
 from box_agent.memory import MemoryManager
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
+from box_agent.tools.setup import SANDBOX_INFO_PROMPT
 
 
 class DummyConn:
@@ -69,6 +70,12 @@ class DummyLLM:
         else:
             yield StreamEvent(type="text", delta="done")
             yield StreamEvent(type="finish", finish_reason="stop")
+
+
+def test_sandbox_prompt_requires_execute_code_for_explicit_python_results():
+    assert "用户要求“用/使用/运行 Python”得到一个具体结果" in SANDBOX_INFO_PROMPT
+    assert "必须调用 `execute_code` 返回真实执行结果" in SANDBOX_INFO_PROMPT
+    assert "不要只给代码示例" in SANDBOX_INFO_PROMPT
 
 
 class TodoLLM:
@@ -560,6 +567,62 @@ async def test_acp_frozen_mode_still_discovers_self_managed_node_runtime(tmp_pat
     assert "box_agent" in state.agent.system_prompt
     assert "execute_code" in state.agent.system_prompt or "shell python" in state.agent.system_prompt
     assert state.agent.tools["bash"]._subprocess_env["BOX_AGENT_NODE"] == str(node)
+
+
+@pytest.mark.asyncio
+async def test_acp_host_env_context_feeds_bash_and_execute_code_runtime_env(tmp_path):
+    workspace = tmp_path / "workspace"
+    python_path = tmp_path / "officev3" / "python" / "python.exe"
+    node_path = tmp_path / "officev3" / "node" / "node.exe"
+    npm_path = tmp_path / "officev3" / "node" / "npm.cmd"
+    npx_path = tmp_path / "officev3" / "node" / "npx.cmd"
+    node_modules = tmp_path / "officev3" / "node_modules"
+    for runtime_path in (python_path, node_path, npm_path, npx_path):
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        runtime_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        runtime_path.chmod(0o755)
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(workspace)),
+        tools=ToolsConfig(),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DummyLLM(), [EchoTool()], "system")
+
+    env_context = {
+        "runtimes": {
+            "python": {
+                "path": str(python_path),
+                "ready": True,
+                "provider": "officev3",
+            },
+            "node": {
+                "path": str(node_path),
+                "npm": str(npm_path),
+                "npx": str(npx_path),
+                "node_modules": str(node_modules),
+                "ready": True,
+                "provider": "officev3",
+            },
+        }
+    }
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(workspace),
+            field_meta={"session_mode": "general", "env_context": env_context},
+        )
+    )
+    state = agent._sessions[session.sessionId]
+    bash_env = state.agent.tools["bash"]._subprocess_env
+    execute_code_env = state.agent.tools["execute_code"].runtime_env
+
+    assert bash_env["BOX_AGENT_PYTHON"] == str(python_path)
+    assert bash_env["BOX_AGENT_SANDBOX_PYTHON"] == str(python_path)
+    assert bash_env["BOX_AGENT_NODE"] == str(node_path)
+    assert bash_env["BOX_AGENT_NPM"] == str(npm_path)
+    assert bash_env["BOX_AGENT_NPX"] == str(npx_path)
+    assert bash_env["NODE_PATH"] == str(node_modules)
+    assert execute_code_env["BOX_AGENT_SANDBOX_PYTHON"] == str(python_path)
 
 
 @pytest.mark.asyncio

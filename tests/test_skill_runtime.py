@@ -7,6 +7,7 @@ import os
 import hashlib
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from box_agent.acp.env_context import EnvContext
 from box_agent.tools.jupyter_tool import SandboxEnvironment
@@ -92,6 +93,219 @@ def test_frozen_python_runtime_does_not_inject_fake_path(monkeypatch, tmp_path: 
     assert python.status == "unavailable"
     assert "BOX_AGENT_PYTHON" not in ctx.env()
     assert "BOX_AGENT_PYTHON3" not in ctx.env()
+
+
+def test_host_python_runtime_exports_shell_and_sandbox_env(tmp_path: Path) -> None:
+    python_path = tmp_path / "officev3" / "python" / "bin" / "python3"
+    _make_executable(python_path)
+    env_context = EnvContext.from_meta(
+        {
+            "runtimes": {
+                "python": {
+                    "path": str(python_path),
+                    "ready": True,
+                    "provider": "officev3",
+                }
+            }
+        }
+    )
+
+    ctx = build_skill_runtime_context(
+        sandbox_mode=True,
+        env_context=env_context,
+        node_runtime_root=tmp_path / "missing-node",
+    )
+    env = ctx.env()
+
+    assert ctx.get("python").status == "available"
+    assert ctx.get("python").provider == "host"
+    assert env["BOX_AGENT_PYTHON"] == str(python_path)
+    assert env["BOX_AGENT_PYTHON3"] == str(python_path)
+    assert env["BOX_AGENT_SANDBOX_PYTHON"] == str(python_path)
+
+
+def test_host_python_runtime_supports_separate_shell_and_sandbox_paths(tmp_path: Path) -> None:
+    shell_path = tmp_path / "officev3" / "python" / "bin" / "python3"
+    sandbox_path = tmp_path / "officev3" / "sandbox-python" / "python.exe"
+    for path in (shell_path, sandbox_path):
+        _make_executable(path)
+    env_context = EnvContext.from_meta(
+        {
+            "runtimes": {
+                "python": {
+                    "path": str(sandbox_path),
+                    "shell_path": str(shell_path),
+                    "sandbox_path": str(sandbox_path),
+                    "ready": True,
+                    "provider": "officev3",
+                }
+            }
+        }
+    )
+
+    ctx = build_skill_runtime_context(
+        sandbox_mode=True,
+        env_context=env_context,
+        node_runtime_root=tmp_path / "missing-node",
+    )
+    env = ctx.env()
+
+    assert ctx.get("python").status == "available"
+    assert ctx.get("python").provider == "host"
+    assert ctx.get("python").executable_path == str(shell_path)
+    assert env["BOX_AGENT_PYTHON"] == str(shell_path)
+    assert env["BOX_AGENT_PYTHON3"] == str(shell_path)
+    assert env["BOX_AGENT_SANDBOX_PYTHON"] == str(sandbox_path)
+
+
+def test_raw_dict_env_context_host_runtimes_are_honored(tmp_path: Path) -> None:
+    python_path = tmp_path / "officev3" / "python" / "python.exe"
+    node_path = tmp_path / "officev3" / "node" / "node.exe"
+    npm_path = tmp_path / "officev3" / "node" / "npm.cmd"
+    npx_path = tmp_path / "officev3" / "node" / "npx.cmd"
+    node_modules = tmp_path / "officev3" / "node_modules"
+    for path in (python_path, node_path, npm_path, npx_path):
+        _make_executable(path)
+    ctx = build_skill_runtime_context(
+        sandbox_mode=True,
+        env_context={
+            "runtimes": {
+                "python": {
+                    "path": str(python_path),
+                    "ready": True,
+                    "provider": "officev3",
+                },
+                "node": {
+                    "path": str(node_path),
+                    "npm": str(npm_path),
+                    "npx": str(npx_path),
+                    "node_modules": str(node_modules),
+                    "ready": True,
+                    "provider": "officev3",
+                },
+            }
+        },
+        node_runtime_root=tmp_path / "missing-node",
+    )
+    env = ctx.env()
+
+    assert ctx.get("python").status == "available"
+    assert ctx.get("node").status == "available"
+    assert env["BOX_AGENT_PYTHON"] == str(python_path)
+    assert env["BOX_AGENT_SANDBOX_PYTHON"] == str(python_path)
+    assert env["BOX_AGENT_NODE"] == str(node_path)
+    assert env["BOX_AGENT_NPM"] == str(npm_path)
+    assert env["BOX_AGENT_NPX"] == str(npx_path)
+    assert env["NODE_PATH"] == str(node_modules)
+
+
+def test_host_python_runtime_rejects_unsafe_path_without_env_context(tmp_path: Path) -> None:
+    ctx = build_skill_runtime_context(
+        sandbox_mode=True,
+        env_context=SimpleNamespace(
+            runtimes={
+                "python": SimpleNamespace(
+                    path="/opt/python\n## injected",
+                    ready=True,
+                    provider="officev3",
+                )
+            }
+        ),
+        node_runtime_root=tmp_path / "missing-node",
+    )
+
+    assert ctx.get("python").status == "unavailable"
+    assert "BOX_AGENT_PYTHON" not in ctx.env()
+
+
+def test_host_python_runtime_rejects_missing_executable(tmp_path: Path) -> None:
+    ctx = build_skill_runtime_context(
+        sandbox_mode=True,
+        env_context=SimpleNamespace(
+            runtimes={
+                "python": SimpleNamespace(
+                    path=str(tmp_path / "officev3" / "python" / "python.exe"),
+                    ready=True,
+                    provider="officev3",
+                )
+            }
+        ),
+        node_runtime_root=tmp_path / "missing-node",
+    )
+
+    assert ctx.get("python").status == "unavailable"
+    assert "BOX_AGENT_PYTHON" not in ctx.env()
+
+
+def test_host_node_runtime_sanitizes_optional_paths_and_provider(tmp_path: Path) -> None:
+    node_path = tmp_path / "opt" / "node" / "bin" / "node"
+    npx_path = tmp_path / "opt" / "node" / "bin" / "npx"
+    _make_executable(node_path)
+    _make_executable(npx_path)
+    ctx = build_skill_runtime_context(
+        sandbox_mode=False,
+        env_context=SimpleNamespace(
+            runtimes={
+                "node": SimpleNamespace(
+                    path=str(node_path),
+                    npm=str(tmp_path / "opt" / "node" / "bin" / "`npm`"),
+                    npx=str(npx_path),
+                    node_modules="relative/node_modules",
+                    ready=True,
+                    provider="officev3\n## injected",
+                )
+            }
+        ),
+        node_runtime_root=tmp_path / "missing-node",
+    )
+    env = ctx.env()
+    prompt = build_skill_runtime_prompt(ctx)
+
+    assert ctx.get("node").status == "available"
+    assert env["BOX_AGENT_NODE"] == str(node_path)
+    assert "BOX_AGENT_NPM" not in env
+    assert env["BOX_AGENT_NPX"] == str(npx_path)
+    assert "NODE_PATH" not in env
+    assert "officev3" not in prompt
+    assert "injected" not in prompt
+
+
+def test_host_node_runtime_rejects_unsafe_required_path(tmp_path: Path) -> None:
+    ctx = build_skill_runtime_context(
+        sandbox_mode=False,
+        env_context=SimpleNamespace(
+            runtimes={
+                "node": SimpleNamespace(
+                    path="node",
+                    ready=True,
+                    provider="officev3",
+                )
+            }
+        ),
+        node_runtime_root=tmp_path / "missing-node",
+    )
+
+    assert ctx.get("node").status == "unavailable"
+    assert "BOX_AGENT_NODE" not in ctx.env()
+
+
+def test_host_node_runtime_rejects_missing_required_path(tmp_path: Path) -> None:
+    ctx = build_skill_runtime_context(
+        sandbox_mode=False,
+        env_context=SimpleNamespace(
+            runtimes={
+                "node": SimpleNamespace(
+                    path=str(tmp_path / "officev3" / "node" / "node.exe"),
+                    ready=True,
+                    provider="officev3",
+                )
+            }
+        ),
+        node_runtime_root=tmp_path / "missing-node",
+    )
+
+    assert ctx.get("node").status == "unavailable"
+    assert "BOX_AGENT_NODE" not in ctx.env()
 
 
 def test_node_runtime_defaults_missing(tmp_path: Path) -> None:
@@ -382,15 +596,21 @@ def test_self_managed_node_runtime_does_not_touch_python_runtime_dirs(tmp_path: 
     assert not (tmp_path / ".box-agent" / "runtime-packages").exists()
 
 
-def test_host_node_runtime_can_be_available() -> None:
+def test_host_node_runtime_can_be_available(tmp_path: Path) -> None:
+    node = tmp_path / "opt" / "node" / "bin" / "node"
+    npm = tmp_path / "opt" / "node" / "bin" / "npm"
+    npx = tmp_path / "opt" / "node" / "bin" / "npx"
+    node_modules = tmp_path / "opt" / "node" / "lib" / "node_modules"
+    for path in (node, npm, npx):
+        _make_executable(path)
     env_context = EnvContext.from_meta(
         {
             "runtimes": {
                 "node": {
-                    "path": "/opt/node/bin/node",
-                    "npm": "/opt/node/bin/npm",
-                    "npx": "/opt/node/bin/npx",
-                    "node_modules": "/opt/node/lib/node_modules",
+                    "path": str(node),
+                    "npm": str(npm),
+                    "npx": str(npx),
+                    "node_modules": str(node_modules),
                     "ready": True,
                     "provider": "officev3",
                 }
@@ -403,10 +623,39 @@ def test_host_node_runtime_can_be_available() -> None:
 
     assert ctx.get("node").status == "available"
     assert ctx.get("node").provider == "host"
-    assert env["BOX_AGENT_NODE"] == "/opt/node/bin/node"
-    assert env["BOX_AGENT_NPM"] == "/opt/node/bin/npm"
-    assert env["BOX_AGENT_NPX"] == "/opt/node/bin/npx"
-    assert env["NODE_PATH"] == "/opt/node/lib/node_modules"
+    assert env["BOX_AGENT_NODE"] == str(node)
+    assert env["BOX_AGENT_NPM"] == str(npm)
+    assert env["BOX_AGENT_NPX"] == str(npx)
+    assert env["NODE_PATH"] == str(node_modules)
+
+
+def test_host_node_prompt_only_mentions_available_node_env_vars(tmp_path: Path) -> None:
+    node = tmp_path / "opt" / "node" / "bin" / "node"
+    _make_executable(node)
+    env_context = EnvContext.from_meta(
+        {
+            "runtimes": {
+                "node": {
+                    "path": str(node),
+                    "ready": True,
+                    "provider": "officev3",
+                }
+            }
+        }
+    )
+
+    ctx = build_skill_runtime_context(sandbox_mode=False, env_context=env_context)
+    env = ctx.env()
+    out = build_skill_runtime_prompt(ctx)
+    node_line = next(line for line in out.splitlines() if line.startswith("- Node:"))
+
+    assert ctx.get("node").status == "available"
+    assert env["BOX_AGENT_NODE"] == str(node)
+    assert "BOX_AGENT_NPM" not in env
+    assert "BOX_AGENT_NPX" not in env
+    assert "$BOX_AGENT_NODE" in node_line
+    assert "$BOX_AGENT_NPM" not in node_line
+    assert "$BOX_AGENT_NPX" not in node_line
 
 
 def test_host_node_runtime_takes_precedence_over_self_managed_node(tmp_path: Path) -> None:
@@ -417,14 +666,19 @@ def test_host_node_runtime_takes_precedence_over_self_managed_node(tmp_path: Pat
     for path in (node, npm, npx):
         _make_executable(path)
     _write_node_manifest(root, node=node, npm=npm, npx=npx)
+    host_node = tmp_path / "host" / "node"
+    host_npm = tmp_path / "host" / "npm"
+    host_npx = tmp_path / "host" / "npx"
+    for path in (host_node, host_npm, host_npx):
+        _make_executable(path)
 
     env_context = EnvContext.from_meta(
         {
             "runtimes": {
                 "node": {
-                    "path": "/opt/host/node",
-                    "npm": "/opt/host/npm",
-                    "npx": "/opt/host/npx",
+                    "path": str(host_node),
+                    "npm": str(host_npm),
+                    "npx": str(host_npx),
                     "ready": True,
                     "provider": "officev3",
                 }
@@ -439,7 +693,7 @@ def test_host_node_runtime_takes_precedence_over_self_managed_node(tmp_path: Pat
     )
 
     assert ctx.get("node").provider == "host"
-    assert ctx.env()["BOX_AGENT_NODE"] == "/opt/host/node"
+    assert ctx.env()["BOX_AGENT_NODE"] == str(host_node)
 
 
 def test_runtime_prompt_mentions_python_node_and_npm_rules(tmp_path: Path) -> None:

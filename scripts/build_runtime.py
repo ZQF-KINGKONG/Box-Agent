@@ -83,6 +83,210 @@ SUPPORTED_TARGETS = {
     "win32-x64",
 }
 
+EXTERNAL_PYTHON_SANDBOX_HIDDEN_IMPORTS = {
+    "ipykernel",
+    "ipykernel.inprocess",
+    "ipykernel.inprocess.manager",
+    "ipykernel_launcher",
+    "debugpy",
+    "debugpy._vendored",
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "matplotlib.backends",
+    "matplotlib.backends.backend_agg",
+    "seaborn",
+    "openpyxl",
+    "xlrd",
+    "sklearn",
+    "sklearn.cluster",
+    "sklearn.linear_model",
+    "docx",
+    "pypdf",
+    "pdfplumber",
+    "reportlab",
+    "reportlab.pdfgen",
+    "reportlab.lib",
+    "pptx",
+    "sklearn.preprocessing",
+    "bs4",
+    "lxml",
+    "lxml.etree",
+    "lxml.html",
+    "PIL",
+    "PIL.Image",
+    "chardet",
+    "pip",
+    "pip._internal",
+    "pip._internal.cli",
+    "pip._internal.cli.main",
+}
+
+EXTERNAL_PYTHON_SANDBOX_COLLECT_ARGS = {
+    ("--collect-all", "ipykernel"),
+    ("--collect-all", "debugpy"),
+    ("--collect-all", "matplotlib"),
+    ("--collect-submodules", "pandas"),
+    ("--collect-submodules", "seaborn"),
+    ("--collect-submodules", "openpyxl"),
+    ("--collect-submodules", "sklearn"),
+    ("--collect-submodules", "pip"),
+}
+
+EXTERNAL_PYTHON_SANDBOX_EXCLUDED_MODULES = {
+    "ipykernel",
+    "ipykernel.inprocess",
+    "ipykernel_launcher",
+    "debugpy",
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "seaborn",
+    "openpyxl",
+    "xlrd",
+    "sklearn",
+    "docx",
+    "pypdf",
+    "pdfplumber",
+    "reportlab",
+    "pptx",
+    "bs4",
+    "lxml",
+    "PIL",
+    "chardet",
+    "pip",
+}
+
+
+def env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def pyinstaller_hidden_imports(*, external_python_sandbox: bool = False) -> list[str]:
+    """Return PyInstaller hidden imports for the ACP runtime build."""
+    hidden_imports = [
+        "box_agent",
+        "box_agent.acp",
+        "box_agent.acp.debug_logger",
+        "box_agent.agent",
+        "box_agent.cli",
+        "box_agent.config",
+        "box_agent.core",
+        "box_agent.events",
+        "box_agent.llm",
+        "box_agent.llm.anthropic_client",
+        "box_agent.llm.openai_client",
+        "box_agent.llm.llm_wrapper",
+        "box_agent.logger",
+        "box_agent.retry",
+        "box_agent.schema",
+        "box_agent.tools",
+        "box_agent.tools.bash_tool",
+        "box_agent.tools.file_tools",
+        "box_agent.tools.jupyter_tool",
+        "box_agent.tools.mcp_loader",
+        "box_agent.tools.skill_tool",
+        "box_agent.utils",
+        # Third-party
+        "tiktoken",
+        "tiktoken_ext",
+        "tiktoken_ext.openai_public",
+        "httpx",
+        "httpcore",
+        "anthropic",
+        "openai",
+        "pydantic",
+        "yaml",
+        "mcp",
+        "acp",
+        "jupyter_client",
+        "jupyter_client.provisioning",
+        "jupyter_client.provisioning.local_provisioner",
+        "ipykernel",
+        "ipykernel.inprocess",
+        "ipykernel.inprocess.manager",
+        "ipykernel_launcher",
+        "jupyter_core",
+        # debugpy (ipykernel dependency, has _vendored/pydevd subtree)
+        "debugpy",
+        "debugpy._vendored",
+        # Data science (runtime extras)
+        "pandas",
+        "numpy",
+        "matplotlib",
+        "matplotlib.backends",
+        "matplotlib.backends.backend_agg",
+        "seaborn",
+        "openpyxl",
+        "xlrd",
+        "sklearn",
+        "sklearn.cluster",
+        "sklearn.linear_model",
+        # Document processing (runtime extras)
+        "docx",  # python-docx imports as 'docx'
+        "pypdf",
+        "pdfplumber",
+        "reportlab",
+        "reportlab.pdfgen",
+        "reportlab.lib",
+        "pptx",  # python-pptx imports as 'pptx'
+        "sklearn.preprocessing",
+        # HTML / XML / image / config / encoding (sandbox defaults)
+        "bs4",  # beautifulsoup4 imports as 'bs4'
+        "lxml",
+        "lxml.etree",
+        "lxml.html",
+        "PIL",  # pillow imports as 'PIL'
+        "PIL.Image",
+        "dateutil",  # python-dateutil imports as 'dateutil'
+        "dateutil.parser",
+        "chardet",
+        # pip (used as library in frozen mode for runtime package installs)
+        "pip",
+        "pip._internal",
+        "pip._internal.cli",
+        "pip._internal.cli.main",
+    ]
+    if external_python_sandbox:
+        return [
+            imp for imp in hidden_imports if imp not in EXTERNAL_PYTHON_SANDBOX_HIDDEN_IMPORTS
+        ]
+    return hidden_imports
+
+
+def pyinstaller_collect_args(*, external_python_sandbox: bool = False) -> list[str]:
+    """Return flattened PyInstaller collect args for the ACP runtime build."""
+    collect_groups = [
+        ("--collect-all", "tiktoken"),
+        ("--collect-all", "tiktoken_ext"),
+        ("--collect-all", "jupyter_client"),
+        ("--collect-all", "ipykernel"),
+        ("--collect-all", "jupyter_core"),
+        ("--collect-all", "debugpy"),
+        ("--collect-all", "matplotlib"),
+        ("--collect-submodules", "pandas"),
+        ("--collect-submodules", "seaborn"),
+        ("--collect-submodules", "openpyxl"),
+        ("--collect-submodules", "sklearn"),
+        ("--collect-submodules", "pip"),
+    ]
+    if external_python_sandbox:
+        collect_groups = [
+            group for group in collect_groups if group not in EXTERNAL_PYTHON_SANDBOX_COLLECT_ARGS
+        ]
+    return [item for group in collect_groups for item in group]
+
+
+def pyinstaller_exclude_args(*, external_python_sandbox: bool = False) -> list[str]:
+    """Return PyInstaller module exclusions for external-python sandbox builds."""
+    if not external_python_sandbox:
+        return []
+    args: list[str] = []
+    for module in sorted(EXTERNAL_PYTHON_SANDBOX_EXCLUDED_MODULES):
+        args.extend(["--exclude-module", module])
+    return args
+
 
 def detect_platform() -> tuple[str, str]:
     """Return the running Python process platform in Electron naming convention."""
@@ -174,32 +378,58 @@ def pyinstaller_target_arch_args(*, plat: str, arch: str) -> list[str]:
     return ["--target-arch", target_arch]
 
 
+def bundled_stable_runtime_components(
+    *,
+    plat: str,
+    arch: str,
+    external_python_sandbox: bool = False,
+) -> tuple[str, ...]:
+    """Return stable runtimes bundled into the artifact for this build."""
+    if external_python_sandbox:
+        return ()
+    if plat == "win32" and arch == "x64":
+        return ("portable_git", "python", "node")
+    return ()
+
+
 # ── Build ────────────────────────────────────────────────────
 
 
-def build_runtime(version: str, output_dir: Path, *, target: str | None = None) -> Path:
+def build_runtime(
+    version: str,
+    output_dir: Path,
+    *,
+    target: str | None = None,
+    external_python_sandbox: bool = False,
+) -> Path:
     """Build the runtime artifact and return the archive path."""
     plat, arch = parse_target(target)
     require_supported_build_process(plat, arch)
+    if plat == "darwin":
+        external_python_sandbox = True
     project_root = PROJECT_ROOT
 
     print(f"Building box-agent-runtime v{version} for {plat}-{arch}")
     print(f"Project root: {project_root}")
 
     # ── Step 0: Install runtime extras into current env ─────
-    print("\nInstalling runtime extras (data science packages)...")
+    if external_python_sandbox:
+        print("\nSkipping bundled Python sandbox extras (external python sandbox mode)...")
+    else:
+        print("\nInstalling runtime extras (data science packages)...")
     # Try uv first (used in dev), fall back to pip
     extras_cmd_pip = [sys.executable, "-m", "pip", "install", "--quiet", f"{project_root}[runtime]"]
     uv_bin = shutil.which("uv")
-    if uv_bin:
-        extras_cmd_uv = [uv_bin, "pip", "install", "--quiet", f"{project_root}[runtime]"]
-        result = subprocess.run(extras_cmd_uv, cwd=str(project_root), capture_output=True)
-    else:
-        result = subprocess.CompletedProcess(args=["uv"], returncode=1)
-    if result.returncode != 0:
-        result = subprocess.run(extras_cmd_pip, cwd=str(project_root))
-    if result.returncode != 0:
-        print("Warning: failed to install runtime extras", file=sys.stderr)
+    if not external_python_sandbox:
+        if uv_bin:
+            extras_cmd_uv = [uv_bin, "pip", "install", "--quiet", f"{project_root}[runtime]"]
+            result = subprocess.run(extras_cmd_uv, cwd=str(project_root), capture_output=True)
+        else:
+            result = subprocess.CompletedProcess(args=["uv"], returncode=1)
+        if result.returncode != 0:
+            result = subprocess.run(extras_cmd_pip, cwd=str(project_root))
+        if result.returncode != 0:
+            print("Warning: failed to install runtime extras", file=sys.stderr)
 
     # ── Step 1: PyInstaller ──────────────────────────────────
     dist_dir = output_dir / "pyinstaller_out"
@@ -217,93 +447,19 @@ def build_runtime(version: str, output_dir: Path, *, target: str | None = None) 
         if Path(src).exists():
             datas_args.extend(["--add-data", f"{src}{os.pathsep}{dst}"])
 
-    # Hidden imports that PyInstaller misses
-    hidden_imports = [
-        "box_agent",
-        "box_agent.acp",
-        "box_agent.acp.debug_logger",
-        "box_agent.agent",
-        "box_agent.cli",
-        "box_agent.config",
-        "box_agent.core",
-        "box_agent.events",
-        "box_agent.llm",
-        "box_agent.llm.anthropic_client",
-        "box_agent.llm.openai_client",
-        "box_agent.llm.llm_wrapper",
-        "box_agent.logger",
-        "box_agent.retry",
-        "box_agent.schema",
-        "box_agent.tools",
-        "box_agent.tools.bash_tool",
-        "box_agent.tools.file_tools",
-        "box_agent.tools.jupyter_tool",
-        "box_agent.tools.mcp_loader",
-        "box_agent.tools.skill_tool",
-        "box_agent.utils",
-        # Third-party
-        "tiktoken",
-        "tiktoken_ext",
-        "tiktoken_ext.openai_public",
-        "httpx",
-        "httpcore",
-        "anthropic",
-        "openai",
-        "pydantic",
-        "yaml",
-        "mcp",
-        "acp",
-        "jupyter_client",
-        "jupyter_client.provisioning",
-        "jupyter_client.provisioning.local_provisioner",
-        "ipykernel",
-        "ipykernel.inprocess",
-        "ipykernel.inprocess.manager",
-        "ipykernel_launcher",
-        "jupyter_core",
-        # debugpy (ipykernel dependency, has _vendored/pydevd subtree)
-        "debugpy",
-        "debugpy._vendored",
-        # Data science (runtime extras)
-        "pandas",
-        "numpy",
-        "matplotlib",
-        "matplotlib.backends",
-        "matplotlib.backends.backend_agg",
-        "seaborn",
-        "openpyxl",
-        "xlrd",
-        "sklearn",
-        "sklearn.cluster",
-        "sklearn.linear_model",
-        # Document processing (runtime extras)
-        "docx",  # python-docx imports as 'docx'
-        "pypdf",
-        "pdfplumber",
-        "reportlab",
-        "reportlab.pdfgen",
-        "reportlab.lib",
-        "pptx",  # python-pptx imports as 'pptx'
-        "sklearn.preprocessing",
-        # HTML / XML / image / config / encoding (sandbox defaults)
-        "bs4",  # beautifulsoup4 imports as 'bs4'
-        "lxml",
-        "lxml.etree",
-        "lxml.html",
-        "PIL",  # pillow imports as 'PIL'
-        "PIL.Image",
-        "dateutil",  # python-dateutil imports as 'dateutil'
-        "dateutil.parser",
-        "chardet",
-        # pip (used as library in frozen mode for runtime package installs)
-        "pip",
-        "pip._internal",
-        "pip._internal.cli",
-        "pip._internal.cli.main",
-    ]
+    hidden_imports = pyinstaller_hidden_imports(
+        external_python_sandbox=external_python_sandbox
+    )
     hidden_args = []
     for imp in hidden_imports:
         hidden_args.extend(["--hidden-import", imp])
+
+    collect_args = pyinstaller_collect_args(
+        external_python_sandbox=external_python_sandbox
+    )
+    exclude_args = pyinstaller_exclude_args(
+        external_python_sandbox=external_python_sandbox
+    )
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
@@ -315,18 +471,8 @@ def build_runtime(version: str, output_dir: Path, *, target: str | None = None) 
         "--specpath", str(output_dir),
         *datas_args,
         *hidden_args,
-        "--collect-all", "tiktoken",
-        "--collect-all", "tiktoken_ext",
-        "--collect-all", "jupyter_client",
-        "--collect-all", "ipykernel",
-        "--collect-all", "jupyter_core",
-        "--collect-all", "debugpy",
-        "--collect-all", "matplotlib",
-        "--collect-submodules", "pandas",
-        "--collect-submodules", "seaborn",
-        "--collect-submodules", "openpyxl",
-        "--collect-submodules", "sklearn",
-        "--collect-submodules", "pip",
+        *collect_args,
+        *exclude_args,
         *pyinstaller_target_arch_args(plat=plat, arch=arch),
         str(entry_point),
     ]
@@ -378,6 +524,11 @@ def build_runtime(version: str, output_dir: Path, *, target: str | None = None) 
     if plat == "win32":
         entry_path = "bin/box-agent-acp.exe"
 
+    bundled_components = bundled_stable_runtime_components(
+        plat=plat,
+        arch=arch,
+        external_python_sandbox=external_python_sandbox,
+    )
     manifest = {
         "name": "box-agent",
         "version": version,
@@ -385,15 +536,19 @@ def build_runtime(version: str, output_dir: Path, *, target: str | None = None) 
         "arch": arch,
         "entry": entry_path,
         "mode": "standalone",
+        "external_python_sandbox": external_python_sandbox,
+        "bundled_stable_runtimes": list(bundled_components),
     }
     (runtime_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
 
-    if plat == "darwin" and arch in {"arm64", "x64"}:
+    if bundled_components and plat == "darwin" and arch in {"arm64", "x64"}:
         _install_bundled_node_runtime(runtime_dir, plat=plat, arch=arch)
-    elif plat == "win32" and arch == "x64":
+    elif bundled_components and plat == "win32" and arch == "x64":
         _install_bundled_win_runtimes(runtime_dir)
+    elif external_python_sandbox:
+        print("\nSkipping bundled stable runtimes (host-managed Node/Python/Git mode).")
     else:
         print(f"\nSkipping bundled Node runtime for unsupported platform: {plat}-{arch}")
 
@@ -696,6 +851,16 @@ def main():
         default=None,
         help="Shortcut for --target <current-platform>-<arch>, e.g. --arch x64",
     )
+    parser.add_argument(
+        "--external-python-sandbox",
+        action="store_true",
+        default=env_flag("BOX_AGENT_EXTERNAL_PYTHON_SANDBOX"),
+        help=(
+            "Build ACP without bundled data-science/ipykernel/pip sandbox packages "
+            "or stable Node/Python/Git runtimes. Requires the host to provide "
+            "BOX_AGENT_SANDBOX_PYTHON and any stable tool runtimes it needs."
+        ),
+    )
     args = parser.parse_args()
 
     if args.target and args.arch:
@@ -718,7 +883,12 @@ def main():
         target = f"{plat}-{args.arch}"
 
     try:
-        archive = build_runtime(version, output_dir, target=target)
+        archive = build_runtime(
+            version,
+            output_dir,
+            target=target,
+            external_python_sandbox=args.external_python_sandbox,
+        )
     except (RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

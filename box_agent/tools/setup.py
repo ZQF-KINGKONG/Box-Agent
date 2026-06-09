@@ -47,6 +47,7 @@ Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 
 - **预装包**：pandas、numpy、matplotlib、seaborn、scikit-learn、openpyxl、xlrd、python-docx、pypdf、pdfplumber、reportlab、python-pptx、beautifulsoup4、lxml、pillow、requests、pyyaml、python-dateutil、chardet + 标准库——**不要重装**，会拖慢首次执行。
 - **装新包**：仅在确认缺失时，在 `execute_code` 内用 `%pip install <pkg>` / `!pip install <pkg>`（走当前 kernel 的 pip，落沙箱 venv）。**绝对禁止** `bash` 跑 `pip install`——会装到 host，沙箱仍 `ModuleNotFoundError`。
 - **用 execute_code**：数据分析、可视化、CSV/Excel/JSON/图片读写、Word/PDF/PPT 处理、多步计算、需保留状态的脚本。
+- **必须执行**：用户要求“用/使用/运行 Python”得到一个具体结果（如生成随机数、计算数值、处理数据/文件、运行脚本）时，必须调用 `execute_code` 返回真实执行结果；不要只给代码示例。只有用户明确问“怎么写/示例代码/解释代码”时才只返回代码。
 - **用 bash**：仓库代码编辑、测试/构建、系统命令、git——与沙箱无关。
 
 ### 文档处理优先级
@@ -263,8 +264,8 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     # Bash tool - needs workspace as cwd for command execution
+    runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
     if config.tools.enable_bash:
-        runtime_context = skill_runtime_context or build_skill_runtime_context(sandbox_mode=sandbox_mode)
         sandbox_venv_path = None
         if sandbox_mode and not getattr(sys, "frozen", False):
             sandbox_venv_path = str(SandboxEnvironment().venv_dir)
@@ -299,7 +300,10 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:
-        sandbox_tool = JupyterSandboxTool(workspace_dir=str(workspace_dir))
+        sandbox_tool = JupyterSandboxTool(
+            workspace_dir=str(workspace_dir),
+            runtime_env=runtime_context.env(),
+        )
         tools.append(sandbox_tool)
         # Also add sandbox status tool
         status_tool = SandboxStatusTool()

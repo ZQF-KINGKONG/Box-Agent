@@ -15,7 +15,7 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from .base import Tool, ToolResult
 
@@ -86,8 +86,13 @@ class SandboxEnvironment:
     packages are isolated from box-agent itself.
     """
 
-    def __init__(self, base_dir: Path | None = None):
+    def __init__(
+        self,
+        base_dir: Path | None = None,
+        runtime_env: Mapping[str, str] | None = None,
+    ):
         self.base_dir = base_dir or SANDBOX_BASE_DIR
+        self.runtime_env = dict(runtime_env or {})
         self.venv_dir = self.base_dir / "venv"
         # Windows venv lays out python under Scripts/, Unix under bin/.
         if sys.platform == "win32":
@@ -96,23 +101,22 @@ class SandboxEnvironment:
             self.python_path = self.venv_dir / "bin" / "python"
         self._ready = False
         self._bundled_override = False
+        self.python_override_path: Path | None = None
 
-        # Windows-only override: point at an already-prepared interpreter
-        # (e.g. the bundled python.exe in officev3/build-resources) so we
-        # skip venv creation and pip install entirely. Mirrors the
-        # BOX_AGENT_BUNDLED_BASH / BOX_AGENT_NODE_RUNTIME_ROOT pattern.
-        # Gated to win32 so a stray env var on macOS/Linux cannot bypass
-        # the normal sandbox venv initialization.
-        if sys.platform == "win32":
-            override = os.environ.get("BOX_AGENT_BUNDLED_PYTHON")
-            if override:
-                override_path = Path(override)
-                if override_path.exists():
-                    self.python_path = override_path
-                    self._bundled_override = True
-                    # Do NOT set _ready=True here — let ensure_ready() run
-                    # _verify_packages so we can fall back to RUNTIME_PACKAGES_DIR
-                    # when the bundled python is missing one of our defaults.
+        # Host/runtime override: point at an already-prepared interpreter
+        # supplied by the embedding app.  BOX_AGENT_SANDBOX_PYTHON is the
+        # cross-platform sandbox contract; BOX_AGENT_BUNDLED_PYTHON is retained
+        # for older Windows officev3 builds.  Do NOT use BOX_AGENT_PYTHON here:
+        # existing hosts may set it to a system Python for shell skills, and
+        # that must not silently replace the isolated execute_code runtime.
+        # Do NOT set _ready=True here — let ensure_ready() run _verify_packages
+        # so we can fall back to RUNTIME_PACKAGES_DIR when the external
+        # interpreter is missing one of our defaults.
+        override_path = self._resolve_python_override(self.runtime_env)
+        if override_path is not None:
+            self.python_path = override_path
+            self.python_override_path = override_path
+            self._bundled_override = True
 
     @property
     def is_created(self) -> bool:
@@ -131,19 +135,19 @@ class SandboxEnvironment:
         if self._ready:
             return
 
-        if IS_FROZEN:
+        if self._bundled_override:
+            # Host python already exists — skip venv/_install_defaults, but
+            # verify required packages and fall back to RUNTIME_PACKAGES_DIR for
+            # any that the interpreter is missing.
             if on_progress:
-                on_progress("Runtime mode: using bundled packages (no venv).")
+                on_progress("Host python: verifying required packages...")
+            await self._verify_packages(on_progress)
             self._ready = True
             return
 
-        if self._bundled_override:
-            # Bundled python.exe already exists — skip venv/_install_defaults,
-            # but verify required packages and fall back to RUNTIME_PACKAGES_DIR
-            # for any that the bundled interpreter is missing.
+        if IS_FROZEN:
             if on_progress:
-                on_progress("Bundled python: verifying required packages...")
-            await self._verify_packages(on_progress)
+                on_progress("Runtime mode: using bundled packages (no venv).")
             self._ready = True
             return
 
@@ -242,25 +246,35 @@ class SandboxEnvironment:
         "pandas": "pandas",
         "numpy": "numpy",
         "matplotlib": "matplotlib",
+        "seaborn": "seaborn",
+        "requests": "requests",
         "openpyxl": "openpyxl",
+        "xlrd": "xlrd",
         "sklearn": "scikit-learn",
+        "docx": "python-docx",
+        "pypdf": "pypdf",
+        "pdfplumber": "pdfplumber",
+        "reportlab": "reportlab",
+        "pptx": "python-pptx",
         "bs4": "beautifulsoup4",
         "lxml": "lxml",
         "PIL": "pillow",
         "yaml": "pyyaml",
         "dateutil": "python-dateutil",
         "chardet": "chardet",
+        "pip": "pip",
     }
 
     def _subprocess_env(self) -> dict[str, str] | None:
         """Build env for subprocess pip/import checks.
 
-        When a bundled python override is in use we prepend RUNTIME_PACKAGES_DIR
+        When a host python override is in use we prepend RUNTIME_PACKAGES_DIR
         to PYTHONPATH so fallback-installed packages are importable.
         """
         if not self._bundled_override:
             return None
         env = os.environ.copy()
+        env.update({key: value for key, value in self.runtime_env.items() if isinstance(value, str)})
         extra = str(RUNTIME_PACKAGES_DIR)
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = extra + (os.pathsep + existing if existing else "")
@@ -269,17 +283,10 @@ class SandboxEnvironment:
     async def _verify_packages(self, on_progress: Any = None) -> None:
         """Verify required packages are importable and auto-install missing ones."""
         env = self._subprocess_env()
-        missing = []
-        for module_name, pip_name in self._REQUIRED_MODULES.items():
-            proc = await asyncio.create_subprocess_exec(
-                str(self.python_path), "-c", f"import {module_name}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            await proc.communicate()
-            if proc.returncode != 0:
-                missing.append(pip_name)
+        missing = await self._missing_required_packages(env)
+        if "pip" in missing:
+            await self._ensure_pip_available(on_progress, env)
+            missing = [pkg for pkg in missing if pkg != "pip"]
 
         if not missing:
             return
@@ -303,11 +310,71 @@ class SandboxEnvironment:
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
+            if self._bundled_override:
+                raise RuntimeError(
+                    "Failed to install missing host python sandbox packages "
+                    f"({', '.join(missing)}): {stderr.decode(errors='replace')[:500]}"
+                )
             if on_progress:
                 on_progress(f"Warning: failed to install some packages: {', '.join(missing)}")
-        else:
-            if on_progress:
-                on_progress(f"Re-installed: {', '.join(missing)}")
+            return
+
+        if self._bundled_override:
+            still_missing = await self._missing_required_packages(env)
+            if still_missing:
+                raise RuntimeError(
+                    "Host python sandbox packages are still missing after install: "
+                    f"{', '.join(still_missing)}"
+                )
+        if on_progress:
+            on_progress(f"Re-installed: {', '.join(missing)}")
+
+    async def _missing_required_packages(self, env: dict[str, str] | None) -> list[str]:
+        missing = []
+        for module_name, pip_name in self._REQUIRED_MODULES.items():
+            proc = await asyncio.create_subprocess_exec(
+                str(self.python_path), "-c", f"import {module_name}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+            await proc.communicate()
+            if proc.returncode != 0:
+                missing.append(pip_name)
+        return missing
+
+    async def _ensure_pip_available(
+        self,
+        on_progress: Any,
+        env: dict[str, str] | None,
+    ) -> None:
+        if on_progress:
+            on_progress("Host python: bootstrapping pip...")
+        proc = await asyncio.create_subprocess_exec(
+            str(self.python_path), "-m", "ensurepip", "--upgrade",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "Failed to bootstrap pip for host python sandbox: "
+                f"{stderr.decode(errors='replace')[:500]}"
+            )
+
+        proc = await asyncio.create_subprocess_exec(
+            str(self.python_path), "-c", "import pip",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(
+                "pip is still unavailable after ensurepip: "
+                f"{stderr.decode(errors='replace')[:500]}"
+            )
 
     def get_kernel_spec(self) -> dict:
         """Get kernel spec that uses the sandbox venv Python."""
@@ -339,9 +406,11 @@ class SandboxEnvironment:
     async def install_packages(self, packages: list[str]) -> tuple[bool, str]:
         """Install additional packages into the sandbox environment.
 
-        In frozen mode, installs to ~/.box-agent/runtime-packages/ via pip
-        library (no subprocess Python needed).  Only whitelisted packages are
-        allowed; others are rejected with PACKAGE_NOT_ALLOWED.
+        In frozen mode without a host python, installs to
+        ~/.box-agent/runtime-packages/ via bundled pip.  When a host python is
+        available, installs through that interpreter and exposes the target via
+        PYTHONPATH.  Frozen-mode installs are whitelisted; others are rejected
+        with PACKAGE_NOT_ALLOWED.
 
         In normal mode, installs into the sandbox venv via subprocess pip.
 
@@ -351,6 +420,9 @@ class SandboxEnvironment:
         Returns:
             (success, message) tuple.
         """
+        if self._bundled_override:
+            return await self._runtime_python_install(packages, enforce_allowlist=IS_FROZEN)
+
         if IS_FROZEN:
             return await self._frozen_install(packages)
 
@@ -371,6 +443,45 @@ class SandboxEnvironment:
             return True, output
         return False, output
 
+    async def _runtime_python_install(
+        self,
+        packages: list[str],
+        *,
+        enforce_allowlist: bool,
+    ) -> tuple[bool, str]:
+        """Install packages through the configured host Python runtime."""
+        if enforce_allowlist:
+            blocked = self._blocked_runtime_packages(packages)
+            if blocked:
+                return False, self._package_not_allowed_message(blocked)
+
+        RUNTIME_PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
+        proc = await asyncio.create_subprocess_exec(
+            str(self.python_path),
+            "-m",
+            "pip",
+            "install",
+            "--target",
+            str(RUNTIME_PACKAGES_DIR),
+            "--quiet",
+            "--disable-pip-version-check",
+            "--no-warn-script-location",
+            *packages,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=self._subprocess_env(),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return False, f"pip install timed out (120s) for: {', '.join(packages)}"
+        output = stdout.decode() + stderr.decode()
+        if proc.returncode == 0:
+            return True, output or f"Installed {', '.join(packages)} to {RUNTIME_PACKAGES_DIR}"
+        return False, output
+
     async def _frozen_install(self, packages: list[str]) -> tuple[bool, str]:
         """Install packages in frozen mode to the runtime-packages directory.
 
@@ -378,14 +489,9 @@ class SandboxEnvironment:
         library (no subprocess Python needed) to install into
         ~/.box-agent/runtime-packages/.
         """
-        # Whitelist check
-        allowed_lower = {p.lower() for p in ALLOWED_RUNTIME_PACKAGES}
-        blocked = [p for p in packages if p.lower() not in allowed_lower]
+        blocked = self._blocked_runtime_packages(packages)
         if blocked:
-            return False, (
-                f"PACKAGE_NOT_ALLOWED: {', '.join(blocked)} not in allowed list. "
-                f"Allowed packages: {', '.join(sorted(ALLOWED_RUNTIME_PACKAGES))}"
-            )
+            return False, self._package_not_allowed_message(blocked)
 
         # Run synchronous pip in a thread to avoid blocking the event loop
         loop = asyncio.get_event_loop()
@@ -440,6 +546,34 @@ class SandboxEnvironment:
         if exit_code == 0:
             return True, f"Installed {', '.join(packages)} to {target}"
         return False, f"pip install failed (exit code {exit_code}) for: {', '.join(packages)}"
+
+    @staticmethod
+    def _blocked_runtime_packages(packages: list[str]) -> list[str]:
+        allowed_lower = {p.lower() for p in ALLOWED_RUNTIME_PACKAGES}
+        return [p for p in packages if p.lower() not in allowed_lower]
+
+    @staticmethod
+    def _package_not_allowed_message(blocked: list[str]) -> str:
+        return (
+            f"PACKAGE_NOT_ALLOWED: {', '.join(blocked)} not in allowed list. "
+            f"Allowed packages: {', '.join(sorted(ALLOWED_RUNTIME_PACKAGES))}"
+        )
+
+    @staticmethod
+    def _resolve_python_override(runtime_env: Mapping[str, str] | None = None) -> Path | None:
+        sources: list[Mapping[str, str]] = []
+        if runtime_env:
+            sources.append(runtime_env)
+        sources.append(os.environ)
+        for source in sources:
+            for env_name in ("BOX_AGENT_SANDBOX_PYTHON", "BOX_AGENT_BUNDLED_PYTHON"):
+                override = source.get(env_name)
+                if not override:
+                    continue
+                override_path = Path(override)
+                if override_path.is_file():
+                    return override_path
+        return None
 
 
 class JupyterKernelSession:
@@ -882,22 +1016,37 @@ class JupyterSandboxTool(Tool):
 
     _sessions: dict[str, "JupyterKernelSession | InProcessKernelSession"] = {}
     _sandbox_env: SandboxEnvironment | None = None
+    _sandbox_env_key: str | None = None
 
-    def __init__(self, workspace_dir: str | None = None):
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        runtime_env: Mapping[str, str] | None = None,
+    ):
         """Initialize sandbox tool.
 
         Args:
             workspace_dir: Base workspace directory for sandbox sessions.
+            runtime_env: Host runtime environment exported by env_context.
         """
         self.workspace_dir = workspace_dir
+        self.runtime_env = dict(runtime_env or {})
         self._session_id: Optional[str] = None
 
-    @classmethod
-    def _get_sandbox_env(cls) -> SandboxEnvironment:
+    def _get_sandbox_env(self) -> SandboxEnvironment:
         """Get or create the shared sandbox environment."""
-        if cls._sandbox_env is None:
-            cls._sandbox_env = SandboxEnvironment()
-        return cls._sandbox_env
+        key = self._sandbox_env_cache_key()
+        if self.__class__._sandbox_env is None or self.__class__._sandbox_env_key != key:
+            self.__class__._sandbox_env = SandboxEnvironment(runtime_env=self.runtime_env)
+            self.__class__._sandbox_env_key = key
+        return self.__class__._sandbox_env
+
+    def _sandbox_env_cache_key(self) -> str:
+        for env_name in ("BOX_AGENT_SANDBOX_PYTHON", "BOX_AGENT_BUNDLED_PYTHON"):
+            value = self.runtime_env.get(env_name) or os.environ.get(env_name)
+            if value:
+                return f"{env_name}={value}"
+        return ""
 
     def get_status(self) -> dict[str, Any]:
         """Get current sandbox status."""
@@ -925,11 +1074,10 @@ class JupyterSandboxTool(Tool):
         self, session_id: str, workspace: Path, env: SandboxEnvironment
     ) -> "JupyterKernelSession | InProcessKernelSession":
         """Create the appropriate kernel session for the current environment."""
-        # Windows compatibility: PyInstaller frozen Win exe's in-process
-        # ipykernel hangs (start_kernel never returns). When a bundled
-        # standalone python is available via BOX_AGENT_BUNDLED_PYTHON, route
-        # the kernel through a subprocess instead. macOS unaffected.
-        if sys.platform == "win32" and env._bundled_override:
+        # When the embedding app supplies a standalone Python, route the kernel
+        # through that subprocess on every platform. This keeps frozen ACP from
+        # relying on PyInstaller-bundled ipykernel/data packages.
+        if env._bundled_override:
             return JupyterKernelSession(session_id, workspace, env)
         if IS_FROZEN:
             return InProcessKernelSession(session_id, workspace)

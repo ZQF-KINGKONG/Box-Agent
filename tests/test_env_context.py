@@ -50,6 +50,8 @@ def test_from_meta_parses_runtimes() -> None:
                 },
                 "python": {
                     "path": "/opt/officev3/python",
+                    "shell_path": "/opt/officev3/shell-python",
+                    "sandbox_path": "/opt/officev3/sandbox-python",
                     "ready": True,
                     "provider": "officev3",
                 },
@@ -65,6 +67,8 @@ def test_from_meta_parses_runtimes() -> None:
     assert ctx.runtimes["node"].provider == "officev3"
     assert not hasattr(ctx.runtimes["node"], "unknown")
     assert ctx.runtimes["python"].path == "/opt/officev3/python"
+    assert ctx.runtimes["python"].shell_path == "/opt/officev3/shell-python"
+    assert ctx.runtimes["python"].sandbox_path == "/opt/officev3/sandbox-python"
 
 
 def test_from_meta_passthrough_unknown_keys() -> None:

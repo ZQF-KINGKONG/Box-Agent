@@ -92,6 +92,7 @@ from box_agent.events import (
     WebSearchEvent,
 )
 from box_agent.llm import LLMClient
+from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
 from box_agent.acp.action_hints import (
     build_action_hints_prompt,
     is_memory_scarce,
@@ -748,13 +749,23 @@ class BoxACPAgent:
 
         prompt_start = perf_counter()
         state.turn_active = True
+        meter_token = start_token_meter()
         try:
             stop_reason = await self._run_turn(state, session_id)
         finally:
             state.turn_active = False
+            turn_meter = get_token_meter()
+            reset_token_meter(meter_token)
+        turn_total_tokens = turn_meter.total_tokens if turn_meter else 0
         duration_ms = int((perf_counter() - prompt_start) * 1000)
 
-        log.info("session/done", session_id=session_id, stop_reason=stop_reason, duration_ms=duration_ms)
+        log.info(
+            "session/done",
+            session_id=session_id,
+            stop_reason=stop_reason,
+            duration_ms=duration_ms,
+            total_tokens=turn_total_tokens,
+        )
         # Map box-agent stop reasons to ACP-valid StopReason values.
         # ACP only accepts: "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"
         _ACP_STOP_REASON_MAP = {
@@ -765,7 +776,14 @@ class BoxACPAgent:
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
-        return PromptResponse(stopReason=acp_stop_reason)
+        # Per-turn token total (multi-step loop + summarization + in-turn
+        # memory extraction) for host-side telemetry. Best-effort: fire-and-
+        # forget memory extractions that finish after this point are not
+        # reflected. See box_agent.llm.token_meter.
+        return PromptResponse(
+            stopReason=acp_stop_reason,
+            field_meta={"usage": {"totalTokens": turn_total_tokens}},
+        )
 
     async def cancel(self, params: CancelNotification) -> None:
         state = self._sessions.get(params.sessionId)

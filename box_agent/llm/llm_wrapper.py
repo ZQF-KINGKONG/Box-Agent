@@ -13,6 +13,7 @@ from .anthropic_client import AnthropicClient
 from .base import LLMClientBase
 from .openai_client import OpenAIClient
 from .think_tag_splitter import split_inline_think, unwrap_think_tags
+from .token_meter import record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class LLMClient:
         response = await self._client.generate(
             messages, tools, thinking_enabled=thinking_enabled, session_id=session_id
         )
+        record_usage(response.usage)
         if response.content and "<think>" in response.content:
             cleaned, extracted = split_inline_think(response.content)
             if extracted:
@@ -160,4 +162,6 @@ class LLMClient:
             messages, tools, thinking_enabled=thinking_enabled, session_id=session_id
         )
         async for event in unwrap_think_tags(upstream):
+            if event.type == "finish":
+                record_usage(event.usage)
             yield event

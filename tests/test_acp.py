@@ -116,6 +116,29 @@ class DoneLLM:
         return LLMResponse(content="done", finish_reason="stop")
 
 
+class UsageLLM:
+    """Mimics the ``LLMClient`` choke point: records usage on each finish.
+
+    Used to verify the per-turn token meter flows into the prompt
+    response ``_meta.usage`` without depending on a live provider.
+    """
+
+    def __init__(self, per_call_total: int = 30):
+        self._per_call_total = per_call_total
+
+    async def generate_stream(self, messages, tools=None, **_):
+        from box_agent.llm.token_meter import record_usage
+        from box_agent.schema import TokenUsage
+
+        yield StreamEvent(type="text", delta="done")
+        usage = TokenUsage(total_tokens=self._per_call_total)
+        record_usage(usage)
+        yield StreamEvent(type="finish", finish_reason="stop", usage=usage)
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
 class LongAnswerLLM:
     async def generate_stream(self, messages, tools=None, **_):
         for chunk in ["李白是唐代诗人，" * 20, "他的诗歌想象瑰丽，" * 20, "后世称他为诗仙。"]:
@@ -676,3 +699,50 @@ async def test_acp_sub_agent_progress_has_stable_grouping_fields(tmp_path):
     assert all(item["title"] == "file probe" for item in progress)
     assert any(item["event"] == "tool_start" and item["tool_name"] == "echo" for item in progress)
     assert any(item["event"] == "llm_output" and item["content"] == "child summary" for item in progress)
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_response_reports_turn_token_total(tmp_path):
+    """The prompt response carries the per-turn token total in _meta.usage."""
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, UsageLLM(per_call_total=30), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "hello"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    assert response.field_meta == {"usage": {"totalTokens": 30}}
+
+
+@pytest.mark.asyncio
+async def test_acp_token_meter_resets_between_turns(tmp_path):
+    """Each turn reports only its own tokens, not a cumulative running sum."""
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, UsageLLM(per_call_total=25), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    first = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "one"}])
+    )
+    second = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "two"}])
+    )
+
+    assert first.field_meta == {"usage": {"totalTokens": 25}}
+    assert second.field_meta == {"usage": {"totalTokens": 25}}

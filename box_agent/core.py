@@ -52,6 +52,23 @@ from .events import (
 from .hooks import HookManager
 from .logger import AgentLogger
 from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
+from .loop_guards import (
+    EMPTY_ARGS_LIMIT,
+    TOOL_CALL_LIMITS,
+    WRAPUP_REMAINING,
+    CompletionGate,
+    completion_gate_gaps,
+    completion_gate_text,
+    format_injected_message,
+    near_limit_wrapup_text,
+    no_progress_wrapup_text,
+    tool_call_budget_message,
+    tool_call_budget_wrapup_text,
+)
+
+# Re-exported for backward compatibility: ``CompletionGate`` now lives in
+# ``loop_guards`` but callers historically import it from ``core``.
+__all__ = ["run_agent_loop", "CompletionGate"]
 
 _log = logging.getLogger(__name__)
 from .schema import FunctionCall, LLMResponse, Message, StreamEvent, ToolCall
@@ -60,27 +77,6 @@ from .tools.base import EventEmittingTool, Tool, ToolResult
 # Type alias — consumers supply a zero-arg callable that returns True
 # when the execution should be cancelled.
 CancelChecker = Callable[[], bool]
-
-_TOOL_CALL_LIMITS: Final[dict[str, int]] = {
-    "web_search": 12,
-}
-
-
-def _tool_call_budget_message(tool_name: str, limit: int) -> str:
-    return (
-        f"Tool call budget reached for {tool_name} ({limit} calls this turn). "
-        f"Do not call {tool_name} again; synthesize the final answer from the "
-        "evidence and tool results already collected. If anything is missing, "
-        "briefly mark it as a gap instead of searching again."
-    )
-
-
-def _tool_call_budget_wrapup_text(tool_name: str, limit: int) -> str:
-    return (
-        f"⚠️ 本轮 {tool_name} 调用已达到预算上限（{limit} 次）。"
-        f"现在请停止继续调用 {tool_name} 或继续联网搜索，"
-        "仅基于已经获得的资料直接给出完整最终答案；缺口简要标注即可。"
-    )
 
 # Regex to match file references like [foo.png] in tool output.
 _ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
@@ -1095,18 +1091,6 @@ def _cleanup_incomplete_messages(messages: list[Message]) -> int:
 # ── Main loop ───────────────────────────────────────────────────
 
 
-def _format_injected_message(text: str) -> str:
-    """Wrap mid-stream user input so it steers the active task."""
-    return (
-        "The user sent the following message while the current task was already running.\n"
-        "Treat it as mid-turn guidance, a constraint, or a clarification for the current task, "
-        "not as a new standalone task.\n"
-        "If it asks a question, answer it briefly if useful, then continue the original task. "
-        "Do not stop or switch tasks unless the user explicitly asks you to stop, cancel, or change the task.\n\n"
-        f"Mid-turn user message:\n{text}"
-    )
-
-
 async def run_agent_loop(
     *,
     llm,
@@ -1129,6 +1113,7 @@ async def run_agent_loop(
     session_id: str = "",
     no_progress_limit: int | None = None,
     max_parallel_tools: int = 8,
+    completion_gate: CompletionGate | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1276,14 +1261,12 @@ async def run_agent_loop(
     # and continuing burns max_steps without progress.
     empty_args_signature: tuple[str, ...] | None = None
     empty_args_repeats = 0
-    EMPTY_ARGS_LIMIT = 2
 
     # Near-limit wrap-up: when only WRAPUP_REMAINING steps are left, inject a
     # one-shot instruction telling the model to stop gathering more material
     # (tool calls / searches) and synthesize a final answer from what it
     # already has, instead of burning the last steps and exiting with a
     # "couldn't be completed" failure.
-    WRAPUP_REMAINING = 3
     wrapup_injected = False
 
     # No-progress circuit breaker (opt-in via ``no_progress_limit``). Counts
@@ -1294,6 +1277,14 @@ async def run_agent_loop(
     # curl scraping dozens of times. Disabled (None) for the top-level agent to
     # preserve existing behavior.
     no_progress_steps = 0
+
+    # Completion gate (opt-in via ``completion_gate``). ``succeeded_tools``
+    # accumulates tool names that produced ≥1 successful, non-empty result;
+    # ``gate_continuations`` bounds how many times the gate may force the
+    # loop to continue past a natural END_TURN. Both inert when the gate is
+    # disabled (None).
+    succeeded_tools: set[str] = set()
+    gate_continuations = 0
 
     # Per-turn guard for tools that can be repeatedly requested by the model
     # after it already has enough evidence. Once a budget is reached, later
@@ -1328,19 +1319,19 @@ async def run_agent_loop(
                 if not injected_text:
                     continue
                 messages.append(
-                    Message(role="user", content=_format_injected_message(injected_text))
+                    Message(role="user", content=format_injected_message(injected_text))
                 )
                 yield InjectedMessageEvent(content=injected_text, injection_id=injection_id)
 
-        for tool_name, limit in _TOOL_CALL_LIMITS.items():
+        for tool_name, limit in TOOL_CALL_LIMITS.items():
             if (
                 tool_call_counts.get(tool_name, 0) >= limit
                 and tool_name not in tool_budget_wrapup_injected
             ):
                 tool_budget_wrapup_injected.add(tool_name)
-                budget_text = _tool_call_budget_wrapup_text(tool_name, limit)
+                budget_text = tool_call_budget_wrapup_text(tool_name, limit)
                 messages.append(
-                    Message(role="user", content=_format_injected_message(budget_text))
+                    Message(role="user", content=format_injected_message(budget_text))
                 )
                 yield InjectedMessageEvent(content=budget_text, injection_id=None)
 
@@ -1370,16 +1361,9 @@ async def run_agent_loop(
             and step >= max_steps - WRAPUP_REMAINING
         ):
             wrapup_injected = True
-            remaining = max_steps - step
-            wrapup_text = (
-                f"⚠️ 步数预算即将用尽（已到第 {step + 1}/{max_steps} 步，约剩 {remaining} 步）。"
-                "现在请停止调用任何工具、停止继续搜索或探索。"
-                "仅基于你已经收集到的信息，在本轮直接给出完整、可独立阅读的最终答案/总结："
-                "包含关键结论、数据、以及已产出的文件路径；若有未覆盖的缺口，简要标注即可，"
-                "不要再去调查。"
-            )
+            wrapup_text = near_limit_wrapup_text(step, max_steps)
             messages.append(
-                Message(role="user", content=_format_injected_message(wrapup_text))
+                Message(role="user", content=format_injected_message(wrapup_text))
             )
             yield InjectedMessageEvent(content=wrapup_text, injection_id=None)
 
@@ -1394,16 +1378,9 @@ async def run_agent_loop(
             and no_progress_steps >= no_progress_limit
         ):
             wrapup_injected = True
-            stall_text = (
-                f"⚠️ 已连续 {no_progress_steps} 步没有取得有效进展"
-                "（工具调用持续失败或无有用输出）。"
-                "现在请立即停止调用任何工具、停止重试当前路径。"
-                "仅基于你已经收集到的信息，在本轮直接给出完整、可独立阅读的"
-                "最终答案/总结：包含关键结论、已知数据与已产出的文件路径；"
-                "对未能获取的信息，简要标注为缺口即可，不要再继续调查。"
-            )
+            stall_text = no_progress_wrapup_text(no_progress_steps)
             messages.append(
-                Message(role="user", content=_format_injected_message(stall_text))
+                Message(role="user", content=format_injected_message(stall_text))
             )
             yield InjectedMessageEvent(content=stall_text, injection_id=None)
 
@@ -1634,6 +1611,35 @@ async def run_agent_loop(
                 yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                 continue
 
+            # ── Completion gate (opt-in) ────────────────────
+            # Intercept this natural END_TURN: if a verifiable requirement is
+            # unmet and we're still within the continuation/time budget, inject
+            # a continuation nudge naming the gaps and keep looping instead of
+            # finishing. The bounded counter + optional deadline guarantee the
+            # gate releases rather than trapping the agent forever.
+            if (
+                completion_gate is not None
+                and gate_continuations < completion_gate.max_continuations
+                and (
+                    completion_gate.deadline_seconds is None
+                    or (perf_counter() - run_start) < completion_gate.deadline_seconds
+                )
+            ):
+                gaps = completion_gate_gaps(completion_gate, succeeded_tools, workspace_dir)
+                if gaps:
+                    gate_continuations += 1
+                    nudge = completion_gate_text(gaps)
+                    messages.append(
+                        Message(role="user", content=format_injected_message(nudge))
+                    )
+                    yield InjectedMessageEvent(content=nudge, injection_id=None)
+                    elapsed = perf_counter() - step_start
+                    total = perf_counter() - run_start
+                    if hook_mgr.hooks:
+                        await hook_mgr.fire_step_end(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                    yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
+                    continue
+
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -1704,11 +1710,11 @@ async def run_agent_loop(
         step_made_progress = False
 
         def _reserve_tool_budget(tool_name: str) -> tuple[bool, str | None]:
-            limit = _TOOL_CALL_LIMITS.get(tool_name)
+            limit = TOOL_CALL_LIMITS.get(tool_name)
             if limit is None:
                 return True, None
             if tool_call_counts.get(tool_name, 0) >= limit:
-                return False, _tool_call_budget_message(tool_name, limit)
+                return False, tool_call_budget_message(tool_name, limit)
             tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
             return True, None
 
@@ -1827,6 +1833,7 @@ async def run_agent_loop(
             # call with non-empty content counts as making progress.
             if result.success and (result.content or "").strip():
                 step_made_progress = True
+                succeeded_tools.add(fn_name)
 
             # Hook: tool result (interceptor — may modify content/error)
             tc_content = result.content
@@ -2074,6 +2081,7 @@ async def run_agent_loop(
                 # Progress signal for the no-progress breaker.
                 if result.success and (result.content or "").strip():
                     step_made_progress = True
+                    succeeded_tools.add(fn_name)
 
                 # Hook: tool result (interceptor)
                 par_content = result.content

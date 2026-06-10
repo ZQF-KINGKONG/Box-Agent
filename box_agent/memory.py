@@ -1147,6 +1147,7 @@ class MemoryManager:
         - ``core_status != "rejected"`` (rejection is permanent)
         - ``last_proposed`` either empty or older than ``cooldown_days``
         - ``source != "core"`` (never re-propose core-originated material)
+        - terse enough for always-injected core memory
         """
         if hit_threshold <= 0:
             return []
@@ -1162,6 +1163,8 @@ class MemoryManager:
             if e.core_status == "rejected":
                 continue
             if e.source == "core":
+                continue
+            if not _is_core_promotion_worthy(e):
                 continue
             if e.last_proposed:
                 try:
@@ -1529,6 +1532,22 @@ Output ONLY valid JSON (no markdown fences):
 }}"""
 
 
+_CORE_PROMOTION_MAX_CHARS = 360
+_CORE_PROMOTION_MAX_LINES = 2
+_CORE_PROMOTION_MAX_SUMMARY_SEPARATORS = 8
+
+_TASK_HISTORY_PHRASES: frozenset[str] = frozenset({
+    "工作项目包括",
+    "已做项目包括",
+    "近期关注",
+    "已完成",
+    "已交付",
+    "上线计划",
+    "报告类任务",
+    "checklist",
+})
+
+
 def _strip_json_fences(text: str) -> str:
     """Strip optional markdown fences around model JSON."""
     text = text.strip()
@@ -1537,6 +1556,48 @@ def _strip_json_fences(text: str) -> str:
     if text.endswith("```"):
         text = "\n".join(text.split("\n")[:-1])
     return text.strip()
+
+
+def _is_core_promotion_sized(content: str) -> bool:
+    """True when a context entry is terse enough to review as core memory."""
+    text = content.strip()
+    if not text:
+        return False
+    if len(text) > _CORE_PROMOTION_MAX_CHARS:
+        return False
+    non_empty_lines = [line for line in text.splitlines() if line.strip()]
+    if len(non_empty_lines) > _CORE_PROMOTION_MAX_LINES:
+        return False
+    return True
+
+
+def _looks_like_task_history_summary(content: str) -> bool:
+    """Detect dense task-history notes that should remain searchable context."""
+    text = content.strip().lower()
+    if not text:
+        return False
+
+    separator_count = sum(text.count(mark) for mark in ("；", ";", "，", ",", "、", "。"))
+    if len(text) > 180 and separator_count > _CORE_PROMOTION_MAX_SUMMARY_SEPARATORS:
+        return True
+
+    phrase_hits = sum(1 for phrase in _TASK_HISTORY_PHRASES if phrase in text)
+    return len(text) > 160 and phrase_hits >= 2
+
+
+def _is_core_promotion_worthy(entry: ContextEntry) -> bool:
+    """Return whether a hot context entry may be offered for core promotion.
+
+    ``hits`` answers "was this useful to retrieve?".  Core promotion also needs
+    a stronger shape check because core memory is injected into every session.
+    Long conversation/task summaries stay in searchable context and are handled
+    by context compaction, not direct user pinning.
+    """
+    if not _is_core_promotion_sized(entry.content):
+        return False
+    if _looks_like_task_history_summary(entry.content):
+        return False
+    return True
 
 
 _NOISE_TERMS: frozenset[str] = frozenset({

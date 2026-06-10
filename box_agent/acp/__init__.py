@@ -1179,6 +1179,19 @@ class BoxACPAgent:
                 grant_store=state.grant_store,
             )
 
+        if state.expert_context:
+            team_progress = state.expert_context.team_progress_payload()
+            if team_progress:
+                progress_id = f"expert-team-progress-{uuid4().hex[:8]}"
+                log.debug("expert_team/progress", session_id=session_id, progress=team_progress)
+                try:
+                    await self._send(
+                        session_id,
+                        update_tool_call(progress_id, raw_output=team_progress),
+                    )
+                except Exception as exc:
+                    log.exception("expert_team/progress_send_error", exc, session_id=session_id)
+
         async for event in run_agent_loop(
             llm=agent.llm,
             messages=agent.messages,

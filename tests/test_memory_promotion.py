@@ -54,6 +54,33 @@ def test_list_candidates_filters_by_hit_threshold(mgr: MemoryManager):
     assert contents == {"- meets threshold", "- exceeds threshold"}
 
 
+def test_list_candidates_excludes_long_task_summary(mgr: MemoryManager):
+    long_summary = (
+        "客户需求/产品架构相关记忆：工作项目包括桌面端外部消息接入网关方案评审，"
+        "目标是统一移动端、微信、飞书等外部消息源到本地 agent 的接入；重点议题为"
+        "外部消息规范化、会话映射与恢复、幂等并发、流式事件、结果/产物回传、权限边界、"
+        "生产级异步任务闭环、connector 失败恢复、多账号隔离；近期关注快捷截图能力产品化，"
+        "以及新用户引导、Quick Bar、定时任务、历史任务、记忆、数据源接入、数据分析能力对齐。"
+    )
+    write_context_file(mgr.context_file, [
+        _entry(long_summary, hits=12),
+        _entry("- 用户偏好先给结论再展开证据", hits=12),
+    ])
+
+    cands = mgr.list_promotion_candidates(hit_threshold=5, cooldown_days=14)
+    assert [c.content for c in cands] == ["- 用户偏好先给结论再展开证据"]
+
+
+def test_list_candidates_excludes_multiline_candidate(mgr: MemoryManager):
+    write_context_file(mgr.context_file, [
+        _entry("- line one\n- line two\n- line three", hits=9),
+        _entry("- use uv for dependency management", hits=9),
+    ])
+
+    cands = mgr.list_promotion_candidates(hit_threshold=5, cooldown_days=14)
+    assert [c.content for c in cands] == ["- use uv for dependency management"]
+
+
 def test_list_candidates_excludes_rejected(mgr: MemoryManager):
     write_context_file(mgr.context_file, [
         _entry("- good candidate", hits=10),

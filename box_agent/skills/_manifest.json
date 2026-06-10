@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "box_agent_version": "0.8.67",
-  "generated_at": "2026-06-08T09:52:28Z",
+  "box_agent_version": "0.8.68",
+  "generated_at": "2026-06-10T02:43:53Z",
   "skills": [
     {
       "name": "artifacts-builder",
@@ -54,6 +54,46 @@
     {
       "name": "skill-creator",
       "path": "skill-creator/SKILL.md"
+    },
+    {
+      "name": "dev-branch-isolation",
+      "path": "superpowers/dev-branch-isolation/SKILL.md"
+    },
+    {
+      "name": "dev-code-review",
+      "path": "superpowers/dev-code-review/SKILL.md"
+    },
+    {
+      "name": "dev-debug",
+      "path": "superpowers/dev-debug/SKILL.md"
+    },
+    {
+      "name": "dev-execute-plan",
+      "path": "superpowers/dev-execute-plan/SKILL.md"
+    },
+    {
+      "name": "dev-finish",
+      "path": "superpowers/dev-finish/SKILL.md"
+    },
+    {
+      "name": "dev-plan",
+      "path": "superpowers/dev-plan/SKILL.md"
+    },
+    {
+      "name": "dev-review-response",
+      "path": "superpowers/dev-review-response/SKILL.md"
+    },
+    {
+      "name": "dev-spec",
+      "path": "superpowers/dev-spec/SKILL.md"
+    },
+    {
+      "name": "dev-tdd",
+      "path": "superpowers/dev-tdd/SKILL.md"
+    },
+    {
+      "name": "dev-verify",
+      "path": "superpowers/dev-verify/SKILL.md"
     },
     {
       "name": "theme-factory",

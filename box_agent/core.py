@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Callable, Final
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import tiktoken
 
@@ -55,6 +56,9 @@ from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from .loop_guards import (
     EMPTY_ARGS_LIMIT,
     TOOL_CALL_LIMITS,
+    WEB_SEARCH_BATCH_SIZE,
+    WEB_SEARCH_TOOL_NAME,
+    WEB_SEARCH_TOTAL_LIMIT,
     WRAPUP_REMAINING,
     CompletionGate,
     completion_gate_gaps,
@@ -830,6 +834,98 @@ def _first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
     return None
 
 
+_WEB_SEARCH_RESULT_KEYS: Final[tuple[str, ...]] = (
+    "refs",
+    "results",
+    "Results",
+    "web_results",
+    "items",
+    "value",
+    "organic_results",
+    "data",
+)
+
+_URL_TRACKING_PARAMS: Final[set[str]] = {
+    "fbclid",
+    "gclid",
+    "mc_cid",
+    "mc_eid",
+}
+
+
+def _normalize_web_search_query(arguments: dict[str, Any]) -> str:
+    query = _first_present(
+        arguments,
+        (
+            "query",
+            "Query",
+            "q",
+            "search_query",
+            "searchQuery",
+            "search_terms",
+            "keywords",
+        ),
+    )
+    if query is None:
+        return ""
+    return " ".join(str(query).casefold().split())
+
+
+def _normalize_search_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text.casefold()
+
+    scheme = parts.scheme.casefold()
+    netloc = parts.netloc.casefold()
+    path = parts.path.rstrip("/") or parts.path
+    query_items = []
+    for key, val in parse_qsl(parts.query, keep_blank_values=True):
+        key_l = key.casefold()
+        if key_l.startswith("utm_") or key_l in _URL_TRACKING_PARAMS:
+            continue
+        query_items.append((key, val))
+    query = urlencode(query_items, doseq=True)
+    return urlunsplit((scheme, netloc, path, query, ""))
+
+
+def _normalize_search_title(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
+def _web_search_result_key(item: dict[str, Any]) -> str:
+    url = _first_present(item, ("url", "Url", "href", "link", "Link"))
+    normalized_url = _normalize_search_url(url)
+    if normalized_url:
+        return f"url:{normalized_url}"
+
+    title = _normalize_search_title(_first_present(item, ("title", "Title", "name", "Name")))
+    if not title:
+        return ""
+    domain = str(_first_present(item, ("domain", "Domain", "source", "Source", "site", "Site")) or "").casefold()
+    return f"title:{domain}:{title}"
+
+
+def _with_filtered_search_items(payload: Any, filtered_items: list[dict[str, Any]]) -> Any:
+    if isinstance(payload, list):
+        return filtered_items
+    if not isinstance(payload, dict):
+        return payload
+
+    for key in _WEB_SEARCH_RESULT_KEYS:
+        value = payload.get(key)
+        if isinstance(value, list) and any(isinstance(item, dict) for item in value):
+            updated = dict(payload)
+            updated[key] = filtered_items
+            return updated
+
+    return payload
+
+
 def _candidate_search_items(payload: Any) -> list[dict[str, Any]]:
     """Extract likely search-result rows from common web_search payload shapes."""
     if isinstance(payload, list):
@@ -838,17 +934,7 @@ def _candidate_search_items(payload: Any) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
 
-    preferred_keys = (
-        "refs",
-        "results",
-        "Results",
-        "web_results",
-        "items",
-        "value",
-        "organic_results",
-        "data",
-    )
-    for key in preferred_keys:
+    for key in _WEB_SEARCH_RESULT_KEYS:
         value = payload.get(key)
         if isinstance(value, list):
             items = [item for item in value if isinstance(item, dict)]
@@ -866,6 +952,59 @@ def _candidate_search_items(payload: Any) -> list[dict[str, Any]]:
                 return items
 
     return []
+
+
+def _dedupe_web_search_content(
+    content: str,
+    seen_result_keys: set[str],
+) -> tuple[str, int, int, list[str], bool]:
+    """Filter duplicate web_search rows for this turn.
+
+    Returns ``(content, new_count, duplicate_count, new_labels, inspected)``.
+    ``inspected`` is true only when structured search rows were found; plain
+    text results should not count as "no new evidence" just because they
+    cannot be deduped structurally.
+    """
+    if not content:
+        return content, 0, 0, [], False
+
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return content, 0, 0, [], False
+
+    items = _candidate_search_items(payload)
+    if not items:
+        return content, 0, 0, [], False
+
+    filtered_items: list[dict[str, Any]] = []
+    new_labels: list[str] = []
+    duplicate_count = 0
+    for item in items:
+        key = _web_search_result_key(item)
+        if key and key in seen_result_keys:
+            duplicate_count += 1
+            continue
+        if key:
+            seen_result_keys.add(key)
+        filtered_items.append(item)
+        label = _first_present(item, ("title", "Title", "name", "Name")) or _first_present(
+            item, ("url", "Url", "href", "link", "Link")
+        )
+        if label:
+            new_labels.append(_short_tool_text(label, 100))
+
+    if duplicate_count == 0:
+        return content, len(filtered_items), 0, new_labels, True
+
+    updated_payload = _with_filtered_search_items(payload, filtered_items)
+    if isinstance(updated_payload, dict):
+        updated_payload = {
+            **updated_payload,
+            "DedupedDuplicateCount": duplicate_count,
+            "DedupedNewCount": len(filtered_items),
+        }
+    return json.dumps(updated_payload, ensure_ascii=False), len(filtered_items), duplicate_count, new_labels, True
 
 
 def _compact_web_search_result_for_model(content: str) -> str | None:
@@ -1292,6 +1431,11 @@ async def run_agent_loop(
     # valid while nudging the model to synthesize.
     tool_call_counts: dict[str, int] = {}
     tool_budget_wrapup_injected: set[str] = set()
+    web_search_seen_queries: set[str] = set()
+    web_search_seen_result_keys: set[str] = set()
+    web_search_unique_results = 0
+    web_search_duplicate_results = 0
+    web_search_no_new_batches = 0
 
     for step in range(max_steps):
         # ── Cancellation check (top of step) ────────────────
@@ -1303,6 +1447,14 @@ async def run_agent_loop(
             return
 
         step_start = perf_counter()
+        web_search_step_seen = False
+        web_search_step_executed = 0
+        web_search_step_deferred = 0
+        web_search_step_duplicate_queries = 0
+        web_search_step_new_results = 0
+        web_search_step_duplicate_results = 0
+        web_search_step_structured_results = 0
+        web_search_step_labels: list[str] = []
 
         # ── Drain inject queue (in-stream injection) ───────
         if inject_queue:
@@ -1333,7 +1485,7 @@ async def run_agent_loop(
                 messages.append(
                     Message(role="user", content=format_injected_message(budget_text))
                 )
-                yield InjectedMessageEvent(content=budget_text, injection_id=None)
+                yield InjectedMessageEvent(content=budget_text, injection_id=None, user_visible=False)
 
         # ── Micro-compact (Layer 1) ────────────────────────
         # Cheap: replace old tool results with placeholders
@@ -1365,7 +1517,7 @@ async def run_agent_loop(
             messages.append(
                 Message(role="user", content=format_injected_message(wrapup_text))
             )
-            yield InjectedMessageEvent(content=wrapup_text, injection_id=None)
+            yield InjectedMessageEvent(content=wrapup_text, injection_id=None, user_visible=False)
 
         # ── No-progress circuit breaker (one-shot) ──────────
         # The agent has gone no_progress_limit consecutive steps without a
@@ -1382,7 +1534,7 @@ async def run_agent_loop(
             messages.append(
                 Message(role="user", content=format_injected_message(stall_text))
             )
-            yield InjectedMessageEvent(content=stall_text, injection_id=None)
+            yield InjectedMessageEvent(content=stall_text, injection_id=None, user_visible=False)
 
         # ── Step start ──────────────────────────────────────
         yield StepStart(step=step + 1, max_steps=max_steps)
@@ -1399,10 +1551,9 @@ async def run_agent_loop(
         )
         try:
             # Stream thinking deltas immediately. For visible text, keep a
-            # small leading buffer so short pre-tool-call prose can be
-            # reclassified as progress after the finish event, while ordinary
-            # long answers still feel live instead of waiting for the full LLM
-            # response to complete.
+            # small leading buffer so ordinary short answers do not wait for
+            # the full LLM response to complete, while tool-preface text still
+            # reaches the UI as the model's own chat content.
             visible_text_stream_threshold = 240
             text_content = ""
             thinking_content = ""
@@ -1457,12 +1608,8 @@ async def run_agent_loop(
                 usage=finish_event.usage,
                 truncated_tool_calls=finish_event.truncated_tool_calls,
             )
-            if response.content:
-                if response.tool_calls:
-                    if not text_stream_started:
-                        yield ProgressEvent(step=step + 1, content=response.content)
-                elif not text_stream_started:
-                    yield ContentEvent(content=response.content)
+            if response.content and not text_stream_started:
+                yield ContentEvent(content=response.content)
             provider_request_id = finish_event.provider_request_id
             yield LLMOutputEvent(
                 step=step + 1,
@@ -1632,7 +1779,7 @@ async def run_agent_loop(
                     messages.append(
                         Message(role="user", content=format_injected_message(nudge))
                     )
-                    yield InjectedMessageEvent(content=nudge, injection_id=None)
+                    yield InjectedMessageEvent(content=nudge, injection_id=None, user_visible=False)
                     elapsed = perf_counter() - step_start
                     total = perf_counter() - run_start
                     if hook_mgr.hooks:
@@ -1718,28 +1865,69 @@ async def run_agent_loop(
             tool_call_counts[tool_name] = tool_call_counts.get(tool_name, 0) + 1
             return True, None
 
+        def _reserve_web_search_call(arguments: dict[str, Any]) -> tuple[bool, str | None]:
+            nonlocal web_search_step_seen
+            nonlocal web_search_step_executed
+            nonlocal web_search_step_deferred
+            nonlocal web_search_step_duplicate_queries
+
+            web_search_step_seen = True
+            query_key = _normalize_web_search_query(arguments)
+            if query_key and query_key in web_search_seen_queries:
+                web_search_step_duplicate_queries += 1
+                return (
+                    False,
+                    "Duplicate web_search query skipped by runtime batching. "
+                    "Use the evidence already returned for this query and search only remaining gaps.",
+                )
+            if web_search_step_executed >= WEB_SEARCH_BATCH_SIZE:
+                web_search_step_deferred += 1
+                return (
+                    False,
+                    f"web_search deferred by runtime batching (batch size {WEB_SEARCH_BATCH_SIZE}). "
+                    "Review the current batch results and re-issue only still-missing, non-duplicate queries.",
+                )
+
+            allowed_by_budget, budget_error = _reserve_tool_budget(WEB_SEARCH_TOOL_NAME)
+            if not allowed_by_budget:
+                return False, budget_error
+            if query_key:
+                web_search_seen_queries.add(query_key)
+            web_search_step_executed += 1
+            return True, None
+
         # 1. Sequential execution for regular tools (preserves ordering)
         for tc in regular_calls:
             tc_id = tc.id
             fn_name = tc.function.name
             fn_args = tc.function.arguments
 
-            yield ToolCallStart(tool_call_id=tc_id, tool_name=fn_name, arguments=fn_args)
+            if fn_name == WEB_SEARCH_TOOL_NAME:
+                allowed_to_execute, internal_skip_error = _reserve_web_search_call(fn_args)
+            else:
+                allowed_to_execute, internal_skip_error = _reserve_tool_budget(fn_name)
+            tool_user_visible = allowed_to_execute
+
+            yield ToolCallStart(
+                tool_call_id=tc_id,
+                tool_name=fn_name,
+                arguments=fn_args,
+                user_visible=tool_user_visible,
+            )
 
             # Hook: tool start (interceptor — may modify arguments)
-            if hook_mgr.hooks:
+            if hook_mgr.hooks and tool_user_visible:
                 fn_args = await hook_mgr.fire_tool_start(
                     tool_call_id=tc_id, tool_name=fn_name, arguments=fn_args,
                 )
 
             # Snapshot workspace before tool execution for diff-based artifact detection
             pre_files: set[Path] = set()
-            if workspace_dir:
+            if tool_user_visible and workspace_dir:
                 pre_files = _snapshot_workspace(workspace_dir)
 
-            allowed_by_budget, budget_error = _reserve_tool_budget(fn_name)
-            if not allowed_by_budget:
-                result = ToolResult(success=False, content="", error=budget_error or "")
+            if not allowed_to_execute:
+                result = ToolResult(success=False, content="", error=internal_skip_error or "")
             elif fn_name not in tools:
                 result = ToolResult(success=False, content="", error=f"Unknown tool: {fn_name}")
             else:
@@ -1838,11 +2026,27 @@ async def run_agent_loop(
             # Hook: tool result (interceptor — may modify content/error)
             tc_content = result.content
             tc_error = result.error
-            if hook_mgr.hooks:
+            if hook_mgr.hooks and tool_user_visible:
                 tc_content, tc_error = await hook_mgr.fire_tool_result(
                     tool_call_id=tc_id, tool_name=fn_name,
                     success=result.success, content=tc_content, error=tc_error,
                 )
+
+            if result.success and fn_name == WEB_SEARCH_TOOL_NAME:
+                (
+                    tc_content,
+                    new_count,
+                    duplicate_count,
+                    new_labels,
+                    inspected,
+                ) = _dedupe_web_search_content(tc_content, web_search_seen_result_keys)
+                web_search_step_new_results += new_count
+                web_search_step_duplicate_results += duplicate_count
+                web_search_unique_results += new_count
+                web_search_duplicate_results += duplicate_count
+                if inspected:
+                    web_search_step_structured_results += 1
+                web_search_step_labels.extend(new_labels[:3])
 
             # Append the tool message BEFORE yielding any events. The yields
             # below hand control back to the consumer, which may suspend or
@@ -1872,8 +2076,9 @@ async def run_agent_loop(
                 content=tc_content,
                 error=tc_error,
                 raw_output=result.raw_output,
+                user_visible=tool_user_visible,
             )
-            if result.success:
+            if result.success and tool_user_visible:
                 web_search_payload = _extract_web_search_payload(fn_name, tc_content)
                 if web_search_payload is not None:
                     yield WebSearchEvent(tool_call_id=tc_id, payload=web_search_payload)
@@ -1909,21 +2114,27 @@ async def run_agent_loop(
             # Emit all ToolCallStart events and apply hook interceptors
             par_args_map: dict[str, dict[str, Any]] = {}  # tc.id → (possibly modified) args
             par_budget_errors: dict[str, str] = {}
+            par_user_visible: dict[str, bool] = {}
             for tc in parallel_calls:
+                par_fn_args = tc.function.arguments
+                if tc.function.name == WEB_SEARCH_TOOL_NAME:
+                    allowed_to_execute, internal_skip_error = _reserve_web_search_call(par_fn_args)
+                else:
+                    allowed_to_execute, internal_skip_error = _reserve_tool_budget(tc.function.name)
+                par_user_visible[tc.id] = allowed_to_execute
                 yield ToolCallStart(
                     tool_call_id=tc.id,
                     tool_name=tc.function.name,
-                    arguments=tc.function.arguments,
+                    arguments=par_fn_args,
+                    user_visible=allowed_to_execute,
                 )
-                par_fn_args = tc.function.arguments
-                if hook_mgr.hooks:
+                if hook_mgr.hooks and allowed_to_execute:
                     par_fn_args = await hook_mgr.fire_tool_start(
                         tool_call_id=tc.id, tool_name=tc.function.name, arguments=par_fn_args,
                     )
                 par_args_map[tc.id] = par_fn_args
-                allowed_by_budget, budget_error = _reserve_tool_budget(tc.function.name)
-                if not allowed_by_budget:
-                    par_budget_errors[tc.id] = budget_error or ""
+                if not allowed_to_execute:
+                    par_budget_errors[tc.id] = internal_skip_error or ""
 
             # Wire a shared event queue onto EventEmittingTool instances
             par_event_queue: asyncio.Queue[SubAgentEvent] = asyncio.Queue()
@@ -2043,6 +2254,7 @@ async def run_agent_loop(
                 tc_id = tc.id
                 fn_name = tc.function.name
                 fn_args = par_args_map[tc_id]
+                tool_user_visible = par_user_visible.get(tc_id, True)
 
                 if logger:
                     logger.log_tool_result(
@@ -2086,11 +2298,27 @@ async def run_agent_loop(
                 # Hook: tool result (interceptor)
                 par_content = result.content
                 par_error = result.error
-                if hook_mgr.hooks:
+                if hook_mgr.hooks and tool_user_visible:
                     par_content, par_error = await hook_mgr.fire_tool_result(
                         tool_call_id=tc_id, tool_name=fn_name,
                         success=result.success, content=par_content, error=par_error,
                     )
+
+                if result.success and fn_name == WEB_SEARCH_TOOL_NAME:
+                    (
+                        par_content,
+                        new_count,
+                        duplicate_count,
+                        new_labels,
+                        inspected,
+                    ) = _dedupe_web_search_content(par_content, web_search_seen_result_keys)
+                    web_search_step_new_results += new_count
+                    web_search_step_duplicate_results += duplicate_count
+                    web_search_unique_results += new_count
+                    web_search_duplicate_results += duplicate_count
+                    if inspected:
+                        web_search_step_structured_results += 1
+                    web_search_step_labels.extend(new_labels[:3])
 
                 # Append the tool message BEFORE yielding any events — see
                 # the equivalent comment in the sequential branch above for
@@ -2117,8 +2345,9 @@ async def run_agent_loop(
                     content=par_content,
                     error=par_error,
                     raw_output=result.raw_output,
+                    user_visible=tool_user_visible,
                 )
-                if result.success:
+                if result.success and tool_user_visible:
                     web_search_payload = _extract_web_search_payload(fn_name, par_content)
                     if web_search_payload is not None:
                         yield WebSearchEvent(tool_call_id=tc_id, payload=web_search_payload)
@@ -2138,6 +2367,55 @@ async def run_agent_loop(
                     await hook_mgr.fire_done(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 yield DoneEvent(stop_reason=StopReason.CANCELLED, final_content="Task cancelled by user.")
                 return
+
+        if web_search_step_seen:
+            if web_search_step_executed > 0 and web_search_step_structured_results > 0:
+                if web_search_step_new_results == 0:
+                    web_search_no_new_batches += 1
+                else:
+                    web_search_no_new_batches = 0
+
+            total_web_search_calls = tool_call_counts.get(WEB_SEARCH_TOOL_NAME, 0)
+            guidance_lines = [
+                "Search batch controller update (internal; do not mention this controller to the user):",
+                (
+                    f"- Executed this batch: {web_search_step_executed}; "
+                    f"total executed this turn: {total_web_search_calls}/{WEB_SEARCH_TOTAL_LIMIT}; "
+                    f"batch size: {WEB_SEARCH_BATCH_SIZE}."
+                ),
+            ]
+            if web_search_step_deferred:
+                guidance_lines.append(f"- Deferred this batch: {web_search_step_deferred}.")
+            if web_search_step_duplicate_queries:
+                guidance_lines.append(f"- Duplicate queries skipped this batch: {web_search_step_duplicate_queries}.")
+            if web_search_step_structured_results:
+                guidance_lines.append(
+                    f"- New structured results this batch: {web_search_step_new_results}; "
+                    f"duplicate structured results this batch: {web_search_step_duplicate_results}; "
+                    f"unique structured results this turn: {web_search_unique_results}; "
+                    f"duplicates filtered this turn: {web_search_duplicate_results}."
+                )
+            if web_search_step_labels:
+                examples = "; ".join(web_search_step_labels[:5])
+                guidance_lines.append(f"- New result examples: {examples}.")
+            if total_web_search_calls >= WEB_SEARCH_TOTAL_LIMIT:
+                guidance_lines.append(
+                    "- The web_search total limit has been reached. Do not call web_search again; "
+                    "synthesize the final answer from gathered evidence and briefly mark gaps."
+                )
+            elif web_search_no_new_batches >= 2:
+                guidance_lines.append(
+                    "- Two consecutive structured search batches added no new results. Stop searching unless "
+                    "a critical first-party source is still missing."
+                )
+            else:
+                guidance_lines.append(
+                    f"- Before searching again, inspect the deduped evidence. If gaps remain, issue at most "
+                    f"{WEB_SEARCH_BATCH_SIZE} new, specific, non-duplicate web_search queries."
+                )
+            guidance_text = "\n".join(guidance_lines)
+            messages.append(Message(role="user", content=format_injected_message(guidance_text)))
+            yield InjectedMessageEvent(content=guidance_text, injection_id=None, user_visible=False)
 
         # ── Step end ────────────────────────────────────────
         # Update the no-progress counter (only steps that ran tools reach

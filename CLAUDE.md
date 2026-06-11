@@ -2,6 +2,14 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Response Language
+
+默认使用中文回复。
+
+## Implementation Principles
+
+实现功能时必须同时考虑 macOS、Windows、Linux 三端，以及 CLI 与 ACP runtime 两种入口。核心功能应在共享核心逻辑中实现，CLI 和 ACP runtime 只作为包装层接入，不应各自维护分叉实现。
+
 ## Project Overview
 
 Box-Agent is a minimal yet professional AI agent framework supporting multiple LLM providers (Anthropic, OpenAI-compatible, DeepSeek, SiliconFlow, and any third-party API). It features interleaved thinking, tool calling, MCP support, and a Claude Skills system.

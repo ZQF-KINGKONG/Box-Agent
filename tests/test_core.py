@@ -114,6 +114,42 @@ class CountingWebSearchTool(Tool):
         return ToolResult(success=True, content=f"result:{query}")
 
 
+class JsonWebSearchTool(Tool):
+    def __init__(self, urls_by_query: dict[str, str]):
+        self.calls: list[str] = []
+        self.urls_by_query = urls_by_query
+
+    @property
+    def name(self):
+        return "web_search"
+
+    @property
+    def description(self):
+        return "Searches the web"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    async def execute(self, query: str = ""):
+        self.calls.append(query)
+        url = self.urls_by_query.get(query, f"https://example.com/{query}")
+        return ToolResult(
+            success=True,
+            content=json.dumps(
+                {
+                    "refs": [
+                        {
+                            "title": f"Result for {query}",
+                            "url": url,
+                            "snippet": f"Snippet for {query}",
+                        }
+                    ]
+                }
+            ),
+        )
+
+
 class RawOutputTool(Tool):
     @property
     def name(self):
@@ -259,11 +295,9 @@ async def test_tool_call_cycle():
     assert results[0].success is True
     assert "echo:ping" in results[0].content
     visible_text = "".join(e.content for e in events if isinstance(e, ContentEvent))
-    assert "calling tool" not in visible_text
-    assert visible_text == "done"
+    assert visible_text == "calling tooldone"
     progress = [e for e in events if isinstance(e, ProgressEvent)]
-    assert len(progress) == 1
-    assert progress[0].content == "calling tool"
+    assert progress == []
 
 
 @pytest.mark.asyncio
@@ -675,7 +709,7 @@ async def test_web_search_budget_synthesizes_result_and_allows_final_answer():
             finish_reason="tool",
         )
 
-    responses = [web_call(i) for i in range(13)]
+    responses = [web_call(i) for i in range(25)]
     responses.append(LLMResponse(content="final from gathered evidence", finish_reason="stop"))
     web_search = CountingWebSearchTool()
 
@@ -684,21 +718,127 @@ async def test_web_search_budget_synthesizes_result_and_allows_final_answer():
             llm=MockLLM(responses),
             messages=_msgs(),
             tools={"web_search": web_search},
-            max_steps=20,
+            max_steps=30,
         )
     )
 
-    assert web_search.calls == 12
+    assert web_search.calls == 24
+    tool_starts = [e for e in events if isinstance(e, ToolCallStart)]
+    assert len([e for e in tool_starts if e.tool_name == "web_search" and e.user_visible]) == 24
+    assert len([e for e in tool_starts if e.tool_name == "web_search" and not e.user_visible]) == 1
     tool_results = [e for e in events if isinstance(e, ToolCallResult)]
     assert any(
-        not e.success and e.tool_name == "web_search" and "budget reached" in (e.error or "")
+        not e.success and not e.user_visible and e.tool_name == "web_search" and "budget reached" in (e.error or "")
         for e in tool_results
     )
     injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
-    assert any("web_search 调用已达到预算上限" in e.content for e in injected)
+    assert any("web_search 调用已达到预算上限" in e.content and not e.user_visible for e in injected)
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert len(done) == 1
     assert done[0].stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+async def test_web_search_fanout_is_batched_with_hidden_deferrals():
+    tool_calls = [
+        ToolCall(
+            id=f"web-{i}",
+            type="function",
+            function=FunctionCall(name="web_search", arguments={"query": f"q{i}"}),
+        )
+        for i in range(8)
+    ]
+    llm = MockLLM(
+        [
+            LLMResponse(content="", tool_calls=tool_calls, finish_reason="tool"),
+            LLMResponse(content="final", finish_reason="stop"),
+        ]
+    )
+    web_search = CountingWebSearchTool()
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"web_search": web_search},
+            max_steps=5,
+        )
+    )
+
+    assert web_search.calls == 6
+    starts = [e for e in events if isinstance(e, ToolCallStart) and e.tool_name == "web_search"]
+    assert len([e for e in starts if e.user_visible]) == 6
+    assert len([e for e in starts if not e.user_visible]) == 2
+    hidden_errors = [
+        e
+        for e in events
+        if isinstance(e, ToolCallResult)
+        and e.tool_name == "web_search"
+        and not e.user_visible
+        and not e.success
+    ]
+    assert len(hidden_errors) == 2
+    assert all("deferred by runtime batching" in (e.error or "") for e in hidden_errors)
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent) and not e.user_visible]
+    assert any("Deferred this batch: 2" in e.content for e in injected)
+
+
+@pytest.mark.asyncio
+async def test_web_search_skips_duplicate_queries_and_dedupes_result_urls():
+    tool_calls = [
+        ToolCall(
+            id="web-a",
+            type="function",
+            function=FunctionCall(name="web_search", arguments={"query": "OpenAI release"}),
+        ),
+        ToolCall(
+            id="web-b",
+            type="function",
+            function=FunctionCall(name="web_search", arguments={"query": " openai   release "}),
+        ),
+        ToolCall(
+            id="web-c",
+            type="function",
+            function=FunctionCall(name="web_search", arguments={"query": "OpenAI official"}),
+        ),
+    ]
+    llm = MockLLM(
+        [
+            LLMResponse(content="", tool_calls=tool_calls, finish_reason="tool"),
+            LLMResponse(content="final", finish_reason="stop"),
+        ]
+    )
+    web_search = JsonWebSearchTool(
+        {
+            "OpenAI release": "https://openai.com/news/example?utm_source=test#section",
+            "OpenAI official": "https://openai.com/news/example/",
+        }
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"web_search": web_search},
+            max_steps=5,
+        )
+    )
+
+    assert web_search.calls == ["OpenAI release", "OpenAI official"]
+    results = {
+        e.tool_call_id: e
+        for e in events
+        if isinstance(e, ToolCallResult) and e.tool_name == "web_search"
+    }
+    assert results["web-b"].user_visible is False
+    assert "Duplicate web_search query skipped" in (results["web-b"].error or "")
+    deduped_payload = json.loads(results["web-c"].content)
+    assert deduped_payload["refs"] == []
+    assert deduped_payload["DedupedDuplicateCount"] == 1
+    assert deduped_payload["DedupedNewCount"] == 0
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent) and not e.user_visible]
+    assert any("Duplicate queries skipped this batch: 1" in e.content for e in injected)
+    assert any("duplicate structured results this batch: 1" in e.content for e in injected)
 
 
 @pytest.mark.asyncio

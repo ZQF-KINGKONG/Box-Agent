@@ -6,6 +6,8 @@ from box_agent.acp import BoxACPAgent
 from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
 from box_agent.experts import ExpertSessionContext
 from box_agent.schema import LLMResponse, StreamEvent
+from box_agent.tools.skill_loader import SKILL_SLOT_SENTINEL, SkillLoader
+from box_agent.tools.skill_tool import GetSkillTool
 
 
 class DoneLLM:
@@ -23,6 +25,21 @@ class DummyConn:
 
     async def sessionUpdate(self, payload):
         self.updates.append(payload)
+
+
+def _write_skill(root, name: str, description: str = "") -> None:
+    skill_dir = root / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"""---
+name: {name}
+description: {description or f"{name} description"}
+---
+
+{name} content
+""",
+        encoding="utf-8",
+    )
 
 
 def test_expert_session_context_parses_camel_and_snake_case() -> None:
@@ -155,6 +172,56 @@ async def test_acp_session_injects_expert_prompt_and_returns_meta(tmp_path) -> N
     assert "PPT 设计师" in state.agent.system_prompt
     assert "先统一结构" in state.agent.system_prompt
     assert session.field_meta["expert_context"]["expert"]["id"] == "ppt-designer"
+
+
+@pytest.mark.asyncio
+async def test_acp_expert_session_can_select_disabled_skill(tmp_path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    _write_skill(skills_dir, "disabled-skill", "Disabled expert-only capability")
+
+    settings_path = tmp_path / "skill-settings.json"
+    settings_path.write_text(
+        '{"disabledSkillNames":["disabled-skill"]}',
+        encoding="utf-8",
+    )
+
+    skill_loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
+    skill_loader.discover_skills()
+    assert skill_loader.get_skill("disabled-skill") is None
+
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_mcp=False),
+    )
+    agent = BoxACPAgent(
+        DummyConn(),
+        config,
+        DoneLLM(),
+        [GetSkillTool(skill_loader)],
+        f"base system\n{SKILL_SLOT_SENTINEL}",
+        skill_loader=skill_loader,
+    )
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=str(tmp_path),
+            field_meta={
+                "expert": {
+                    "id": "expert-with-disabled-skill",
+                    "name": "禁用技能专家",
+                    "defaultSkills": ["disabled-skill"],
+                },
+            },
+        )
+    )
+
+    state = agent._sessions[session.sessionId]
+    assert "disabled-skill" in state.agent.system_prompt
+    result = await state.agent.tools["get_skill"].execute("disabled-skill")
+    assert result.success is True
+    assert "disabled-skill content" in result.content
 
 
 @pytest.mark.asyncio

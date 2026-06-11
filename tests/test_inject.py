@@ -102,6 +102,7 @@ async def test_inject_at_step_boundary():
     injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
     assert len(injected) == 1
     assert injected[0].content == "extra context here"
+    assert injected[0].user_visible is True
 
     # The injected message should be in the message history
     user_msgs = [m for m in msgs if m.role == "user"]

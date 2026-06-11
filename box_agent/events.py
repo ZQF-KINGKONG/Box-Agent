@@ -102,6 +102,7 @@ class ToolCallStart:
     tool_call_id: str
     tool_name: str
     arguments: dict[str, Any]
+    user_visible: bool = True
 
 
 @dataclass(frozen=True)
@@ -114,6 +115,7 @@ class ToolCallResult:
     content: str
     error: str | None = None
     raw_output: dict[str, Any] | None = None
+    user_visible: bool = True
 
 
 @dataclass(frozen=True)
@@ -301,6 +303,7 @@ class InjectedMessageEvent:
 
     content: str
     injection_id: str | None = None
+    user_visible: bool = True
 
 
 # ── Memory promotion proposal ───────────────────────────────────

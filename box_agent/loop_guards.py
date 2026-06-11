@@ -37,9 +37,13 @@ from typing import Final
 
 # ── Constants ────────────────────────────────────────────────────
 
+WEB_SEARCH_TOOL_NAME: Final = "web_search"
+WEB_SEARCH_BATCH_SIZE: Final = 6
+WEB_SEARCH_TOTAL_LIMIT: Final = 24
+
 # Per-turn call caps for tools the model tends to over-request.
 TOOL_CALL_LIMITS: Final[dict[str, int]] = {
-    "web_search": 12,
+    WEB_SEARCH_TOOL_NAME: WEB_SEARCH_TOTAL_LIMIT,
 }
 
 # Reserve this many trailing steps for synthesis (near-limit wrap-up).

@@ -271,7 +271,9 @@ class Agent:
                 print(f"\n{Colors.BOLD}{Colors.BRIGHT_BLUE}🤖 Assistant:{Colors.RESET}")
                 print(f"{text}")
 
-            case ToolCallStart(tool_name=name, arguments=args):
+            case ToolCallStart(tool_name=name, arguments=args, user_visible=user_visible):
+                if not user_visible:
+                    return
                 print(f"\n{Colors.BRIGHT_YELLOW}🔧 Tool Call:{Colors.RESET} {Colors.BOLD}{Colors.CYAN}{name}{Colors.RESET}")
                 print(f"{Colors.DIM}   Arguments:{Colors.RESET}")
                 truncated = {}
@@ -281,7 +283,9 @@ class Agent:
                 for line in json.dumps(truncated, indent=2, ensure_ascii=False).split("\n"):
                     print(f"   {Colors.DIM}{line}{Colors.RESET}")
 
-            case ToolCallResult(success=ok, content=text, error=err, raw_output=raw_output):
+            case ToolCallResult(success=ok, content=text, error=err, raw_output=raw_output, user_visible=user_visible):
+                if not user_visible:
+                    return
                 if ok:
                     display = text[:300] + f"{Colors.DIM}...{Colors.RESET}" if len(text) > 300 else text
                     print(f"{Colors.BRIGHT_GREEN}✓ Result:{Colors.RESET} {display}")
@@ -301,9 +305,9 @@ class Agent:
                 match inner:
                     case StepStart(step=s, max_steps=mx):
                         print(f"{prefix}{Colors.DIM} Step {s}/{mx}{Colors.RESET}")
-                    case ToolCallStart(tool_name=name):
+                    case ToolCallStart(tool_name=name, user_visible=True):
                         print(f"{prefix}{Colors.DIM} 🔧 {name}{Colors.RESET}")
-                    case ToolCallResult(tool_name=name, success=ok):
+                    case ToolCallResult(tool_name=name, success=ok, user_visible=True):
                         mark = "✓" if ok else "✗"
                         print(f"{prefix}{Colors.DIM} {mark} {name}{Colors.RESET}")
                     case ArtifactEvent(filename=fname):
@@ -320,7 +324,9 @@ class Agent:
                     print(f"   Path: {path}")
                 print(f"   Reason: {reason}")
 
-            case InjectedMessageEvent(content=text):
+            case InjectedMessageEvent(content=text, user_visible=user_visible):
+                if not user_visible:
+                    return
                 preview = text[:80] + "..." if len(text) > 80 else text
                 print(f"\n{Colors.DIM}💉 Injected:{Colors.RESET} {Colors.BRIGHT_WHITE}{preview}{Colors.RESET}")
 

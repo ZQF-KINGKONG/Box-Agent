@@ -466,6 +466,15 @@ class BoxACPAgent:
                      message="Utility session: tools disabled (no memory recall/extraction)")
         else:
             tools = list(self._base_tools)
+            if expert_context and self._skill_loader:
+                from box_agent.tools.skill_tool import GetSkillTool
+
+                tools = [
+                    GetSkillTool(self._skill_loader, include_disabled=True)
+                    if getattr(tool, "name", "") == "get_skill"
+                    else tool
+                    for tool in tools
+                ]
             if perm_engine is None:
                 log.info("session/permissions", session_id=session_id,
                          message="No officev3 policy — using legacy allow_full_access mode")
@@ -530,7 +539,10 @@ class BoxACPAgent:
         # captured prefix/suffix include all surrounding system-prompt content.
         if self._skill_loader:
             from box_agent.tools.skill_loader import SkillSelector
-            selector = SkillSelector(self._skill_loader)
+            selector = SkillSelector(
+                self._skill_loader,
+                include_disabled=expert_context is not None,
+            )
             selector.bind(agent.messages[0].content)
             if expert_context:
                 expert_skill_prompt = selector.update(expert_context.skill_query())
@@ -1276,8 +1288,17 @@ class BoxACPAgent:
                             update_tool_call(f"llm-output-{s}", raw_output=payload),
                         )
 
-                    case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args):
-                        log.info("tool/start", session_id=session_id, tool_call_id=tid, tool_name=name, arguments=args)
+                    case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args, user_visible=user_visible):
+                        log.info(
+                            "tool/start",
+                            session_id=session_id,
+                            tool_call_id=tid,
+                            tool_name=name,
+                            arguments=args,
+                            user_visible=user_visible,
+                        )
+                        if not user_visible:
+                            continue
                         if name == "sub_agent" and isinstance(args, dict):
                             # Surface the short distinct label as the title so the
                             # host doesn't fall back to the long, near-identical task.
@@ -1291,11 +1312,13 @@ class BoxACPAgent:
                             label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
                         await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
 
-                    case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err, raw_output=raw_output):
+                    case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err, raw_output=raw_output, user_visible=user_visible):
                         if ok:
-                            log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text)
+                            log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text, user_visible=user_visible)
                         else:
-                            log.warn("tool/fail", session_id=session_id, tool_call_id=tid, tool_name=tname, error=err)
+                            log.warn("tool/fail", session_id=session_id, tool_call_id=tid, tool_name=tname, error=err, user_visible=user_visible)
+                        if not user_visible:
+                            continue
                         status = "completed" if ok else "failed"
                         prefix = "[OK]" if ok else "[ERROR]"
                         result_text = f"{prefix} {text if ok else err or 'Tool execution failed'}"
@@ -1339,13 +1362,16 @@ class BoxACPAgent:
                         # Don't return yet — let the loop consume the subsequent DoneEvent
                         # so the async generator is properly exhausted.
 
-                    case InjectedMessageEvent(content=text, injection_id=injection_id):
+                    case InjectedMessageEvent(content=text, injection_id=injection_id, user_visible=user_visible):
                         log.info(
                             "session/injected",
                             session_id=session_id,
                             injection_id=injection_id,
+                            user_visible=user_visible,
                             text=text[:80],
                         )
+                        if not user_visible:
+                            continue
                         await self._send(
                             session_id,
                             update_agent_message(text_block(_injected_marker(text, injection_id))),
@@ -1359,6 +1385,8 @@ class BoxACPAgent:
                         return reason.value
 
                     case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id, title=sub_title):
+                        if getattr(inner, "user_visible", True) is False:
+                            continue
                         if isinstance(inner, WebSearchEvent):
                             web_search_payload = {**inner.payload, "type": "web_search"}
                             log.debug("sub_agent/web_search", session_id=session_id, tool_call_id=tid, payload=web_search_payload)

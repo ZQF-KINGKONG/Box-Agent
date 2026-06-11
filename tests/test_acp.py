@@ -207,6 +207,54 @@ class EchoTool(Tool):
         return ToolResult(success=True, content=f"tool:{text}")
 
 
+class CountingWebSearchTool(Tool):
+    def __init__(self):
+        self.calls = 0
+
+    @property
+    def name(self):
+        return "web_search"
+
+    @property
+    def description(self):
+        return "Searches the web"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"query": {"type": "string"}}}
+
+    async def execute(self, query: str = ""):
+        self.calls += 1
+        return ToolResult(success=True, content=f"result:{query}")
+
+
+class WebBudgetLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls <= 25:
+            index = self.calls - 1
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool",
+                tool_calls=[
+                    ToolCall(
+                        id=f"web-{index}",
+                        type="function",
+                        function=FunctionCall(name="web_search", arguments={"query": f"q{index}"}),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="final from gathered evidence")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="final from gathered evidence", finish_reason="stop")
+
+
 @pytest.fixture
 def acp_agent(tmp_path):
     config = Config(
@@ -243,6 +291,15 @@ async def test_acp_turn_executes_tool(acp_agent):
     assert llm_outputs[0]["thinking"] == "calling echo"
     assert llm_outputs[0]["tool_calls"][0]["function"]["name"] == "echo"
     assert llm_outputs[1]["content"] == "done"
+    message_chunks = [
+        (i, update.update.content.text)
+        for i, update in enumerate(conn.updates)
+        if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
+    ]
+    assert "calling tool" in [text for _, text in message_chunks]
+    tool_index = _first_tool_call_index(conn.updates)
+    assert tool_index != -1
+    assert next(i for i, text in message_chunks if text == "calling tool") < tool_index
     progress_outputs = [
         update.update.rawOutput
         for update in conn.updates
@@ -250,7 +307,7 @@ async def test_acp_turn_executes_tool(acp_agent):
         and isinstance(update.update.rawOutput, dict)
         and update.update.rawOutput.get("type") == "agent_progress"
     ]
-    assert [item["content"] for item in progress_outputs] == ["calling tool"]
+    assert progress_outputs == []
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
 
@@ -306,6 +363,34 @@ async def test_acp_marks_injected_message_at_step_boundary(tmp_path):
     rendered = "\n".join(str(update) for update in conn.updates)
     assert "[Injected:inj-1] 生成10页就可以了" in rendered
     assert "done" in rendered
+
+
+@pytest.mark.asyncio
+async def test_acp_hides_internal_web_search_budget_injection(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=30, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    web_search = CountingWebSearchTool()
+    agent = BoxACPAgent(conn, config, WebBudgetLLM(), [web_search], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+
+    stop_reason = await agent._run_turn(state, session.sessionId)
+
+    assert stop_reason == "end_turn"
+    assert web_search.calls == 24
+    rendered = "\n".join(str(update) for update in conn.updates)
+    assert "final from gathered evidence" in rendered
+    assert "web_search 调用已达到预算上限" not in rendered
+    assert "Tool call budget reached" not in rendered
+    assert "Search batch controller update" not in rendered
+    assert "[Injected" not in rendered
 
 
 @pytest.mark.asyncio
@@ -746,3 +831,68 @@ async def test_acp_token_meter_resets_between_turns(tmp_path):
 
     assert first.field_meta == {"usage": {"totalTokens": 25}}
     assert second.field_meta == {"usage": {"totalTokens": 25}}
+
+
+class SpeakThenToolLLM:
+    """Emits a short visible preface before any tool."""
+
+    async def generate_stream(self, messages, tools, **_):
+        if not getattr(self, "_spoke", False):
+            self._spoke = True
+            yield StreamEvent(type="text", delta="我先打开页面检查一下。")
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool",
+                tool_calls=[
+                    ToolCall(
+                        id="tool1",
+                        type="function",
+                        function=FunctionCall(name="echo", arguments={"text": "ping"}),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+def _first_tool_call_index(updates):
+    for i, update in enumerate(updates):
+        if getattr(update.update, "sessionUpdate", None) == "tool_call":
+            return i
+    return -1
+
+
+@pytest.mark.asyncio
+async def test_acp_streams_short_model_preface_before_tool(tmp_path):
+    """Short model-authored pre-tool text is streamed before the tool call."""
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, SpeakThenToolLLM(), [EchoTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "打开页面"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    message_chunks = [
+        (i, update.update.content.text)
+        for i, update in enumerate(conn.updates)
+        if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
+    ]
+    preface_index = next(
+        i for i, text in message_chunks if text == "我先打开页面检查一下。"
+    )
+    tool_index = _first_tool_call_index(conn.updates)
+    assert tool_index != -1
+    assert preface_index < tool_index

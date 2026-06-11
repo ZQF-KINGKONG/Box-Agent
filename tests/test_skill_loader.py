@@ -422,6 +422,40 @@ def test_skill_settings_disable_filters_loaded_skills():
         assert set(loader.list_skills()) == {"enabled-skill"}
 
 
+def test_skill_settings_can_include_disabled_for_expert_sessions():
+    """Expert sessions can opt into disabled skills without changing default filtering."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        skills_dir = root / "skills"
+        skills_dir.mkdir()
+
+        for name in ("enabled-skill", "disabled-skill"):
+            sd = skills_dir / name
+            sd.mkdir()
+            create_test_skill(sd, name, f"{name} desc", f"{name} content")
+
+        settings_path = root / "skill-settings.json"
+        settings_path.write_text(
+            '{"disabledSkillNames":["disabled-skill"]}', encoding="utf-8"
+        )
+
+        loader = SkillLoader(skills_dir, skill_settings_path=settings_path)
+        loader.discover_skills()
+
+        assert loader.get_skill("disabled-skill") is None
+        assert loader.get_skill("disabled-skill", include_disabled=True) is not None
+        assert set(loader.list_skills()) == {"enabled-skill"}
+        assert set(loader.list_skills(include_disabled=True)) == {
+            "enabled-skill",
+            "disabled-skill",
+        }
+        assert [s.name for s in loader.filter_by_query("disabled")] == []
+        assert [
+            s.name
+            for s in loader.filter_by_query("disabled", include_disabled=True)
+        ] == ["disabled-skill"]
+
+
 def test_skill_settings_change_triggers_reload():
     """Changing officev3 skill settings should affect the next get_skill path."""
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -16,8 +16,9 @@ SkillSource = Literal["builtin", "user"]
 class GetSkillTool(Tool):
     """Tool to get detailed information about a specific skill"""
 
-    def __init__(self, skill_loader: SkillLoader):
+    def __init__(self, skill_loader: SkillLoader, *, include_disabled: bool = False):
         self.skill_loader = skill_loader
+        self.include_disabled = include_disabled
 
     @property
     def name(self) -> str:
@@ -45,10 +46,15 @@ class GetSkillTool(Tool):
         # Auto-reload if the user skills directory has been touched since last scan
         self.skill_loader.maybe_reload()
 
-        skill = self.skill_loader.get_skill(skill_name)
+        skill = self.skill_loader.get_skill(
+            skill_name,
+            include_disabled=self.include_disabled,
+        )
 
         if not skill:
-            available = ", ".join(self.skill_loader.list_skills())
+            available = ", ".join(
+                self.skill_loader.list_skills(include_disabled=self.include_disabled)
+            )
             return ToolResult(
                 success=False,
                 content="",

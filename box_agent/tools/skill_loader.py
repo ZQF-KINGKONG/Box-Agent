@@ -178,6 +178,7 @@ class SkillLoader:
         )
         self._skill_settings_signature: tuple[str, int, int] | None = None
         self.loaded_skills: Dict[str, Skill] = {}
+        self._all_skills: Dict[str, Skill] = {}
 
     # Backward compatibility — expose the first source directory
     @property
@@ -298,6 +299,7 @@ class SkillLoader:
     def discover_skills(self) -> List[Skill]:
         """Discover skills from all sources; user overrides builtin on name conflict."""
         self.loaded_skills = {}
+        self._all_skills = {}
         discovered: List[Skill] = []
         disabled_skill_names = _read_disabled_skill_names(self._skill_settings_path)
 
@@ -332,7 +334,10 @@ class SkillLoader:
                     )
                     continue
 
+                self._all_skills[skill.name] = skill
+
                 if skill.name in disabled_skill_names:
+                    self.loaded_skills.pop(skill.name, None)
                     continue
 
                 self.loaded_skills[skill.name] = skill
@@ -345,6 +350,11 @@ class SkillLoader:
         self._skill_settings_signature = self._file_signature(self._skill_settings_path)
         discovered = list(self.loaded_skills.values())
         return discovered
+
+    def _skill_pool(self, include_disabled: bool = False) -> Dict[str, Skill]:
+        if include_disabled:
+            return getattr(self, "_all_skills", self.loaded_skills) or self.loaded_skills
+        return self.loaded_skills
 
     def _iter_skill_files(self, entry: _SourceEntry) -> List[Path]:
         """Return candidate SKILL.md files for one source.
@@ -511,20 +521,23 @@ class SkillLoader:
             self.discover_skills()
         return changed
 
-    def get_skill(self, name: str) -> Optional[Skill]:
+    def get_skill(self, name: str, *, include_disabled: bool = False) -> Optional[Skill]:
         """Get a loaded skill by name."""
-        return self.loaded_skills.get(name)
+        return self._skill_pool(include_disabled=include_disabled).get(name)
 
-    def list_skills(self) -> List[str]:
+    def list_skills(self, *, include_disabled: bool = False) -> List[str]:
         """List all loaded skill names."""
-        return list(self.loaded_skills.keys())
+        return list(self._skill_pool(include_disabled=include_disabled).keys())
 
-    def list_skills_metadata(self) -> List[Dict[str, object]]:
+    def list_skills_metadata(self, *, include_disabled: bool = False) -> List[Dict[str, object]]:
         """Return structured metadata for every loaded skill.
 
         Intended for officev3 / ACP `_meta.skills` payloads.
         """
-        return [skill.to_metadata_dict() for skill in self.loaded_skills.values()]
+        return [
+            skill.to_metadata_dict()
+            for skill in self._skill_pool(include_disabled=include_disabled).values()
+        ]
 
     def filter_by_query(
         self,
@@ -532,6 +545,7 @@ class SkillLoader:
         *,
         always_on: frozenset[str] = frozenset({"memory-guide"}),
         max_skills: int = 8,
+        include_disabled: bool = False,
     ) -> List[Skill]:
         """Return skills relevant to ``query`` plus the always_on set.
 
@@ -544,7 +558,8 @@ class SkillLoader:
         This is intentional: greetings like "hi" / "你好" should NOT trigger
         the full skill catalog injection.
         """
-        always_skills = [s for s in self.loaded_skills.values() if s.name in always_on]
+        skill_pool = self._skill_pool(include_disabled=include_disabled)
+        always_skills = [s for s in skill_pool.values() if s.name in always_on]
 
         if not query or not query.strip():
             return always_skills
@@ -554,7 +569,7 @@ class SkillLoader:
             return always_skills
 
         scored: List[Tuple[int, Skill]] = []
-        for skill in self.loaded_skills.values():
+        for skill in skill_pool.values():
             if skill.name in always_on:
                 continue
             name_overlap = len(query_tokens & _tokenize(skill.name))
@@ -568,7 +583,12 @@ class SkillLoader:
         matched = [s for _, s in scored[:max_skills]]
         return matched + always_skills
 
-    def get_skills_metadata_prompt(self, query: Optional[str] = None) -> str:
+    def get_skills_metadata_prompt(
+        self,
+        query: Optional[str] = None,
+        *,
+        include_disabled: bool = False,
+    ) -> str:
         """Generate a metadata-only prompt for Progressive Disclosure Level 1.
 
         When ``query`` is provided, only skills matched by
@@ -576,13 +596,17 @@ class SkillLoader:
         ``None``, all loaded skills are listed (legacy behavior — kept so
         callers that have not adopted filtering still work).
         """
-        if not self.loaded_skills:
+        skill_pool = self._skill_pool(include_disabled=include_disabled)
+        if not skill_pool:
             return ""
 
         if query is None:
-            skills_to_render = list(self.loaded_skills.values())
+            skills_to_render = list(skill_pool.values())
         else:
-            skills_to_render = self.filter_by_query(query)
+            skills_to_render = self.filter_by_query(
+                query,
+                include_disabled=include_disabled,
+            )
 
         prompt_parts = ["## Available Skills\n"]
         prompt_parts.append(
@@ -638,8 +662,9 @@ class SkillSelector:
 
     SLOT = SKILL_SLOT_SENTINEL
 
-    def __init__(self, skill_loader: "SkillLoader") -> None:
+    def __init__(self, skill_loader: "SkillLoader", *, include_disabled: bool = False) -> None:
         self._loader = skill_loader
+        self._include_disabled = include_disabled
         self._prefix: Optional[str] = None
         self._suffix: Optional[str] = None
         self._cumulative: List[str] = []
@@ -690,10 +715,16 @@ class SkillSelector:
             skills_md = ""
             sig: Tuple[str, ...] = ()
         else:
-            skills = self._loader.filter_by_query(query)
+            skills = self._loader.filter_by_query(
+                query,
+                include_disabled=self._include_disabled,
+            )
             sig = tuple(sorted(s.name for s in skills))
             if skills:
-                skills_md = self._loader.get_skills_metadata_prompt(query=query)
+                skills_md = self._loader.get_skills_metadata_prompt(
+                    query=query,
+                    include_disabled=self._include_disabled,
+                )
             else:
                 skills_md = ""
         if sig == self._last_sig:

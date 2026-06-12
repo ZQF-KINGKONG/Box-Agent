@@ -442,6 +442,14 @@ class AnthropicClient(LLMClientBase):
                 stream_context = self.client.messages.stream(**params)
             except Exception as exc:
                 log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
+                # Detect third-party API event order compatibility issues
+                if isinstance(exc, RuntimeError) and "Unexpected event order" in str(exc):
+                    raise RuntimeError(
+                        f"API 返回的事件顺序不符合 Anthropic 协议规范: {exc}\n"
+                        f"这通常表示第三方 API 的兼容性问题。请检查:\n"
+                        f"1. API 端点是否正确实现了 Anthropic 流式协议\n"
+                        f"2. 是否应该使用 OpenAI 兼容模式（provider: openai）而不是 Anthropic 模式"
+                    ) from exc
                 raise
 
             try:
@@ -516,6 +524,14 @@ class AnthropicClient(LLMClientBase):
                                 output_tokens = getattr(event.usage, "output_tokens", 0) or 0
             except Exception as exc:
                 log_llm_error_meta(provider="anthropic", mode="stream", exc=exc)
+                # Detect third-party API event order compatibility issues
+                if isinstance(exc, RuntimeError) and "Unexpected event order" in str(exc):
+                    raise RuntimeError(
+                        f"API 返回的事件顺序不符合 Anthropic 协议规范: {exc}\n"
+                        f"这通常表示第三方 API 的兼容性问题。请检查:\n"
+                        f"1. API 端点是否正确实现了 Anthropic 流式协议\n"
+                        f"2. 是否应该使用 OpenAI 兼容模式（provider: openai）而不是 Anthropic 模式"
+                    ) from exc
                 if is_retryable_stream_error(exc):
                     if any_user_yield:
                         logger.warning(

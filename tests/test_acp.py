@@ -188,6 +188,41 @@ class DoneLLM:
         return LLMResponse(content="done", finish_reason="stop")
 
 
+class PrematurePptLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(type="text", delta="现在开始制作 PPT：")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool",
+                tool_calls=[
+                    ToolCall(
+                        id="ppt-write",
+                        type="function",
+                        function=FunctionCall(
+                            name="write_file",
+                            arguments={
+                                "path": "output/bid-proposal.pptx",
+                                "content": "fake pptx payload",
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="PPT 已生成。")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
 class UsageLLM:
     """Mimics the ``LLMClient`` choke point: records usage on each finish.
 
@@ -435,6 +470,38 @@ async def test_acp_marks_injected_message_at_step_boundary(tmp_path):
     rendered = "\n".join(str(update) for update in conn.updates)
     assert "[Injected:inj-1] 生成10页就可以了" in rendered
     assert "done" in rendered
+
+
+@pytest.mark.asyncio
+async def test_acp_auto_completion_gate_continues_until_ppt_artifact(tmp_path):
+    old = tmp_path / "output" / "old.html"
+    old.parent.mkdir()
+    old.write_text("old")
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=5, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    llm = PrematurePptLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "做一份 15 页售前竞标方案 PPT"}],
+        )
+    )
+
+    assert response.stopReason == "end_turn"
+    assert llm.calls == 3
+    assert (tmp_path / "output" / "bid-proposal.pptx").read_text() == "fake pptx payload"
+    rendered = "\n".join(str(update) for update in conn.updates)
+    assert "PPT 已生成" in rendered
+    assert "尚未满足完成条件" not in rendered
 
 
 @pytest.mark.asyncio

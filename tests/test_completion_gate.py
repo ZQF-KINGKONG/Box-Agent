@@ -11,6 +11,7 @@ import pytest
 from box_agent.core import run_agent_loop
 from box_agent.loop_guards import (
     CompletionGate,
+    artifact_signatures_for_globs,
     completion_gate_gaps,
     completion_gate_text,
 )
@@ -141,6 +142,42 @@ def test_gaps_absolute_artifact_path(tmp_path):
 def test_gate_text_lists_each_gap():
     text = completion_gate_text(["缺口A", "缺口B"])
     assert "缺口A" in text and "缺口B" in text
+
+
+def test_changed_artifact_glob_ignores_baseline_files(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    existing = output / "old.pptx"
+    existing.write_text("old")
+    patterns = ("output/**/*.pptx",)
+    baseline = artifact_signatures_for_globs(patterns, str(tmp_path))
+    gate = CompletionGate(
+        required_changed_artifact_globs=patterns,
+        baseline_artifact_signatures=baseline,
+    )
+
+    gaps = completion_gate_gaps(gate, set(), str(tmp_path))
+    assert len(gaps) == 1
+    assert "新的或更新过的交付产物" in gaps[0]
+
+    (output / "new.pptx").write_text("new")
+    assert completion_gate_gaps(gate, set(), str(tmp_path)) == []
+
+
+def test_changed_artifact_glob_accepts_modified_baseline_file(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    existing = output / "deck.pptx"
+    existing.write_text("old")
+    patterns = ("output/**/*.pptx",)
+    baseline = artifact_signatures_for_globs(patterns, str(tmp_path))
+    gate = CompletionGate(
+        required_changed_artifact_globs=patterns,
+        baseline_artifact_signatures=baseline,
+    )
+
+    existing.write_text("new content")
+    assert completion_gate_gaps(gate, set(), str(tmp_path)) == []
 
 
 # ── Loop behaviour ───────────────────────────────────────────────

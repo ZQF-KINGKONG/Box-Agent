@@ -31,6 +31,7 @@ breaker's decision logic independently testable.
 
 from __future__ import annotations
 
+import glob
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
@@ -149,6 +150,12 @@ class CompletionGate:
     # Artifact files that must exist and be non-empty before END_TURN is
     # allowed. Resolved relative to ``workspace_dir`` (absolute paths kept).
     required_artifacts: tuple[str, ...] = ()
+    # At least one artifact matching any of these globs must be new or changed
+    # compared with ``baseline_artifact_signatures`` before END_TURN is allowed.
+    required_changed_artifact_globs: tuple[str, ...] = ()
+    baseline_artifact_signatures: dict[str, tuple[int, int]] = field(
+        default_factory=dict
+    )
     # Safety valve: max number of continuation nudges the gate may inject.
     max_continuations: int = 3
     # Safety valve: release the gate once the run exceeds this many seconds.
@@ -181,7 +188,80 @@ def completion_gate_gaps(
             exists_nonempty = False
         if not exists_nonempty:
             gaps.append(f"产物文件 `{artifact}` 不存在或为空")
+    if gate.required_changed_artifact_globs and not _has_changed_artifact(
+        gate.required_changed_artifact_globs,
+        gate.baseline_artifact_signatures,
+        base,
+    ):
+        patterns = ", ".join(
+            f"`{pattern}`" for pattern in gate.required_changed_artifact_globs
+        )
+        gaps.append(f"尚未产生新的或更新过的交付产物（匹配：{patterns}）")
     return gaps
+
+
+def artifact_signatures_for_globs(
+    patterns: tuple[str, ...],
+    workspace_dir: str | None,
+) -> dict[str, tuple[int, int]]:
+    """Snapshot file signatures for artifact glob checks.
+
+    Keys are resolved absolute paths; values are ``(size, mtime_ns)``. Missing
+    workspaces simply produce an empty baseline, so later created artifacts can
+    still satisfy the gate.
+    """
+    base = Path(workspace_dir) if workspace_dir else None
+    signatures: dict[str, tuple[int, int]] = {}
+    for path in _iter_artifact_glob_matches(patterns, base):
+        signature = _artifact_signature(path)
+        if signature is not None:
+            signatures[str(path.resolve())] = signature
+    return signatures
+
+
+def _iter_artifact_glob_matches(
+    patterns: tuple[str, ...],
+    base: Path | None,
+) -> list[Path]:
+    matches: list[Path] = []
+    for pattern in patterns:
+        path_pattern = Path(pattern)
+        if path_pattern.is_absolute():
+            candidates = [Path(p) for p in glob.glob(pattern, recursive=True)]
+        elif base is not None:
+            candidates = list(base.glob(pattern))
+        else:
+            candidates = []
+        matches.extend(path for path in candidates if path.is_file())
+    return matches
+
+
+def _artifact_signature(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if stat.st_size <= 0:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+def _has_changed_artifact(
+    patterns: tuple[str, ...],
+    baseline: dict[str, tuple[int, int]],
+    base: Path | None,
+) -> bool:
+    for path in _iter_artifact_glob_matches(patterns, base):
+        signature = _artifact_signature(path)
+        if signature is None:
+            continue
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            continue
+        if baseline.get(resolved) != signature:
+            return True
+    return False
 
 
 def completion_gate_text(gaps: list[str]) -> str:

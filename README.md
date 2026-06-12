@@ -107,6 +107,7 @@ model: "your-model"
 - **Standalone Runtime**: PyInstaller binary bundles Python + all dependencies. No external Python needed — download and run
 - **Cross-session Memory**: Persistent memory lets the agent retain key information across conversations
 - **Safety Layer**: Dangerous command detection, workspace scope control, auto-backup before file modifications. Interactive permission negotiation for out-of-workspace access (CLI prompts user, ACP sends reverse RPC to host)
+- **Planning Snapshots**: Structured plan tool for rendering objective, scope, steps, verification, and risks in host UIs
 - **Task Tracking**: Built-in todo tool for multi-step task decomposition and progress tracking
 
 ## Demos

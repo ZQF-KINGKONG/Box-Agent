@@ -38,6 +38,7 @@ from .events import (
     MemoryProposalEvent,
     MemoryPromotionCandidate,
     PermissionRequestEvent,
+    PlanSnapshotEvent,
     ProgressEvent,
     StepEnd,
     StepStart,
@@ -81,6 +82,38 @@ from .tools.base import EventEmittingTool, Tool, ToolResult
 # Type alias — consumers supply a zero-arg callable that returns True
 # when the execution should be cancelled.
 CancelChecker = Callable[[], bool]
+
+_PLAN_START_TRIGGERS = (
+    "先做规划",
+    "先规划",
+    "先做计划",
+    "先给规划",
+    "先给计划",
+    "先给方案",
+    "先出方案",
+    "规划一下",
+    "计划一下",
+    "制定计划",
+    "制定方案",
+    "执行方案",
+    "做个计划",
+    "做个规划",
+    "make a plan",
+    "plan first",
+    "planning first",
+)
+
+_FORCED_PLAN_GUIDANCE = (
+    "Host UI requires a structured execution plan for this turn. "
+    "Before giving the substantive answer, call `plan_write` with action `set` "
+    "to publish the task objective, scope, steps, verification, risks, and assumptions. "
+    "Keep the plan concise and relevant to the user's latest request."
+)
+
+_FORCED_PLAN_RETRY_GUIDANCE = (
+    "The host is still waiting for the structured plan card. "
+    "Call `plan_write` with action `set` now before continuing the answer."
+)
 
 # Regex to match file references like [foo.png] in tool output.
 _ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
@@ -133,6 +166,61 @@ _EXT_KIND = {
     ".mp4": "video", ".webm": "video", ".mov": "video",
     ".mp3": "audio", ".wav": "audio", ".ogg": "audio", ".flac": "audio",
 }
+
+
+def _message_text(content: str | list[dict[str, Any]]) -> str:
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, dict):
+            value = block.get("text") or block.get("content")
+            if isinstance(value, str):
+                parts.append(value)
+    return "\n".join(parts)
+
+
+def _latest_user_text(messages: list[Message]) -> str:
+    for msg in reversed(messages):
+        if msg.role == "user":
+            return _message_text(msg.content)
+    return ""
+
+
+def _should_emit_plan_start(messages: list[Message], tools: dict[str, Tool]) -> bool:
+    if "plan_write" not in tools:
+        return False
+    text = _latest_user_text(messages).lower()
+    return any(trigger in text for trigger in _PLAN_START_TRIGGERS)
+
+
+def _plan_start_payload() -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()
+    plan = {
+        "id": "pending",
+        "title": "正在制定执行方案",
+        "objective": "根据当前请求梳理目标、范围、步骤、验证方式和风险。",
+        "scope": "",
+        "status": "draft",
+        "steps": [],
+        "verification": [],
+        "risks": [],
+        "assumptions": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    return {
+        "type": "plan_snapshot",
+        "version": 1,
+        "action": "start",
+        "plan": plan,
+        "summary": {
+            "steps": 0,
+            "verification": 0,
+            "risks": 0,
+            "assumptions": 0,
+        },
+    }
 
 
 def _classify_kind(filename: str, mime: str | None) -> str:
@@ -1250,6 +1338,7 @@ async def run_agent_loop(
     inject_queue: asyncio.Queue[str] | None = None,
     thinking_enabled: bool = False,
     session_id: str = "",
+    force_plan_start: bool = False,
     no_progress_limit: int | None = None,
     max_parallel_tools: int = 8,
     completion_gate: CompletionGate | None = None,
@@ -1436,6 +1525,9 @@ async def run_agent_loop(
     web_search_unique_results = 0
     web_search_duplicate_results = 0
     web_search_no_new_batches = 0
+    plan_start_emitted = False
+    forced_plan_guidance_injected = False
+    forced_plan_retry_injected = False
 
     for step in range(max_steps):
         # ── Cancellation check (top of step) ────────────────
@@ -1474,6 +1566,25 @@ async def run_agent_loop(
                     Message(role="user", content=format_injected_message(injected_text))
                 )
                 yield InjectedMessageEvent(content=injected_text, injection_id=injection_id)
+
+        has_plan_tool = "plan_write" in tools
+        force_plan_for_turn = force_plan_start and has_plan_tool
+        if force_plan_for_turn and not forced_plan_guidance_injected:
+            forced_plan_guidance_injected = True
+            messages.append(
+                Message(role="user", content=format_injected_message(_FORCED_PLAN_GUIDANCE))
+            )
+            yield InjectedMessageEvent(
+                content=_FORCED_PLAN_GUIDANCE,
+                injection_id=None,
+                user_visible=False,
+            )
+
+        if not plan_start_emitted and (
+            force_plan_for_turn or _should_emit_plan_start(messages, tools)
+        ):
+            plan_start_emitted = True
+            yield PlanSnapshotEvent(payload=_plan_start_payload())
 
         for tool_name, limit in TOOL_CALL_LIMITS.items():
             if (
@@ -1550,16 +1661,14 @@ async def run_agent_loop(
             set_llm_debug_sink(logger.log_llm_debug_record) if logger else None
         )
         try:
-            # Stream thinking deltas immediately. For visible text, keep a
-            # small leading buffer so ordinary short answers do not wait for
-            # the full LLM response to complete, while tool-preface text still
-            # reaches the UI as the model's own chat content.
-            visible_text_stream_threshold = 240
+            # Stream thinking and visible text deltas as soon as the provider
+            # yields them. Structured progress surfaces such as plan/todo are
+            # emitted as separate events, so visible text does not need a
+            # leading buffer to protect host UI ordering.
             text_content = ""
             thinking_content = ""
             finish_event: StreamEvent | None = None
             thinking_header_yielded = False
-            text_stream_started = False
 
             async for chunk in llm.generate_stream(
                 messages=messages, tools=tool_list, thinking_enabled=thinking_enabled,
@@ -1575,11 +1684,7 @@ async def run_agent_loop(
                     yield ThinkingEvent(content=chunk.delta, _streaming=True)
                 elif chunk.type == "text":
                     text_content += chunk.delta
-                    if text_stream_started:
-                        yield ContentEvent(content=chunk.delta, _streaming=True)
-                    elif len(text_content) >= visible_text_stream_threshold:
-                        text_stream_started = True
-                        yield ContentEvent(content=text_content, _streaming=True)
+                    yield ContentEvent(content=chunk.delta, _streaming=True)
                 elif chunk.type == "finish":
                     finish_event = chunk
 
@@ -1608,8 +1713,6 @@ async def run_agent_loop(
                 usage=finish_event.usage,
                 truncated_tool_calls=finish_event.truncated_tool_calls,
             )
-            if response.content and not text_stream_started:
-                yield ContentEvent(content=response.content)
             provider_request_id = finish_event.provider_request_id
             yield LLMOutputEvent(
                 step=step + 1,
@@ -1748,6 +1851,38 @@ async def run_agent_loop(
 
         # ── No tool calls → done (or continue if injected) ──
         if not response.tool_calls:
+            if (
+                force_plan_for_turn
+                and "plan_write" not in succeeded_tools
+                and not forced_plan_retry_injected
+            ):
+                forced_plan_retry_injected = True
+                messages.append(
+                    Message(
+                        role="user",
+                        content=format_injected_message(_FORCED_PLAN_RETRY_GUIDANCE),
+                    )
+                )
+                yield InjectedMessageEvent(
+                    content=_FORCED_PLAN_RETRY_GUIDANCE,
+                    injection_id=None,
+                    user_visible=False,
+                )
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1,
+                        elapsed_seconds=elapsed,
+                        total_elapsed_seconds=total,
+                    )
+                yield StepEnd(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                continue
+
             # Check inject queue — if messages are pending, continue
             # the loop so the LLM sees them on the next iteration.
             if inject_queue and not inject_queue.empty():

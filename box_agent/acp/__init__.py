@@ -81,6 +81,7 @@ from box_agent.events import (
     InjectedMessageEvent,
     LLMOutputEvent,
     MemoryProposalEvent,
+    PlanSnapshotEvent,
     ProgressEvent,
     StepEnd,
     StepStart,
@@ -193,6 +194,12 @@ def _remove_inject_queue_item(queue: asyncio.Queue, injection_id: str) -> bool:
     return removed
 
 
+def _meta_bool(meta: Any, *keys: str) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    return any(bool(meta.get(key, False)) for key in keys)
+
+
 @dataclass
 class SessionState:
     agent: Agent
@@ -212,6 +219,7 @@ class SessionState:
     skill_selector: Any | None = None  # SkillSelector — filters skill metadata per turn
     expert_context: ExpertSessionContext | None = None
     upstream_session_id: str = ""  # caller-owned session id from _meta.session_id; forwarded as X-RACCOON-Session-ID
+    force_plan_start: bool = False  # host-controlled deterministic plan skeleton toggle
 
 
 class BoxACPAgent:
@@ -335,6 +343,7 @@ class BoxACPAgent:
         env_context: EnvContext | None = None
         expert_context: ExpertSessionContext | None = None
         upstream_session_id = ""
+        force_plan_start = False
         # Lightweight one-shot utility session (e.g. host-side title/tag
         # generation). When set, the session carries no tools, skips memory
         # recall injection, and skips auto memory-extraction — it is a pure
@@ -345,6 +354,7 @@ class BoxACPAgent:
             session_mode = meta.get("session_mode")
             deep_think = bool(meta.get("deep_think", False))
             utility = bool(meta.get("utility", False))
+            force_plan_start = _meta_bool(meta, "force_plan_start", "forcePlanStart")
             env_context = EnvContext.from_meta(meta.get("env_context"))
             expert_context = ExpertSessionContext.from_meta(meta)
             # Caller-owned session id (e.g. officev3 chat session id). Forwarded
@@ -360,7 +370,8 @@ class BoxACPAgent:
             session_id=session_id,
             message=(
                 f"Creating session, workspace={workspace}, session_mode={session_mode}, "
-                f"deep_think={deep_think}, expert={expert_context.to_metadata() if expert_context else None}"
+                f"deep_think={deep_think}, force_plan_start={force_plan_start}, "
+                f"expert={expert_context.to_metadata() if expert_context else None}"
             ),
         )
 
@@ -532,6 +543,7 @@ class BoxACPAgent:
             skill_runtime_context=skill_runtime_context,
             expert_context=expert_context,
             upstream_session_id=upstream_session_id,
+            force_plan_start=force_plan_start,
         )
 
         # Skill selector: per-turn keyword-based filter on the skill catalog.
@@ -701,8 +713,19 @@ class BoxACPAgent:
 
         state.cancelled = False
         user_text = "\n".join(block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "") for block in params.prompt)
+        prompt_meta = getattr(params, "field_meta", None) or {}
+        force_plan_start = state.force_plan_start or _meta_bool(
+            prompt_meta,
+            "force_plan_start",
+            "forcePlanStart",
+        )
 
-        log.info("session/prompt", session_id=session_id, message=user_text)
+        log.info(
+            "session/prompt",
+            session_id=session_id,
+            message=user_text,
+            force_plan_start=force_plan_start,
+        )
 
         # Ensure background-loaded MCP tools are available before running the turn
         await self._ensure_mcp_loaded()
@@ -763,7 +786,11 @@ class BoxACPAgent:
         state.turn_active = True
         meter_token = start_token_meter()
         try:
-            stop_reason = await self._run_turn(state, session_id)
+            stop_reason = await self._run_turn(
+                state,
+                session_id,
+                force_plan_start=force_plan_start,
+            )
         finally:
             state.turn_active = False
             turn_meter = get_token_meter()
@@ -1174,7 +1201,13 @@ class BoxACPAgent:
             "core": self._memory.read_core(),
         }
 
-    async def _run_turn(self, state: SessionState, session_id: str) -> str:
+    async def _run_turn(
+        self,
+        state: SessionState,
+        session_id: str,
+        *,
+        force_plan_start: bool = False,
+    ) -> str:
         """Consume the shared execution core and translate events to ACP updates."""
         agent = state.agent
 
@@ -1223,6 +1256,7 @@ class BoxACPAgent:
             inject_queue=state.inject_queue,
             thinking_enabled=agent.thinking_enabled,
             session_id=state.upstream_session_id,
+            force_plan_start=force_plan_start,
         ):
             try:
                 match event:
@@ -1239,9 +1273,16 @@ class BoxACPAgent:
                     case ContentEvent() if event._streaming:
                         # Stream content deltas in real-time
                         if not event._header and event.content:
+                            log.debug(
+                                "content/stream",
+                                session_id=session_id,
+                                chars=len(event.content),
+                                content=event.content,
+                            )
                             await self._send(session_id, update_agent_message(text_block(event.content)))
 
                     case ContentEvent(content=text):
+                        log.debug("content/final", session_id=session_id, chars=len(text), content=text)
                         log.debug("content", session_id=session_id, content=text)
                         await self._send(session_id, update_agent_message(text_block(text)))
 
@@ -1255,6 +1296,29 @@ class BoxACPAgent:
                         await self._send(
                             session_id,
                             update_tool_call(f"agent-progress-{s}", raw_output=payload),
+                        )
+
+                    case PlanSnapshotEvent(payload=payload):
+                        log.debug("plan/snapshot", session_id=session_id, payload=payload)
+                        plan_call_id = f"plan-snapshot-start-{uuid4().hex[:8]}"
+                        title = str((payload.get("plan") or {}).get("title") or "执行方案")
+                        await self._send(
+                            session_id,
+                            start_tool_call(
+                                plan_call_id,
+                                title,
+                                kind="execute",
+                                raw_input={"action": payload.get("action")},
+                            ),
+                        )
+                        await self._send(
+                            session_id,
+                            update_tool_call(
+                                plan_call_id,
+                                status="completed",
+                                content=[tool_content(text_block(title))],
+                                raw_output=payload,
+                            ),
                         )
 
                     case LLMOutputEvent(

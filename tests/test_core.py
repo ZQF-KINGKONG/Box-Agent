@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-
 import pytest
 
 from box_agent.core import (
@@ -17,6 +16,7 @@ from box_agent.events import (
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
+    PlanSnapshotEvent,
     ProgressEvent,
     StepEnd,
     StepStart,
@@ -171,6 +171,23 @@ class RawOutputTool(Tool):
         )
 
 
+class PlanWriteStubTool(Tool):
+    @property
+    def name(self):
+        return "plan_write"
+
+    @property
+    def description(self):
+        return "Publishes a plan"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs):
+        return ToolResult(success=True, content="plan set")
+
+
 class ModelContextTool(Tool):
     @property
     def name(self):
@@ -259,6 +276,133 @@ async def test_long_plain_answer_streams_before_finish_without_duplicate():
     content_events = [e for e in events if isinstance(e, ContentEvent)]
     assert any(e._streaming for e in content_events)
     assert "".join(e.content for e in content_events) == "".join(chunks)
+
+
+@pytest.mark.asyncio
+async def test_plan_start_snapshot_emits_before_llm_output_for_explicit_planning_request():
+    llm = MockLLM([LLMResponse(content="我来规划。", finish_reason="stop")])
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="开发一个 React 个人介绍网站，先做规划"),
+    ]
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=messages,
+            tools={"plan_write": PlanWriteStubTool()},
+            max_steps=5,
+        )
+    )
+
+    plan_index = next(i for i, event in enumerate(events) if isinstance(event, PlanSnapshotEvent))
+    content_index = next(i for i, event in enumerate(events) if isinstance(event, ContentEvent))
+    plan_event = events[plan_index]
+
+    assert plan_index < content_index
+    assert plan_event.payload["type"] == "plan_snapshot"
+    assert plan_event.payload["action"] == "start"
+    assert plan_event.payload["plan"]["status"] == "draft"
+
+
+@pytest.mark.asyncio
+async def test_plan_start_snapshot_not_emitted_without_plan_tool():
+    llm = MockLLM([LLMResponse(content="我来规划。", finish_reason="stop")])
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="开发一个 React 个人介绍网站，先做规划"),
+    ]
+
+    events = await collect(run_agent_loop(llm=llm, messages=messages, tools={}, max_steps=5))
+
+    assert not any(isinstance(event, PlanSnapshotEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_force_plan_start_snapshot_emits_without_planning_trigger():
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                finish_reason="tool",
+                tool_calls=[
+                    ToolCall(
+                        id="plan1",
+                        type="function",
+                        function=FunctionCall(
+                            name="plan_write",
+                            arguments={"action": "set", "title": "Forced plan"},
+                        ),
+                    )
+                ],
+            ),
+            LLMResponse(content="hello", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hello"),
+            ],
+            tools={"plan_write": PlanWriteStubTool()},
+            max_steps=5,
+            force_plan_start=True,
+        )
+    )
+
+    plan_events = [event for event in events if isinstance(event, PlanSnapshotEvent)]
+    assert len(plan_events) == 1
+    assert plan_events[0].payload["action"] == "start"
+    assert any(
+        isinstance(event, InjectedMessageEvent) and event.user_visible is False
+        for event in events
+    )
+    assert any(
+        isinstance(event, ToolCallStart) and event.tool_name == "plan_write"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_force_plan_start_snapshot_not_emitted_without_plan_tool():
+    llm = MockLLM([LLMResponse(content="hello", finish_reason="stop")])
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=[
+                Message(role="system", content="sys"),
+                Message(role="user", content="hello"),
+            ],
+            tools={},
+            max_steps=5,
+            force_plan_start=True,
+        )
+    )
+
+    assert not any(isinstance(event, PlanSnapshotEvent) for event in events)
+
+
+@pytest.mark.asyncio
+async def test_short_visible_text_streams_immediately_without_duplicate():
+    llm = MockLLM([LLMResponse(content="短回复", finish_reason="stop")])
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={},
+            max_steps=5,
+            session_id="sess-test",
+        )
+    )
+
+    content_events = [event for event in events if isinstance(event, ContentEvent)]
+    assert content_events == [ContentEvent(content="短回复", _streaming=True)]
+    assert "".join(event.content for event in content_events) == "短回复"
 
 
 @pytest.mark.asyncio

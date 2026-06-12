@@ -107,6 +107,78 @@ class TodoLLM:
         return LLMResponse(content="general", finish_reason="stop")
 
 
+class PlanLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="plan1",
+                        type="function",
+                        function=FunctionCall(
+                            name="plan_write",
+                            arguments={
+                                "action": "set",
+                                "title": "Plan host integration",
+                                "objective": "Render plans separately from todo progress.",
+                                "steps": [{"title": "Add plan_snapshot handling"}],
+                                "verification": ["Check rawOutput.type"],
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="general", finish_reason="stop")
+
+
+class PlanAfterRetryLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(type="text", delta="draft answer")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="plan-retry",
+                        type="function",
+                        function=FunctionCall(
+                            name="plan_write",
+                            arguments={
+                                "action": "set",
+                                "title": "Forced host plan",
+                                "objective": "Render a full plan after a forced host request.",
+                                "steps": [{"title": "Publish plan_write"}],
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="general", finish_reason="stop")
+
+
 class DoneLLM:
     async def generate_stream(self, messages, tools=None, **_):
         yield StreamEvent(type="text", delta="done")
@@ -752,6 +824,92 @@ async def test_acp_emits_todo_snapshot_raw_output(tmp_path):
         and update.update.rawOutput.get("type") == "todo_snapshot"
         and update.update.rawOutput["items"][0]["task"] == "Plan host integration"
         for update in conn.updates
+    )
+
+
+@pytest.mark.asyncio
+async def test_acp_emits_plan_snapshot_raw_output(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, PlanLLM(), [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "开发一个 React 个人介绍网站，先做规划"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    plan_update_indexes = [
+        index
+        for index, update in enumerate(conn.updates)
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+    ]
+    assert plan_update_indexes
+    first_plan_update = conn.updates[plan_update_indexes[0]].update
+    first_plan_tool_id = first_plan_update.toolCallId
+    assert first_plan_update.status == "completed"
+    assert any(
+        index < plan_update_indexes[0]
+        and getattr(update.update, "sessionUpdate", None) == "tool_call"
+        and update.update.toolCallId == first_plan_tool_id
+        for index, update in enumerate(conn.updates)
+    )
+    plan_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+    ]
+    assert plan_outputs[0]["action"] == "start"
+    assert plan_outputs[0]["plan"]["status"] == "draft"
+    assert any(
+        output.get("action") == "set"
+        and output["plan"]["title"] == "Plan host integration"
+        and output["summary"]["steps"] == 1
+        for output in plan_outputs
+    )
+
+
+@pytest.mark.asyncio
+async def test_acp_prompt_meta_force_plan_start_emits_snapshot_without_trigger(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, PlanAfterRetryLLM(), [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    response = await agent.prompt(
+        SimpleNamespace(
+            sessionId=session.sessionId,
+            prompt=[{"text": "hello"}],
+            field_meta={"forcePlanStart": True},
+        )
+    )
+
+    assert response.stopReason == "end_turn"
+    plan_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "plan_snapshot"
+    ]
+    assert plan_outputs
+    assert plan_outputs[0]["action"] == "start"
+    assert any(
+        output.get("action") == "set"
+        and output["plan"]["title"] == "Forced host plan"
+        for output in plan_outputs
     )
 
 

@@ -7,7 +7,7 @@ Box-Agent emits agent text, tool calls, and structured tool progress through ACP
 Recommended host layout:
 
 - Main conversation: assistant text, final answer, and user-visible fatal errors.
-- Tool/activity cards: tool calls, sub-agent progress, todo snapshots, artifacts, and web search metadata.
+- Tool/activity cards: tool calls, sub-agent progress, plan snapshots, todo snapshots, artifacts, and web search metadata.
 - Default collapsed details: sub-agent internals should be grouped and collapsible, not appended one-by-one as chat messages.
 
 ## Sub-agent progress
@@ -43,6 +43,85 @@ Known `event` values:
 - Other values may appear for forward compatibility; render them as low-priority detail rows.
 
 Final sub-agent summaries still arrive on the parent tool-call result (`tool_name = sub_agent`). Hosts may show the summary in the tool card, while the main conversation should wait for the parent agent's assistant message.
+
+## Plan snapshots
+
+Plan tools emit a structured, user-visible plan through tool-call result `rawOutput`. This is the proposed approach for the task, not execution progress.
+
+When the user explicitly asks to plan first, Box-Agent may emit an early skeleton before the model finishes the full `plan_write` call:
+
+```json
+{
+  "type": "plan_snapshot",
+  "version": 1,
+  "action": "start",
+  "plan": {
+    "id": "pending",
+    "title": "正在制定执行方案",
+    "objective": "根据当前请求梳理目标、范围、步骤、验证方式和风险。",
+    "scope": "",
+    "status": "draft",
+    "steps": [],
+    "verification": [],
+    "risks": [],
+    "assumptions": [],
+    "created_at": "...",
+    "updated_at": "..."
+  },
+  "summary": {
+    "steps": 0,
+    "verification": 0,
+    "risks": 0,
+    "assumptions": 0
+  }
+}
+```
+
+Hosts can force this plan flow deterministically without relying on user text heuristics by passing `_meta.forcePlanStart: true` (or `_meta.force_plan_start: true`) on `session/prompt`. The same flag can be set on `session/new` as a session default. Box-Agent emits the early `action: "start"` skeleton before the LLM call and injects hidden guidance requiring the model to publish the full plan through `plan_write`; if the model answers without a plan first, Box-Agent gives it one hidden retry before ending the turn.
+
+The full plan later replaces the skeleton with `action: "set"`:
+
+```json
+{
+  "type": "plan_snapshot",
+  "version": 1,
+  "action": "set",
+  "plan": {
+    "id": "1",
+    "title": "Plan host integration",
+    "objective": "Render plans separately from todo progress.",
+    "scope": "Box-Agent ACP payload and host rendering contract.",
+    "status": "active",
+    "steps": [
+      {
+        "id": "1",
+        "title": "Add plan_snapshot handling",
+        "details": "Dispatch by rawOutput.type."
+      }
+    ],
+    "verification": ["Check rawOutput.type in tool-call updates."],
+    "risks": ["Older runtimes do not emit plan_snapshot."],
+    "assumptions": ["Host renders structured rawOutput payloads."],
+    "created_at": "...",
+    "updated_at": "..."
+  },
+  "summary": {
+    "steps": 1,
+    "verification": 1,
+    "risks": 1,
+    "assumptions": 1
+  }
+}
+```
+
+Host behavior:
+
+- Render this as a plan/proposal panel, not as a checklist with completion state.
+- Replace the current plan state with `plan` for that session or message scope.
+- If `action` is `start`, render a draft/skeleton state and expect a later `set` to replace it.
+- If `action` is `clear` or `plan` is `null`, remove the current plan panel.
+- Treat `plan.status` as plan lifecycle (`draft`, `active`, `revised`, `complete`), not per-step progress.
+- Keep todo rendering separate; `plan_snapshot.steps` do not imply pending/in-progress/completed work.
 
 ## Todo snapshots
 
@@ -100,6 +179,11 @@ function handleToolUpdate(update: ToolCallUpdate) {
     return;
   }
 
+  if (raw && typeof raw === 'object' && raw.type === 'plan_snapshot') {
+    replacePlanSnapshot(raw.plan, raw.summary);
+    return;
+  }
+
   if (raw && typeof raw === 'object' && raw.type === 'todo_snapshot') {
     replaceTodoSnapshot(raw.items, raw.summary);
     return;
@@ -112,5 +196,6 @@ function handleToolUpdate(update: ToolCallUpdate) {
 ## Compatibility notes
 
 - Older runtimes may emit `sub_agent_progress` without `sub_agent_id`; hosts can fall back to `parent_tool_call_id + task_preview` with lower confidence.
+- Older runtimes may not emit `plan_snapshot`; hosts should keep rendering ordinary assistant text and generic tool details as fallback.
 - Older runtimes may return todo results as plain text only; hosts should keep the generic tool renderer as fallback.
 - `rawOutput.type` is the stable discriminator. Avoid title/text heuristics such as `title.includes("sub_agent")` or `rawInput.task`.

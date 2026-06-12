@@ -20,6 +20,7 @@ from box_agent.tools.image_generation_tool import GenerateImageTool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
+from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
@@ -297,6 +298,13 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         tools.append(TodoWriteTool(store))
         tools.append(TodoReadTool(store))
         _out(f"{Colors.GREEN}✅ Loaded todo tools (todo_write, todo_read){Colors.RESET}")
+
+    # Plan tool - user-visible approach/scope/verification snapshots
+    if getattr(config.tools, "enable_plan", True):
+        store = PlanStore()
+        tools.append(PlanWriteTool(store))
+        tools.append(PlanReadTool(store))
+        _out(f"{Colors.GREEN}✅ Loaded plan tools (plan_write, plan_read){Colors.RESET}")
 
     # Jupyter sandbox tool - Python code execution environment
     if sandbox_mode:

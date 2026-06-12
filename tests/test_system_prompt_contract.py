@@ -4,6 +4,8 @@ from pathlib import Path
 def test_system_prompt_keeps_todo_separate_from_factual_evidence():
     prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
 
+    assert "`plan_write` 表达“准备怎么做”" in prompt
+    assert "不是进度追踪" in prompt
     assert "todo_write` 只记录执行进度" in prompt
     assert "不是事实证据、检索策略或结论来源" in prompt
     assert "任务计划显示完成只代表步骤执行完毕，不代表事实已核实" in prompt

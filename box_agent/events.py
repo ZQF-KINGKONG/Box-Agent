@@ -73,6 +73,18 @@ class ProgressEvent:
 
 
 @dataclass(frozen=True)
+class PlanSnapshotEvent:
+    """Structured plan snapshot for host UIs.
+
+    Used for early plan placeholders before the model has produced a full
+    ``plan_write`` tool call. Hosts receive the same payload shape as the plan
+    tool's ``raw_output`` contract.
+    """
+
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class TokenUsageEvent:
     """Token usage reported by the API after an LLM call."""
 
@@ -369,6 +381,7 @@ AgentEvent = Union[
     ThinkingEvent,
     ContentEvent,
     ProgressEvent,
+    PlanSnapshotEvent,
     TokenUsageEvent,
     LLMOutputEvent,
     ToolCallStart,

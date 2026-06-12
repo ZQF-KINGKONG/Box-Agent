@@ -1,0 +1,100 @@
+"""Test cases for Plan Tool."""
+
+import pytest
+
+from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
+
+
+@pytest.fixture
+def store():
+    return PlanStore()
+
+
+@pytest.fixture
+def writer(store):
+    return PlanWriteTool(store)
+
+
+@pytest.fixture
+def reader(store):
+    return PlanReadTool(store)
+
+
+@pytest.mark.asyncio
+async def test_set_plan_snapshot(writer, reader):
+    result = await writer.execute(
+        action="set",
+        title="Host plan integration",
+        objective="Separate plan display from todo progress.",
+        scope="Box-Agent ACP payload and host rendering contract.",
+        steps=[
+            {"title": "Add plan tool", "details": "Emit plan_snapshot raw output."},
+            {"title": "Document officev3 handling"},
+        ],
+        verification=["pytest tests/test_plan_tool.py -v"],
+        risks=["Older hosts ignore plan_snapshot."],
+        assumptions=["Host dispatches by rawOutput.type."],
+    )
+
+    assert result.success
+    assert result.raw_output["type"] == "plan_snapshot"
+    assert result.raw_output["version"] == 1
+    assert result.raw_output["action"] == "set"
+    assert result.raw_output["plan"]["title"] == "Host plan integration"
+    assert result.raw_output["plan"]["steps"][0] == {
+        "id": "1",
+        "title": "Add plan tool",
+        "details": "Emit plan_snapshot raw output.",
+    }
+    assert result.raw_output["summary"] == {
+        "steps": 2,
+        "verification": 1,
+        "risks": 1,
+        "assumptions": 1,
+    }
+
+    read_result = await reader.execute()
+    assert read_result.success
+    assert read_result.raw_output["type"] == "plan_snapshot"
+    assert read_result.raw_output["plan"]["id"] == result.raw_output["plan"]["id"]
+
+
+@pytest.mark.asyncio
+async def test_set_requires_title(writer):
+    result = await writer.execute(action="set")
+
+    assert not result.success
+    assert "title" in result.error
+
+
+@pytest.mark.asyncio
+async def test_clear_plan(writer, reader):
+    await writer.execute(action="set", title="Temporary plan", steps=["Do one thing"])
+
+    result = await writer.execute(action="clear")
+
+    assert result.success
+    assert result.raw_output["type"] == "plan_snapshot"
+    assert result.raw_output["action"] == "clear"
+    assert result.raw_output["plan"] is None
+    assert result.raw_output["summary"]["steps"] == 0
+
+    read_result = await reader.execute()
+    assert read_result.raw_output["plan"] is None
+
+
+def test_plan_write_description_keeps_plan_separate_from_progress(writer):
+    description = writer.description
+
+    assert "user-visible plan" in description
+    assert "not an execution progress tracker" in description
+    assert "use todo_write separately" in description
+
+
+def test_openai_schema(writer, reader):
+    schema = writer.to_openai_schema()
+    assert schema["type"] == "function"
+    assert schema["function"]["name"] == "plan_write"
+
+    schema = reader.to_openai_schema()
+    assert schema["function"]["name"] == "plan_read"

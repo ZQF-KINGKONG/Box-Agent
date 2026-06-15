@@ -201,6 +201,45 @@ class DoneLLM:
         return LLMResponse(content="done", finish_reason="stop")
 
 
+class CaptureMessagesLLM:
+    def __init__(self):
+        self.calls: list[list[tuple[str, str]]] = []
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls.append([(msg.role, msg.content) for msg in messages])
+        yield StreamEvent(type="text", delta="done")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalCompleteLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="goal1",
+                        type="function",
+                        function=FunctionCall(name="goal_write", arguments={"action": "complete"}),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
 class PrematurePptLLM:
     def __init__(self):
         self.calls = 0
@@ -430,6 +469,131 @@ async def test_acp_turn_executes_tool(acp_agent):
     assert progress_outputs == []
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = CaptureMessagesLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(SimpleNamespace(cwd=None, field_meta={"session_mode": "general"}))
+    set_result = await agent.extMethod(
+        "goal",
+        {
+            "sessionId": session.sessionId,
+            "action": "set",
+            "objective": "Make the ACP goal flow verifiable",
+        },
+    )
+    assert set_result["ok"] is True
+    assert set_result["goal"]["status"] == "active"
+
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "continue"}]))
+
+    latest_user = [content for role, content in llm.calls[-1] if role == "user"][-1]
+    assert "## Active Goal" in latest_user
+    assert "Make the ACP goal flow verifiable" in latest_user
+    assert "## Latest User Message" in latest_user
+    assert "continue" in latest_user
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_pause_stops_prompt_injection(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = CaptureMessagesLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Keep this goal available", "status": "active"},
+            },
+        )
+    )
+    pause_result = await agent.extMethod("goal", {"sessionId": session.sessionId, "action": "pause"})
+    assert pause_result["goal"]["status"] == "paused"
+
+    await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "side question"}]))
+
+    latest_user = [content for role, content in llm.calls[-1] if role == "user"][-1]
+    assert latest_user == "side question"
+
+
+@pytest.mark.asyncio
+async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    agent = BoxACPAgent(DummyConn(), config, DoneLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {
+                    "objective": "Restore this officev3 goal",
+                    "status": "paused",
+                },
+            },
+        )
+    )
+
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.objective == "Restore this officev3 goal"
+    assert state.agent.goal.status == "paused"
+    assert session.field_meta["goal"]["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, GoalCompleteLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Let the model complete this goal", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "finish it"}]))
+
+    assert response.stopReason == "end_turn"
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "complete"
+    goal_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "goal_snapshot"
+    ]
+    assert goal_outputs
+    assert goal_outputs[-1]["action"] == "complete"
+    assert goal_outputs[-1]["goal"]["status"] == "complete"
 
 
 @pytest.mark.asyncio

@@ -311,6 +311,8 @@ def print_help():
   {Colors.BRIGHT_GREEN}/sandbox_status{Colors.RESET} - Show sandbox session status
   {Colors.BRIGHT_GREEN}/log{Colors.RESET}       - Show log directory and recent files
   {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET} - Read a specific log file
+  {Colors.BRIGHT_GREEN}/goal <objective>{Colors.RESET} - Set a durable session goal
+  {Colors.BRIGHT_GREEN}/goal{Colors.RESET}      - Show current goal (also: pause, resume, clear, complete)
   {Colors.BRIGHT_GREEN}/memory review{Colors.RESET} - 审阅可升级到核心记忆的候选条目
   {Colors.BRIGHT_GREEN}/exit{Colors.RESET}      - Exit program (also: exit, quit, q)
 
@@ -395,6 +397,73 @@ def print_stats(agent: Agent, session_start: datetime):
     if agent.api_total_tokens > 0:
         print(f"  API Tokens Used: {Colors.BRIGHT_MAGENTA}{agent.api_total_tokens:,}{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}\n")
+
+
+def print_goal_status(agent: Agent) -> None:
+    """Print the current session goal."""
+    if agent.goal is None:
+        print(f"\n{Colors.DIM}No active goal. Use /goal <objective> to set one.{Colors.RESET}\n")
+        return
+
+    status_color = {
+        "active": Colors.BRIGHT_GREEN,
+        "paused": Colors.YELLOW,
+        "complete": Colors.BRIGHT_BLUE,
+    }.get(agent.goal.status, Colors.BRIGHT_WHITE)
+    print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Current Goal:{Colors.RESET}")
+    print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}")
+    print(f"  Status   : {status_color}{agent.goal.status}{Colors.RESET}")
+    print(f"  Objective: {agent.goal.objective}")
+    print(f"  Created  : {agent.goal.created_at}")
+    print(f"  Updated  : {agent.goal.updated_at}")
+    print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}\n")
+
+
+def handle_goal_command(agent: Agent, command_line: str) -> None:
+    """Handle /goal lifecycle commands for the interactive CLI."""
+    parts = command_line.split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    if not arg or arg.lower() == "status":
+        print_goal_status(agent)
+        return
+
+    subcommand = arg.lower()
+    if subcommand == "pause":
+        if agent.pause_goal() is None:
+            print(f"{Colors.YELLOW}⚠️  No goal to pause.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.GREEN}✅ Goal paused. Use /goal resume to continue it.{Colors.RESET}\n")
+        return
+
+    if subcommand == "resume":
+        if agent.resume_goal() is None:
+            print(f"{Colors.YELLOW}⚠️  No goal to resume.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.GREEN}✅ Goal resumed.{Colors.RESET}\n")
+        return
+
+    if subcommand == "clear":
+        if agent.clear_goal() is None:
+            print(f"{Colors.YELLOW}⚠️  No goal to clear.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.GREEN}✅ Goal cleared.{Colors.RESET}\n")
+        return
+
+    if subcommand == "complete":
+        if agent.complete_goal() is None:
+            print(f"{Colors.YELLOW}⚠️  No goal to complete.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.GREEN}✅ Goal marked complete. Use /goal clear to remove it.{Colors.RESET}\n")
+        return
+
+    try:
+        goal = agent.set_goal(arg)
+    except ValueError as exc:
+        print(f"{Colors.RED}❌ {exc}{Colors.RESET}\n")
+        return
+    print(f"{Colors.GREEN}✅ Goal set:{Colors.RESET} {goal.objective}")
+    print(f"{Colors.DIM}   Future turns will include this objective until paused, completed, or cleared.{Colors.RESET}\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -1154,7 +1223,24 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     # 9. Setup prompt_toolkit session
     # Command completer
     command_completer = WordCompleter(
-        ["/help", "/clear", "/clear_all", "/history", "/stats", "/sandbox_status", "/log", "/memory", "/exit", "/quit", "/q"],
+        [
+            "/help",
+            "/clear",
+            "/clear_all",
+            "/history",
+            "/stats",
+            "/sandbox_status",
+            "/log",
+            "/goal",
+            "/goal pause",
+            "/goal resume",
+            "/goal clear",
+            "/goal complete",
+            "/memory",
+            "/exit",
+            "/quit",
+            "/q",
+        ],
         ignore_case=True,
         sentence=True,
     )
@@ -1302,6 +1388,10 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                         # /log <filename> - read specific log file
                         filename = parts[1].strip("\"'")
                         read_log_file(filename)
+                    continue
+
+                elif command == "/goal" or command.startswith("/goal "):
+                    handle_goal_command(agent, user_input)
                     continue
 
                 elif command == "/memory" or command.startswith("/memory "):

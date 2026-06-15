@@ -95,6 +95,72 @@ def test_session_history_management(mock_llm_client, temp_workspace):
     assert agent.messages[0].role == "system"
 
 
+def test_active_goal_is_injected_into_user_turn(mock_llm_client, temp_workspace):
+    """Test that an active goal is included with subsequent user messages."""
+    agent = Agent(
+        llm_client=mock_llm_client,
+        system_prompt="System",
+        tools=[],
+        workspace_dir=temp_workspace,
+    )
+
+    goal = agent.set_goal("Make the focused test suite pass")
+    assert goal.status == "active"
+
+    agent.add_user_message("Run the next check")
+
+    assert len(agent.messages) == 2
+    assert agent.messages[1].role == "user"
+    assert "## Active Goal" in agent.messages[1].content
+    assert "Make the focused test suite pass" in agent.messages[1].content
+    assert "## Latest User Message" in agent.messages[1].content
+    assert "goal_write" in agent.messages[1].content
+    assert "/goal complete" not in agent.messages[1].content
+    assert "Run the next check" in agent.messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_goal_write_tool_marks_active_goal_complete(mock_llm_client, temp_workspace):
+    """Test that the model-callable goal tool can complete an active goal."""
+    agent = Agent(
+        llm_client=mock_llm_client,
+        system_prompt="System",
+        tools=[],
+        workspace_dir=temp_workspace,
+    )
+
+    agent.set_goal("Finish without asking the user for a slash command")
+    result = await agent.tools["goal_write"].execute(action="complete")
+
+    assert result.success is True
+    assert agent.goal is not None
+    assert agent.goal.status == "complete"
+    assert result.raw_output is not None
+    assert result.raw_output["type"] == "goal_snapshot"
+    assert result.raw_output["action"] == "complete"
+    assert result.raw_output["goal"]["status"] == "complete"
+
+
+def test_paused_goal_is_not_injected_into_user_turn(mock_llm_client, temp_workspace):
+    """Test that pausing a goal stops prompt injection without deleting state."""
+    agent = Agent(
+        llm_client=mock_llm_client,
+        system_prompt="System",
+        tools=[],
+        workspace_dir=temp_workspace,
+    )
+
+    agent.set_goal("Keep investigating until verified")
+    paused = agent.pause_goal()
+    assert paused is not None
+    assert paused.status == "paused"
+
+    agent.add_user_message("Answer a side question")
+
+    assert agent.goal is paused
+    assert agent.messages[1].content == "Answer a side question"
+
+
 def test_get_history(mock_llm_client, temp_workspace):
     """Test getting session history"""
     agent = Agent(

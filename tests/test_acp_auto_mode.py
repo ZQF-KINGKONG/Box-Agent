@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -144,4 +146,51 @@ def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
     assert "优先用 `rg` 定位" in code_prompt
     assert "代码工作区就是交付位置" in code_prompt
     assert "不要默认创建或使用 `output/`" in code_prompt
+    assert "`git diff`/`git status` 失败不能当作已确认" in code_prompt
+    assert "JS 引用的 id/selector 与 HTML 一致" in code_prompt
+    assert "Project Startup Context" in code_prompt
     assert "cwd 已是 `{workspace}/output/`" not in code_prompt
+
+
+def test_code_agent_prompt_reads_workspace_agents_md(tmp_path):
+    (tmp_path / "AGENTS.md").write_text(
+        "# Project Rules\n\n- Run focused tests before reporting done.\n",
+        encoding="utf-8",
+    )
+    llm = _TrackingLLM(mode_label="general")
+    agent, _ = _make_agent(tmp_path, llm)
+    agent._system_prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    general_prompt = agent._build_session_prompt("general", workspace=tmp_path)
+    code_prompt = agent._build_session_prompt(
+        "code_agent",
+        workspace=tmp_path,
+        artifact_mode="project",
+    )
+
+    assert "Project Startup Context" not in general_prompt
+    assert "Project Instructions" in code_prompt
+    assert "AGENTS.md" in code_prompt
+    assert "Run focused tests before reporting done." in code_prompt
+    assert "project instructions apply only when they do not conflict" in code_prompt
+
+
+def test_code_agent_prompt_includes_git_status_summary(tmp_path):
+    if not shutil.which("git"):
+        pytest.skip("git is not installed")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
+
+    llm = _TrackingLLM(mode_label="general")
+    agent, _ = _make_agent(tmp_path, llm)
+    agent._system_prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    code_prompt = agent._build_session_prompt(
+        "code_agent",
+        workspace=tmp_path,
+        artifact_mode="project",
+    )
+
+    assert "Git repository: yes" in code_prompt
+    assert "Status: 1 changed entry" in code_prompt
+    assert "?? README.md" in code_prompt

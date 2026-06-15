@@ -11,6 +11,8 @@ import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +40,7 @@ from .events import (
 from .llm import LLMClient
 from .logger import AgentLogger
 from .schema import Message
-from .tools.base import Tool
+from .tools.base import Tool, ToolResult
 from .utils import calculate_display_width
 
 
@@ -67,6 +69,160 @@ class Colors:
     BRIGHT_MAGENTA = "\033[95m"
     BRIGHT_CYAN = "\033[96m"
     BRIGHT_WHITE = "\033[97m"
+
+
+@dataclass
+class GoalState:
+    """Lightweight session goal tracked by the interactive CLI."""
+
+    objective: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+def _goal_payload(goal: GoalState | None) -> dict | None:
+    if goal is None:
+        return None
+    return {
+        "objective": goal.objective,
+        "status": goal.status,
+        "createdAt": goal.created_at,
+        "updatedAt": goal.updated_at,
+    }
+
+
+def _goal_snapshot(agent: "Agent", action: str | None = None) -> dict:
+    payload = {
+        "type": "goal_snapshot",
+        "goal": _goal_payload(agent.goal),
+    }
+    if action is not None:
+        payload["action"] = action
+    return payload
+
+
+class _GoalReadTool(Tool):
+    """Read the current durable session goal."""
+
+    def __init__(self, agent: "Agent"):
+        self._agent = agent
+
+    @property
+    def name(self) -> str:
+        return "goal_read"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Read the current durable session goal. Use this to check whether a goal "
+            "is active, paused, complete, or unset before deciding whether to continue."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self) -> ToolResult:
+        goal = self._agent.goal
+        if goal is None:
+            return ToolResult(
+                success=True,
+                content="No current goal.",
+                raw_output=_goal_snapshot(self._agent),
+            )
+        return ToolResult(
+            success=True,
+            content=f"Goal is {goal.status}: {goal.objective}",
+            raw_output=_goal_snapshot(self._agent),
+        )
+
+
+class _GoalWriteTool(Tool):
+    """Update the durable session goal."""
+
+    def __init__(self, agent: "Agent"):
+        self._agent = agent
+
+    @property
+    def name(self) -> str:
+        return "goal_write"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Update the durable session goal. Call action='complete' yourself when the "
+            "active goal has been satisfied with concrete evidence; do not ask the user "
+            "to run a slash command for completion. Use set/pause/resume/clear only when "
+            "the user explicitly requests that lifecycle change."
+        )
+
+    @property
+    def parameters(self) -> dict:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["set", "pause", "resume", "complete", "clear"],
+                    "description": "Goal lifecycle operation.",
+                },
+                "objective": {
+                    "type": "string",
+                    "description": "Goal objective. Required for action='set'.",
+                },
+            },
+            "required": ["action"],
+        }
+
+    async def execute(self, action: str, objective: str | None = None) -> ToolResult:
+        action = (action or "").strip().lower()
+        if action == "set":
+            if not objective or not objective.strip():
+                return ToolResult(success=False, error="'objective' is required for set.")
+            goal = self._agent.set_goal(objective)
+            return ToolResult(
+                success=True,
+                content=f"Set goal: {goal.objective}",
+                raw_output=_goal_snapshot(self._agent, action="set"),
+            )
+
+        if action == "pause":
+            if self._agent.pause_goal() is None:
+                return ToolResult(success=False, error="No goal to pause.")
+            return ToolResult(
+                success=True,
+                content="Paused the current goal.",
+                raw_output=_goal_snapshot(self._agent, action="pause"),
+            )
+
+        if action == "resume":
+            if self._agent.resume_goal() is None:
+                return ToolResult(success=False, error="No goal to resume.")
+            return ToolResult(
+                success=True,
+                content="Resumed the current goal.",
+                raw_output=_goal_snapshot(self._agent, action="resume"),
+            )
+
+        if action == "complete":
+            if self._agent.complete_goal() is None:
+                return ToolResult(success=False, error="No goal to complete.")
+            return ToolResult(
+                success=True,
+                content="Marked the current goal complete.",
+                raw_output=_goal_snapshot(self._agent, action="complete"),
+            )
+
+        if action == "clear":
+            self._agent.clear_goal()
+            return ToolResult(
+                success=True,
+                content="Cleared the current goal.",
+                raw_output=_goal_snapshot(self._agent, action="clear"),
+            )
+
+        return ToolResult(success=False, error=f"Unknown action: {action}")
 
 
 def _format_size(n: int) -> str:
@@ -139,10 +295,77 @@ class Agent:
         self.logger = AgentLogger()
         self.api_total_tokens: int = 0
         self._streaming_active: bool = False  # Track if streaming output needs trailing newline
+        self.goal: GoalState | None = None
+        self.tools["goal_read"] = _GoalReadTool(self)
+        self.tools["goal_write"] = _GoalWriteTool(self)
 
     def add_user_message(self, content: str):
         """Add a user message to history."""
+        if self.goal is not None and self.goal.status == "active":
+            content = self._apply_goal_context(content)
         self.messages.append(Message(role="user", content=content))
+
+    def set_goal(self, objective: str) -> GoalState:
+        """Set or replace the current session goal."""
+        objective = objective.strip()
+        if not objective:
+            raise ValueError("Goal objective cannot be empty.")
+        now = datetime.now().isoformat()
+        self.goal = GoalState(
+            objective=objective,
+            status="active",
+            created_at=now,
+            updated_at=now,
+        )
+        return self.goal
+
+    def pause_goal(self) -> GoalState | None:
+        """Pause the current goal, if one exists."""
+        if self.goal is None:
+            return None
+        self.goal.status = "paused"
+        self.goal.updated_at = datetime.now().isoformat()
+        return self.goal
+
+    def resume_goal(self) -> GoalState | None:
+        """Resume the current goal, if one exists."""
+        if self.goal is None:
+            return None
+        self.goal.status = "active"
+        self.goal.updated_at = datetime.now().isoformat()
+        return self.goal
+
+    def complete_goal(self) -> GoalState | None:
+        """Mark the current goal complete, if one exists."""
+        if self.goal is None:
+            return None
+        self.goal.status = "complete"
+        self.goal.updated_at = datetime.now().isoformat()
+        return self.goal
+
+    def clear_goal(self) -> GoalState | None:
+        """Clear the current goal and return the removed state."""
+        old_goal = self.goal
+        self.goal = None
+        return old_goal
+
+    def _apply_goal_context(self, user_content: str) -> str:
+        goal = self.goal
+        if goal is None:
+            return user_content
+        return (
+            "## Active Goal\n"
+            f"Objective: {goal.objective}\n\n"
+            "Work toward this durable goal across turns. Treat completion as evidence-based: "
+            "verify the objective against concrete files, tests, logs, command output, or artifacts "
+            "before saying it is done. Keep changes scoped to the goal and the user's latest message. "
+            "If the goal is satisfied, call `goal_write` with action `complete` before your final "
+            "answer, then state the evidence that proves completion. Do not ask the user to run "
+            "a slash command for this. If blocked, explain the blocker and the smallest input "
+            "that would unlock progress.\n\n"
+            "## Latest User Message\n"
+            f"{user_content}"
+        )
 
     def inject(self, content: str) -> None:
         """Inject a user message into the running agent loop.

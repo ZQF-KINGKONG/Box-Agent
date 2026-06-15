@@ -99,6 +99,7 @@ from box_agent.acp.action_hints import (
     is_playwright_unavailable,
 )
 from box_agent.acp.env_context import EnvContext, build_env_context_prompt
+from box_agent.acp.project_context import build_project_startup_context_prompt
 from box_agent.experts import ExpertSessionContext
 from box_agent.memory import MemoryManager
 from box_agent.retry import RetryConfig as RetryConfigBase
@@ -205,6 +206,38 @@ def _normalize_artifact_mode(meta: Any) -> str:
         if isinstance(value, str) and value.strip().lower() == "project":
             return "project"
     return "output"
+
+
+def _goal_payload(agent: Agent) -> dict[str, Any] | None:
+    goal = agent.goal
+    if goal is None:
+        return None
+    return {
+        "objective": goal.objective,
+        "status": goal.status,
+        "createdAt": goal.created_at,
+        "updatedAt": goal.updated_at,
+    }
+
+
+def _goal_request_from_meta(meta: Any) -> dict[str, Any] | None:
+    if not isinstance(meta, dict):
+        return None
+
+    raw_goal = meta.get("goal")
+    if isinstance(raw_goal, str):
+        objective = raw_goal.strip()
+        return {"action": "set", "objective": objective} if objective else None
+    if isinstance(raw_goal, dict):
+        request = dict(raw_goal)
+        if "action" not in request and isinstance(request.get("objective"), str):
+            request["action"] = "set"
+        return request
+
+    raw_objective = meta.get("goal_objective") or meta.get("goalObjective")
+    if isinstance(raw_objective, str) and raw_objective.strip():
+        return {"action": "set", "objective": raw_objective.strip()}
+    return None
 
 
 def _tool_result_raw_output(
@@ -437,6 +470,7 @@ class BoxACPAgent:
         upstream_session_id = ""
         force_plan_start = False
         artifact_mode = "output"
+        initial_goal_request: dict[str, Any] | None = None
         # Lightweight one-shot utility session (e.g. host-side title/tag
         # generation). When set, the session carries no tools, skips memory
         # recall injection, and skips auto memory-extraction — it is a pure
@@ -449,6 +483,7 @@ class BoxACPAgent:
             utility = bool(meta.get("utility", False))
             force_plan_start = _meta_bool(meta, "force_plan_start", "forcePlanStart")
             artifact_mode = _normalize_artifact_mode(meta)
+            initial_goal_request = _goal_request_from_meta(meta)
             env_context = EnvContext.from_meta(meta.get("env_context"))
             expert_context = ExpertSessionContext.from_meta(meta)
             # Caller-owned session id (e.g. officev3 chat session id). Forwarded
@@ -611,6 +646,22 @@ class BoxACPAgent:
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
         )
 
+        if initial_goal_request is not None:
+            goal_result = self._apply_goal_action(agent, initial_goal_request)
+            if "error" in goal_result:
+                log.warn(
+                    "session/goal_init_error",
+                    session_id=session_id,
+                    message=str(goal_result["error"]),
+                )
+            else:
+                goal_payload = goal_result.get("goal") or {}
+                log.info(
+                    "session/goal_init",
+                    session_id=session_id,
+                    status=goal_payload.get("status"),
+                )
+
         # Canonical artifact directory is only part of output mode. Existing
         # project workspaces are edited in place and must not get an implicit
         # output/ directory.
@@ -675,6 +726,8 @@ class BoxACPAgent:
             response_meta["expert_context"] = expert_context.to_metadata()
         if artifact_mode == "project":
             response_meta["artifact_mode"] = artifact_mode
+        if agent.goal is not None:
+            response_meta["goal"] = _goal_payload(agent)
         if response_meta:
             kwargs["field_meta"] = response_meta
         return NewSessionResponse(**kwargs)
@@ -778,6 +831,9 @@ class BoxACPAgent:
         if workspace is not None:
             base_prompt = f"{base_prompt.rstrip()}\n\n{self._filesystem_access_prompt(workspace, policy)}"
 
+        if session_mode == "code_agent" and workspace is not None:
+            base_prompt = f"{base_prompt.rstrip()}\n\n{build_project_startup_context_prompt(workspace)}"
+
         env_prompt = build_env_context_prompt(env_context)
         if env_prompt:
             base_prompt = f"{base_prompt.rstrip()}\n\n{env_prompt}"
@@ -834,6 +890,21 @@ class BoxACPAgent:
             "force_plan_start",
             "forcePlanStart",
         )
+        prompt_goal_request = _goal_request_from_meta(prompt_meta)
+        if prompt_goal_request is not None:
+            goal_result = self._apply_goal_action(state.agent, prompt_goal_request)
+            if "error" in goal_result:
+                log.warn(
+                    "session/goal_prompt_error",
+                    session_id=session_id,
+                    message=str(goal_result["error"]),
+                )
+            else:
+                log.info(
+                    "session/goal_prompt",
+                    session_id=session_id,
+                    status=(goal_result.get("goal") or {}).get("status"),
+                )
 
         log.info(
             "session/prompt",
@@ -888,7 +959,7 @@ class BoxACPAgent:
             except Exception as exc:
                 log.warn("mcp/lazy_load_error", session_id=session_id, message=str(exc))
 
-        state.agent.messages.append(Message(role="user", content=user_text))
+        state.agent.add_user_message(user_text)
 
         # Drain any stale injections from a previous turn
         while not state.inject_queue.empty():
@@ -958,6 +1029,56 @@ class BoxACPAgent:
             state.cancelled = True
             log.info("session/cancel", session_id=params.sessionId, message="Cancel requested")
 
+    def _apply_goal_action(self, agent: Agent, params: dict[str, Any]) -> dict[str, Any]:
+        action = str(params.get("action") or "get").strip().lower()
+        if action == "status":
+            action = "get"
+        if action == "create":
+            action = "set"
+
+        if action == "get":
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "set":
+            objective = params.get("objective")
+            if not isinstance(objective, str) or not objective.strip():
+                return {"error": "empty_objective"}
+            try:
+                agent.set_goal(objective)
+            except ValueError:
+                return {"error": "empty_objective"}
+
+            raw_status = params.get("status")
+            status = raw_status.strip().lower() if isinstance(raw_status, str) else "active"
+            if status == "paused":
+                agent.pause_goal()
+            elif status == "complete":
+                agent.complete_goal()
+            elif status not in ("", "active"):
+                return {"error": f"invalid_status: {status}"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "pause":
+            if agent.pause_goal() is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "resume":
+            if agent.resume_goal() is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "complete":
+            if agent.complete_goal() is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "clear":
+            agent.clear_goal()
+            return {"ok": True, "goal": None}
+
+        return {"error": f"unknown_action: {action}"}
+
     async def extMethod(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle custom ACP extension methods (called as ``_<method>``)."""
         if method == "inject":
@@ -1019,6 +1140,20 @@ class BoxACPAgent:
                 return {"skills": []}
             log.info("skills/list", count=len(skills))
             return {"skills": skills}
+        if method == "goal":
+            session_id = params.get("sessionId", "")
+            state = self._sessions.get(session_id)
+            if not state:
+                return {"error": "session_not_found"}
+            result = self._apply_goal_action(state.agent, params)
+            log.info(
+                "session/goal",
+                session_id=session_id,
+                action=str(params.get("action") or "get"),
+                status=(result.get("goal") or {}).get("status") if isinstance(result.get("goal"), dict) else None,
+                error=result.get("error"),
+            )
+            return result
         if method == "memory_proposal_list":
             return await self._memory_proposal_list(params)
         if method == "memory_proposal_apply":

@@ -220,7 +220,9 @@ Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (s
 
 **ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to the same `~/.box-agent/browsers/` path. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp` (our setdefault won't override it).
 
-In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/exit`
+In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/goal`, `/exit`
+
+Use `/goal <objective>` to keep a durable objective attached to the session. Later turns include that goal until you run `/goal pause`, `/goal resume`, `/goal complete`, or `/goal clear`.
 
 ## ACP & Editor Integration
 

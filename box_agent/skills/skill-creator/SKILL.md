@@ -1,6 +1,6 @@
 ---
 name: skill-creator
-description: Create and refine Codex skills. Use when designing a new skill, rewriting an existing skill, choosing trigger wording, deciding folder structure, adding references or scripts, or validating that a skill is concise, discoverable, and portable across macOS, Windows, and Linux.
+description: Create and refine Codex skill files after the skill architecture is clear. Use when writing or editing SKILL.md, references, scripts, templates, trigger wording, or validating that an existing skill package is concise, discoverable, and portable across macOS, Windows, and Linux. For deciding single skill vs skill suite vs expert/team architecture first, use skill-architect.
 keywords: [skill, codex skill, 创建skill, 技能开发, 写skill]
 ---
 
@@ -81,3 +81,12 @@ When drafting a new skill, produce:
 3. `SKILL.md`
 4. any required references or scripts
 5. validation notes
+
+## Relationship to skill-architect
+
+Use `skill-architect` before this skill when the user is still deciding whether the capability
+should be a single skill, a skill suite, an expert, an expert team, or a hybrid pipeline.
+
+Use this skill after that decision to write, edit, or validate the actual skill package files. If
+the user provides an Office Raccoon `skill-blueprint`, preserve the chosen architecture and focus on
+making the files concise, portable, and valid.

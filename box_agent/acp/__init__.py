@@ -12,13 +12,11 @@ checks at step boundaries (top of step, before tools, after each tool).
 There is no preemptive kill; a long-running LLM call or tool execution
 will finish before cancellation is observed.
 
-**Safety confirmation**: NOT yet protocol-aware.  BashTool's
-``ask_user_confirmation()`` calls ``input()`` which blocks forever in
-a non-interactive ACP process.  As a workaround, ACP sessions are
-created with ``non_interactive=True``, which causes dangerous commands
-to be **rejected outright** instead of prompting.  A future phase will
-yield ``ConfirmationRequired`` events so the ACP client can present
-its own confirmation UI.
+**Safety confirmation**: protocol-aware. Dangerous commands return a
+canonical permission request with ``scope="safety"``. The shared core
+uses the same in-band ``session/request_permission`` reverse RPC as
+filesystem and memory escalation, then retries the tool only if the
+host explicitly approves.
 
 **Sandbox**: Enabled by default for ACP sessions.  Each session gets
 a stable ``sandbox_workspace`` path (``{workspace}/sandbox/``) that
@@ -64,9 +62,9 @@ from box_agent import __version__
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
 from box_agent.agent import Agent
 from box_agent.tools.setup import (
-    SANDBOX_INFO_PROMPT,
     add_workspace_tools,
     await_mcp_tools,
+    build_sandbox_info_prompt,
     initialize_base_tools,
     merge_mcp_tools,
     register_mcp_tools,
@@ -201,6 +199,30 @@ def _meta_bool(meta: Any, *keys: str) -> bool:
     return any(bool(meta.get(key, False)) for key in keys)
 
 
+def _normalize_artifact_mode(meta: Any) -> str:
+    if isinstance(meta, dict):
+        value = meta.get("artifact_mode") or meta.get("artifactMode")
+        if isinstance(value, str) and value.strip().lower() == "project":
+            return "project"
+    return "output"
+
+
+def _tool_result_raw_output(
+    raw_output: Any,
+    result_text: str,
+    policy_decision: dict[str, Any] | None,
+) -> Any:
+    if policy_decision is None:
+        return raw_output if isinstance(raw_output, dict) else result_text
+    if isinstance(raw_output, dict):
+        return {**raw_output, "policy_decision": policy_decision}
+    return {
+        "type": "tool_result",
+        "text": result_text,
+        "policy_decision": policy_decision,
+    }
+
+
 _DELIVERABLE_INTENT_KEYWORDS: tuple[str, ...] = (
     "做一份",
     "做一个",
@@ -274,6 +296,7 @@ class SessionState:
     agent: Agent
     cancelled: bool = False
     output_dir: str | None = None  # ``{workspace}/output/`` — the canonical artifact root
+    artifact_mode: str = "output"
     session_mode: str | None = None  # e.g. "data_analysis" for /analysis pages
     permission_engine: PermissionEngine | None = None
     grant_store: GrantStore | None = None  # in-band permission grants
@@ -413,6 +436,7 @@ class BoxACPAgent:
         expert_context: ExpertSessionContext | None = None
         upstream_session_id = ""
         force_plan_start = False
+        artifact_mode = "output"
         # Lightweight one-shot utility session (e.g. host-side title/tag
         # generation). When set, the session carries no tools, skips memory
         # recall injection, and skips auto memory-extraction — it is a pure
@@ -424,6 +448,7 @@ class BoxACPAgent:
             deep_think = bool(meta.get("deep_think", False))
             utility = bool(meta.get("utility", False))
             force_plan_start = _meta_bool(meta, "force_plan_start", "forcePlanStart")
+            artifact_mode = _normalize_artifact_mode(meta)
             env_context = EnvContext.from_meta(meta.get("env_context"))
             expert_context = ExpertSessionContext.from_meta(meta)
             # Caller-owned session id (e.g. officev3 chat session id). Forwarded
@@ -439,14 +464,15 @@ class BoxACPAgent:
             session_id=session_id,
             message=(
                 f"Creating session, workspace={workspace}, session_mode={session_mode}, "
-                f"deep_think={deep_think}, force_plan_start={force_plan_start}, "
+                f"artifact_mode={artifact_mode}, deep_think={deep_think}, "
+                f"force_plan_start={force_plan_start}, "
                 f"expert={expert_context.to_metadata() if expert_context else None}"
             ),
         )
 
         # Build PermissionEngine via policy composition if officev3 block is configured
         perm_engine = None
-        grant_store = None
+        grant_store = GrantStore()
         effective_policy: CapabilityPolicy | None = None
         if self._has_officev3_policy():
             try:
@@ -498,7 +524,6 @@ class BoxACPAgent:
 
                 effective_policy = base_policy
 
-                grant_store = GrantStore()
                 perm_engine = PermissionEngine(effective_policy, workspace, grant_store=grant_store)
                 log.info("session/permissions", session_id=session_id,
                          message=f"PermissionEngine created: scope={effective_policy.filesystem_scope}, "
@@ -512,7 +537,6 @@ class BoxACPAgent:
                     session_workspace_root=str(workspace),
                 )
                 effective_policy = fallback_policy
-                grant_store = GrantStore()
                 perm_engine = PermissionEngine(fallback_policy, workspace, grant_store=grant_store)
 
         skill_runtime_context = build_skill_runtime_context(
@@ -528,6 +552,7 @@ class BoxACPAgent:
             env_context=env_context,
             skill_runtime_context=skill_runtime_context,
             expert_context=expert_context,
+            artifact_mode=artifact_mode,
         )
 
         # Inject memory context (skipped for lightweight utility sessions)
@@ -570,6 +595,7 @@ class BoxACPAgent:
                 llm=self._llm,
                 permission_engine=perm_engine,
                 skill_runtime_context=skill_runtime_context,
+                use_output_dir=artifact_mode != "project",
             )
         agent = Agent(
             llm_client=self._llm,
@@ -585,10 +611,13 @@ class BoxACPAgent:
             memory_promotion_cooldown_days=self._config.agent.memory_promotion_cooldown_days,
         )
 
-        # Canonical artifact directory (created eagerly so write tools and the
-        # sandbox kernel can chdir into it without race conditions).
-        from box_agent.core import ensure_output_dir
-        output_dir = str(ensure_output_dir(workspace))
+        # Canonical artifact directory is only part of output mode. Existing
+        # project workspaces are edited in place and must not get an implicit
+        # output/ directory.
+        output_dir: str | None = None
+        if artifact_mode != "project":
+            from box_agent.core import ensure_output_dir
+            output_dir = str(ensure_output_dir(workspace))
 
         # Per-session MemoryExtractor to avoid cross-session state leaks
         session_extractor = None
@@ -604,6 +633,7 @@ class BoxACPAgent:
 
         self._sessions[session_id] = SessionState(
             agent=agent, output_dir=output_dir, session_mode=session_mode,
+            artifact_mode=artifact_mode,
             permission_engine=perm_engine, grant_store=grant_store,
             memory_extractor=session_extractor,
             memory_block=memory_block,
@@ -643,6 +673,8 @@ class BoxACPAgent:
             response_meta["skills"] = skills
         if expert_context is not None:
             response_meta["expert_context"] = expert_context.to_metadata()
+        if artifact_mode == "project":
+            response_meta["artifact_mode"] = artifact_mode
         if response_meta:
             kwargs["field_meta"] = response_meta
         return NewSessionResponse(**kwargs)
@@ -722,13 +754,27 @@ class BoxACPAgent:
         env_context: EnvContext | None = None,
         skill_runtime_context: SkillRuntimeContext | None = None,
         expert_context: ExpertSessionContext | None = None,
+        artifact_mode: str = "output",
     ) -> str:
         """Build system prompt with conditional mode-specific injection."""
         _MODE_PROMPT_MAP = {
             "data_analysis": "analysis_prompt_path",
+            "code_agent": "code_prompt_path",
         }
 
-        base_prompt = self._system_prompt
+        use_output_dir = artifact_mode != "project"
+        base_prompt = self._system_prompt.replace(
+            "{SANDBOX_INFO}",
+            build_sandbox_info_prompt(use_output_dir=use_output_dir),
+        )
+        if artifact_mode == "project":
+            project_mode_prompt = (
+                "## Project Workspace Mode\n"
+                "- This session is editing an existing code/project workspace.\n"
+                "- Do not create or use an `output/` folder unless the user explicitly asks for one.\n"
+                "- Treat file edits, generated source files, tests, and build results in the project tree as the deliverable."
+            )
+            base_prompt = f"{base_prompt.rstrip()}\n\n{project_mode_prompt}"
         if workspace is not None:
             base_prompt = f"{base_prompt.rstrip()}\n\n{self._filesystem_access_prompt(workspace, policy)}"
 
@@ -851,7 +897,11 @@ class BoxACPAgent:
         # Reset per-turn inject dedup — IDs are only meaningful within a turn.
         state.seen_injection_ids.clear()
 
-        completion_gate = _build_auto_completion_gate(user_text, state.agent.workspace_dir)
+        completion_gate = (
+            None
+            if state.artifact_mode == "project"
+            else _build_auto_completion_gate(user_text, state.agent.workspace_dir)
+        )
         if completion_gate is not None:
             log.info(
                 "completion_gate/enabled",
@@ -1296,7 +1346,7 @@ class BoxACPAgent:
 
         # Build permission negotiator if engine is available
         negotiator = None
-        if state.permission_engine and state.grant_store:
+        if state.grant_store:
             negotiator = _PermissionNegotiator(
                 conn=self._conn,
                 session_id=session_id,
@@ -1337,6 +1387,7 @@ class BoxACPAgent:
             session_id=state.upstream_session_id,
             force_plan_start=force_plan_start,
             completion_gate=completion_gate,
+            artifact_detection_enabled=state.artifact_mode != "project",
         ):
             try:
                 match event:
@@ -1456,7 +1507,16 @@ class BoxACPAgent:
                             label = f"🔧 {name}({args_preview})" if args_preview else f"🔧 {name}()"
                         await self._send(session_id, start_tool_call(tid, label, kind="execute", raw_input=args))
 
-                    case ToolCallResultEvent(tool_call_id=tid, tool_name=tname, success=ok, content=text, error=err, raw_output=raw_output, user_visible=user_visible):
+                    case ToolCallResultEvent(
+                        tool_call_id=tid,
+                        tool_name=tname,
+                        success=ok,
+                        content=text,
+                        error=err,
+                        raw_output=raw_output,
+                        user_visible=user_visible,
+                        policy_decision=policy_decision,
+                    ):
                         if ok:
                             log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text, user_visible=user_visible)
                         else:
@@ -1466,7 +1526,7 @@ class BoxACPAgent:
                         status = "completed" if ok else "failed"
                         prefix = "[OK]" if ok else "[ERROR]"
                         result_text = f"{prefix} {text if ok else err or 'Tool execution failed'}"
-                        output = raw_output if isinstance(raw_output, dict) else result_text
+                        output = _tool_result_raw_output(raw_output, result_text, policy_decision)
                         await self._send(
                             session_id,
                             update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output),
@@ -1627,7 +1687,8 @@ class _PermissionNegotiator:
     """In-band permission negotiation via ACP ``session/request_permission`` reverse RPC.
 
     Wraps the ACP ``AgentSideConnection.requestPermission()`` call with:
-    - Grant-table deduplication (same scope only asked once per prompt)
+    - Grant-table deduplication for filesystem/memory escalation
+    - One-shot, non-cached approval for safety confirmations
     - 120-second timeout (timeout treated as denial)
     - Grant-scope mapping: optionId → "prompt" or "session"
     """
@@ -1652,9 +1713,12 @@ class _PermissionNegotiator:
         scope = permission_request.get("scope", "")
         requested_scope = permission_request.get("requested_scope", "")
         path_hint = permission_request.get("path", "")
+        is_safety_request = scope == "safety"
 
         # Dedup: filesystem requests check the directory grant table; other
         # capabilities (memory) use the legacy (scope, requested_scope) key.
+        # Safety requests are intentionally never cached: every dangerous
+        # command needs an explicit one-shot decision.
         if scope == "filesystem" and path_hint:
             try:
                 target = Path(path_hint).expanduser().resolve()
@@ -1668,7 +1732,7 @@ class _PermissionNegotiator:
                     message="Filesystem dir grant hit — skipping RPC",
                 )
                 return True
-        elif self._store.has_grant(scope, requested_scope):
+        elif not is_safety_request and self._store.has_grant(scope, requested_scope):
             log.info(
                 "permission/grant_hit",
                 scope=scope,
@@ -1687,15 +1751,25 @@ class _PermissionNegotiator:
 
         reason = permission_request.get("reason", "")
         description = reason + (f": {path_hint}" if path_hint else "")
+        temporary_supported = permission_request.get("temporary_supported", True) is not False
+        persistent_supported = permission_request.get("persistent_supported", True) is not False
         tool_call = ToolCall(
             toolCallId=f"perm-{scope}-{requested_scope}",
             rawInput=permission_request,
         )
-        options = [
-            PermissionOption(optionId="approve", name="仅本次允许", kind="allow_once"),
-            PermissionOption(optionId="approve_session", name="始终允许", kind="allow_always"),
-            PermissionOption(optionId="reject", name="拒绝", kind="reject_once"),
-        ]
+        options = []
+        if temporary_supported:
+            options.append(PermissionOption(optionId="approve", name="仅本次允许", kind="allow_once"))
+        if persistent_supported:
+            persistent_name = permission_request.get("persistent_label") or "始终允许"
+            options.append(
+                PermissionOption(
+                    optionId="approve_session",
+                    name=str(persistent_name),
+                    kind="allow_always",
+                )
+            )
+        options.append(PermissionOption(optionId="reject", name="拒绝", kind="reject_once"))
         request = RequestPermissionRequest(
             sessionId=self._session_id,
             toolCall=tool_call,
@@ -1732,7 +1806,22 @@ class _PermissionNegotiator:
             return False
 
         if isinstance(response.outcome, AllowedOutcome):
+            if response.outcome.optionId == "reject":
+                log.info(
+                    "permission/denied",
+                    scope=scope,
+                    requested_scope=requested_scope,
+                )
+                return False
             grant_scope = self._OPTION_TO_SCOPE.get(response.outcome.optionId, "prompt")
+            if is_safety_request:
+                log.info(
+                    "permission/granted",
+                    scope=scope,
+                    requested_scope=requested_scope,
+                    grant_scope="one_shot",
+                )
+                return True
             if scope == "filesystem" and path_hint:
                 # Record at directory granularity. Use the path itself when it
                 # is already a directory; otherwise fall back to its parent.
@@ -2059,8 +2148,8 @@ async def run_acp_server(config: Config | None = None) -> None:
         else:
             system_prompt = "You are a helpful AI assistant."
 
-        # Inject SANDBOX_INFO (ACP always enables sandbox)
-        system_prompt = system_prompt.replace("{SANDBOX_INFO}", SANDBOX_INFO_PROMPT)
+        # SANDBOX_INFO is injected per session because officev3 can mark an ACP
+        # session as an existing project workspace instead of output-artifact mode.
 
         # NOTE: actual skill list is injected per-turn via SkillSelector
         # (keyword-filtered against the cumulative user query). Here we keep a

@@ -988,9 +988,14 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     # Build PermissionEngine + GrantStore for CLI (parity with ACP)
     perm_engine = None
     grant_store = None
-    if not allow_full_access:
-        from box_agent.tools.permissions import CapabilityPolicy, GrantStore, PermissionEngine
+    if not non_interactive:
+        from box_agent.tools.permissions import GrantStore
         grant_store = GrantStore()
+    if not allow_full_access:
+        from box_agent.tools.permissions import CapabilityPolicy, PermissionEngine
+        if grant_store is None:
+            from box_agent.tools.permissions import GrantStore
+            grant_store = GrantStore()
         # Honor officev3.permissions.filesystem (scope + allowed_directories)
         # when the block is present — same code path the ACP server uses.
         # Otherwise fall back to a default session_workspace policy rooted at
@@ -1018,7 +1023,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     if not allow_full_access:
         print(f"{Colors.YELLOW}🔒 Safety mode: tools restricted to workspace ({workspace_dir}){Colors.RESET}")
     if non_interactive:
-        print(f"{Colors.YELLOW}🔒 Non-interactive mode: dangerous commands will be rejected{Colors.RESET}")
+        print(f"{Colors.YELLOW}🔒 Non-interactive mode: commands requiring safety approval will be rejected{Colors.RESET}")
 
     # 5. Load System Prompt (with priority search)
     system_prompt_path = Config.find_config_file(config.agent.system_prompt_path)

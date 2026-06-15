@@ -115,6 +115,30 @@ _FORCED_PLAN_RETRY_GUIDANCE = (
     "Call `plan_write` with action `set` now before continuing the answer."
 )
 
+FINAL_SUMMARY_TOOL_CALL_THRESHOLD: Final[int] = 10
+
+
+def final_summary_wrapup_text(tool_call_count: int) -> str:
+    return (
+        "This turn has used many visible tool calls "
+        f"({tool_call_count}, threshold {FINAL_SUMMARY_TOOL_CALL_THRESHOLD}). "
+        "Keep continuing only if a required deliverable is still incomplete. "
+        "When you are ready to stop, the final user-visible response must be a concise conclusion, "
+        "not a process log: state the result, list created/changed files or concrete outputs when relevant, "
+        "mention only important caveats, and give the next action if one is needed. "
+        "Do not enumerate every tool call."
+    )
+
+
+def final_summary_empty_retry_text(tool_call_count: int) -> str:
+    return (
+        "The previous natural end produced no visible final answer after a long tool-heavy turn "
+        f"({tool_call_count} visible tool calls). "
+        "Answer the user now with a concise final conclusion. Do not call tools unless the task is impossible "
+        "to summarize without one."
+    )
+
+
 # Regex to match file references like [foo.png] in tool output.
 _ARTIFACT_REF_RE = re.compile(r"\[([^\]\n]+\.\w{1,10})\]", re.IGNORECASE)
 
@@ -543,6 +567,63 @@ def _tool_message_content_for_model(
         content=visible_content,
     )
     return _strip_plot_data(compacted)
+
+
+def _permission_event_kwargs(permission_request: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a tool permission_request dict for PermissionRequestEvent."""
+    temporary_supported = permission_request.get("temporary_supported")
+    persistent_supported = permission_request.get("persistent_supported")
+    return {
+        "scope": str(permission_request.get("scope") or ""),
+        "requested_scope": str(permission_request.get("requested_scope") or ""),
+        "reason": str(permission_request.get("reason") or ""),
+        "path": str(permission_request.get("path") or ""),
+        "temporary_supported": (
+            True if temporary_supported is None else bool(temporary_supported)
+        ),
+        "persistent_supported": (
+            True if persistent_supported is None else bool(persistent_supported)
+        ),
+        "persistent_label": str(permission_request.get("persistent_label") or ""),
+        "command": str(permission_request.get("command") or ""),
+        "risk": str(permission_request.get("risk") or ""),
+    }
+
+
+def _approve_tool_permission(tool: Tool, permission_request: dict[str, Any]) -> None:
+    """Let a tool consume one-shot approval state before core retries it."""
+    approver = getattr(tool, "approve_permission_request", None)
+    if not callable(approver):
+        return
+    try:
+        approver(permission_request)
+    except Exception as exc:
+        _log.warning(
+            "tool/permission_approval_hook_failed tool=%s error=%s",
+            getattr(tool, "name", type(tool).__name__),
+            exc,
+        )
+
+
+def _policy_decision_payload(
+    *,
+    tool_name: str,
+    permission_request: dict[str, Any],
+    decision: str,
+    retry_count: int = 0,
+    error: str = "",
+) -> dict[str, Any]:
+    """Build a host-facing policy decision payload for a permission request."""
+    payload = {
+        "type": "policy_decision",
+        "tool_name": tool_name,
+        "decision": decision,
+        "retry_count": retry_count,
+        **_permission_event_kwargs(permission_request),
+    }
+    if error:
+        payload["error"] = error
+    return payload
 
 
 def _extract_web_search_payload(tool_name: str, content: str) -> dict[str, Any] | None:
@@ -1342,6 +1423,7 @@ async def run_agent_loop(
     no_progress_limit: int | None = None,
     max_parallel_tools: int = 8,
     completion_gate: CompletionGate | None = None,
+    artifact_detection_enabled: bool = True,
 ) -> AsyncIterator[AgentEvent]:
     """Execute the agent loop, yielding structured events.
 
@@ -1379,6 +1461,9 @@ async def run_agent_loop(
             When present, queued user messages are drained at each
             step boundary and appended to the conversation before
             the next LLM call.
+        artifact_detection_enabled: If False, skip output-directory artifact
+            snapshotting and detection for sessions that edit an existing
+            project tree directly.
     """
     cancelled = is_cancelled or (lambda: False)
     hook_mgr = HookManager(hooks)
@@ -1520,6 +1605,9 @@ async def run_agent_loop(
     # valid while nudging the model to synthesize.
     tool_call_counts: dict[str, int] = {}
     tool_budget_wrapup_injected: set[str] = set()
+    visible_tool_call_total = 0
+    final_summary_guidance_injected = False
+    final_summary_empty_retry_injected = False
     web_search_seen_queries: set[str] = set()
     web_search_seen_result_keys: set[str] = set()
     web_search_unique_results = 0
@@ -1922,6 +2010,31 @@ async def run_agent_loop(
                     yield StepEnd(step=step + 1, elapsed_seconds=elapsed, total_elapsed_seconds=total)
                     continue
 
+            if (
+                visible_tool_call_total > FINAL_SUMMARY_TOOL_CALL_THRESHOLD
+                and final_summary_guidance_injected
+                and not final_summary_empty_retry_injected
+                and not response.content.strip()
+            ):
+                final_summary_empty_retry_injected = True
+                retry_text = final_summary_empty_retry_text(visible_tool_call_total)
+                messages.append(Message(role="user", content=format_injected_message(retry_text)))
+                yield InjectedMessageEvent(content=retry_text, injection_id=None, user_visible=False)
+                elapsed = perf_counter() - step_start
+                total = perf_counter() - run_start
+                if hook_mgr.hooks:
+                    await hook_mgr.fire_step_end(
+                        step=step + 1,
+                        elapsed_seconds=elapsed,
+                        total_elapsed_seconds=total,
+                    )
+                yield StepEnd(
+                    step=step + 1,
+                    elapsed_seconds=elapsed,
+                    total_elapsed_seconds=total,
+                )
+                continue
+
             elapsed = perf_counter() - step_start
             total = perf_counter() - run_start
             if hook_mgr.hooks:
@@ -2042,6 +2155,8 @@ async def run_agent_loop(
             else:
                 allowed_to_execute, internal_skip_error = _reserve_tool_budget(fn_name)
             tool_user_visible = allowed_to_execute
+            if tool_user_visible:
+                visible_tool_call_total += 1
 
             yield ToolCallStart(
                 tool_call_id=tc_id,
@@ -2058,7 +2173,7 @@ async def run_agent_loop(
 
             # Snapshot workspace before tool execution for diff-based artifact detection
             pre_files: set[Path] = set()
-            if tool_user_visible and workspace_dir:
+            if artifact_detection_enabled and tool_user_visible and workspace_dir:
                 pre_files = _snapshot_workspace(workspace_dir)
 
             if not allowed_to_execute:
@@ -2116,6 +2231,7 @@ async def run_agent_loop(
                             error=f"Tool execution failed: {detail}\n\nTraceback:\n{trace}",
                         )
 
+            policy_decision: dict[str, Any] | None = None
             # Log tool result
             if logger:
                 logger.log_tool_result(
@@ -2129,8 +2245,34 @@ async def run_agent_loop(
 
             # ── Permission negotiation + retry ──────────────
             if not result.success and result.permission_request and permission_negotiator:
-                granted = await permission_negotiator.negotiate(result.permission_request)
+                policy_decision = _policy_decision_payload(
+                    tool_name=fn_name,
+                    permission_request=result.permission_request,
+                    decision="requested",
+                )
+                try:
+                    granted = await permission_negotiator.negotiate(result.permission_request)
+                except Exception as exc:
+                    policy_decision = _policy_decision_payload(
+                        tool_name=fn_name,
+                        permission_request=result.permission_request,
+                        decision="error",
+                        error=str(exc),
+                    )
+                    _log.warning(
+                        "permission/negotiator_error tool=%s error=%s",
+                        fn_name,
+                        exc,
+                    )
+                    granted = False
                 if granted:
+                    policy_decision = _policy_decision_payload(
+                        tool_name=fn_name,
+                        permission_request=result.permission_request,
+                        decision="approved",
+                        retry_count=1,
+                    )
+                    _approve_tool_permission(tools[fn_name], result.permission_request)
                     try:
                         result = await tools[fn_name].execute(**fn_args)
                     except Exception as exc:
@@ -2151,6 +2293,18 @@ async def run_agent_loop(
                             result_error=result.error if not result.success else None,
                             raw_output=result.raw_output,
                         )
+                elif policy_decision is not None and policy_decision.get("decision") != "error":
+                    policy_decision = _policy_decision_payload(
+                        tool_name=fn_name,
+                        permission_request=result.permission_request,
+                        decision="denied",
+                    )
+            elif not result.success and result.permission_request:
+                policy_decision = _policy_decision_payload(
+                    tool_name=fn_name,
+                    permission_request=result.permission_request,
+                    decision="requested",
+                )
 
             # Progress signal for the no-progress breaker: a successful tool
             # call with non-empty content counts as making progress.
@@ -2212,6 +2366,7 @@ async def run_agent_loop(
                 error=tc_error,
                 raw_output=result.raw_output,
                 user_visible=tool_user_visible,
+                policy_decision=policy_decision,
             )
             if result.success and tool_user_visible:
                 web_search_payload = _extract_web_search_payload(fn_name, tc_content)
@@ -2221,11 +2376,13 @@ async def run_agent_loop(
             # Emit permission request event if tool was denied with escalation info
             # (only for legacy consumers without a negotiator)
             if not result.success and result.permission_request and not permission_negotiator:
-                pr = {k: v for k, v in result.permission_request.items() if k != "type"}
-                yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
+                yield PermissionRequestEvent(
+                    tool_call_id=tc_id,
+                    **_permission_event_kwargs(result.permission_request),
+                )
 
             # Detect and yield structured artifacts (images, files) from tool output
-            if result.success and workspace_dir:
+            if artifact_detection_enabled and result.success and workspace_dir:
                 # Regex-based: detect [filename.ext] references in output
                 regex_artifacts = _detect_artifacts(tc_id, fn_name, tc_content, workspace_dir)
                 for artifact in regex_artifacts:
@@ -2257,6 +2414,8 @@ async def run_agent_loop(
                 else:
                     allowed_to_execute, internal_skip_error = _reserve_tool_budget(tc.function.name)
                 par_user_visible[tc.id] = allowed_to_execute
+                if allowed_to_execute:
+                    visible_tool_call_total += 1
                 yield ToolCallStart(
                     tool_call_id=tc.id,
                     tool_name=tc.function.name,
@@ -2390,6 +2549,7 @@ async def run_agent_loop(
                 fn_name = tc.function.name
                 fn_args = par_args_map[tc_id]
                 tool_user_visible = par_user_visible.get(tc_id, True)
+                policy_decision: dict[str, Any] | None = None
 
                 if logger:
                     logger.log_tool_result(
@@ -2403,8 +2563,34 @@ async def run_agent_loop(
 
                 # ── Permission negotiation + retry ──────────────
                 if not result.success and result.permission_request and permission_negotiator:
-                    granted = await permission_negotiator.negotiate(result.permission_request)
+                    policy_decision = _policy_decision_payload(
+                        tool_name=fn_name,
+                        permission_request=result.permission_request,
+                        decision="requested",
+                    )
+                    try:
+                        granted = await permission_negotiator.negotiate(result.permission_request)
+                    except Exception as exc:
+                        policy_decision = _policy_decision_payload(
+                            tool_name=fn_name,
+                            permission_request=result.permission_request,
+                            decision="error",
+                            error=str(exc),
+                        )
+                        _log.warning(
+                            "permission/negotiator_error tool=%s error=%s",
+                            fn_name,
+                            exc,
+                        )
+                        granted = False
                     if granted:
+                        policy_decision = _policy_decision_payload(
+                            tool_name=fn_name,
+                            permission_request=result.permission_request,
+                            decision="approved",
+                            retry_count=1,
+                        )
+                        _approve_tool_permission(tools[fn_name], result.permission_request)
                         try:
                             result = await tools[fn_name].execute(**fn_args)
                         except Exception as exc:
@@ -2424,6 +2610,18 @@ async def run_agent_loop(
                                 result_error=result.error if not result.success else None,
                                 raw_output=result.raw_output,
                             )
+                    elif policy_decision is not None and policy_decision.get("decision") != "error":
+                        policy_decision = _policy_decision_payload(
+                            tool_name=fn_name,
+                            permission_request=result.permission_request,
+                            decision="denied",
+                        )
+                elif not result.success and result.permission_request:
+                    policy_decision = _policy_decision_payload(
+                        tool_name=fn_name,
+                        permission_request=result.permission_request,
+                        decision="requested",
+                    )
 
                 # Progress signal for the no-progress breaker.
                 if result.success and (result.content or "").strip():
@@ -2481,6 +2679,7 @@ async def run_agent_loop(
                     error=par_error,
                     raw_output=result.raw_output,
                     user_visible=tool_user_visible,
+                    policy_decision=policy_decision,
                 )
                 if result.success and tool_user_visible:
                     web_search_payload = _extract_web_search_payload(fn_name, par_content)
@@ -2490,8 +2689,10 @@ async def run_agent_loop(
                 # Emit permission request event if tool was denied with escalation info
                 # (only for legacy consumers without a negotiator)
                 if not result.success and result.permission_request and not permission_negotiator:
-                    pr = {k: v for k, v in result.permission_request.items() if k != "type"}
-                    yield PermissionRequestEvent(tool_call_id=tc_id, **pr)
+                    yield PermissionRequestEvent(
+                        tool_call_id=tc_id,
+                        **_permission_event_kwargs(result.permission_request),
+                    )
 
             # Cancellation check after all parallel results emitted — every
             # tool message is now appended, so the message list is in a
@@ -2551,6 +2752,15 @@ async def run_agent_loop(
             guidance_text = "\n".join(guidance_lines)
             messages.append(Message(role="user", content=format_injected_message(guidance_text)))
             yield InjectedMessageEvent(content=guidance_text, injection_id=None, user_visible=False)
+
+        if (
+            visible_tool_call_total > FINAL_SUMMARY_TOOL_CALL_THRESHOLD
+            and not final_summary_guidance_injected
+        ):
+            final_summary_guidance_injected = True
+            summary_text = final_summary_wrapup_text(visible_tool_call_total)
+            messages.append(Message(role="user", content=format_injected_message(summary_text)))
+            yield InjectedMessageEvent(content=summary_text, injection_id=None, user_visible=False)
 
         # ── Step end ────────────────────────────────────────
         # Update the no-progress counter (only steps that ran tools reach

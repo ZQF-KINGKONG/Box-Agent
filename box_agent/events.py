@@ -128,6 +128,7 @@ class ToolCallResult:
     error: str | None = None
     raw_output: dict[str, Any] | None = None
     user_visible: bool = True
+    policy_decision: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -149,12 +150,9 @@ class ConfirmationRequired:
     core can continue.  If nobody responds within the timeout the core
     treats it as a rejection.
 
-    TODO: Not yet yielded by ``core.run_agent_loop``.  Currently,
-    safety confirmation still happens inside tool implementations via
-    ``safety.ask_user_confirmation()`` (blocking ``input()``).  A future
-    phase should intercept safety checks in the core and yield this
-    event instead, so ACP and other non-terminal consumers can handle
-    confirmation through their own protocol.
+    Deprecated compatibility type. Safety approvals now flow through the
+    canonical ``PermissionRequestEvent`` / permission negotiator path with
+    ``scope="safety"`` so CLI, ACP, and host UIs share one approval contract.
     """
 
     tool_call_id: str
@@ -304,6 +302,8 @@ class PermissionRequestEvent:
     temporary_supported: bool = True
     persistent_supported: bool = True
     persistent_label: str = ""  # optional UI label for the "always allow" option
+    command: str = ""           # safety requests only: command requiring approval
+    risk: str = ""              # safety requests only: short risk classification
 
 
 # ── In-stream injection ────────────────────────────────────────

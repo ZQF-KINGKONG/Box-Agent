@@ -70,6 +70,27 @@ def test_server_error():
     assert classify_llm_error(exc).category == "server_error"
 
 
+def test_model_not_found_beats_endpoint_404():
+    exc = _FakeAPIError(
+        "Error code: 404 - {'error': {'code': 'model_not_found'}}",
+        code="model_not_found",
+        status_code=404,
+    )
+    fe = classify_llm_error(exc)
+    assert fe.category == "model_not_found"
+    assert "model" in fe.message
+
+
+def test_endpoint_404_suggests_provider_protocol_mismatch():
+    exc = _FakeAPIError("404 page not found", status_code=404)
+    fe = classify_llm_error(exc)
+    assert fe.category == "endpoint_not_found"
+    assert "api_base" in fe.message
+    assert "provider" in fe.message
+    assert "xiaohuanxiong.com/api/web/llm/v2" in fe.message
+    assert "provider: openai" in fe.message
+
+
 def test_unwraps_retry_exhausted():
     inner = _FakeAPIError("content_filter triggered", code="content_filter")
     wrapped = RetryExhaustedError(inner, attempts=3)

@@ -47,6 +47,10 @@ SANDBOX_DEFAULT_PACKAGES = [
 
 SANDBOX_BASE_DIR = Path.home() / ".box-agent" / "sandbox"
 
+# Keep generated tool-call JSON well below common provider completion caps.
+# The kernel is persistent, so long workflows should be split across calls.
+MAX_EXECUTE_CODE_CHARS = 8_000
+
 # User-level directory for packages installed at runtime in frozen mode.
 # Survives across sessions; kept separate from the frozen binary itself.
 RUNTIME_PACKAGES_DIR = Path.home() / ".box-agent" / "runtime-packages"
@@ -1022,15 +1026,18 @@ class JupyterSandboxTool(Tool):
         self,
         workspace_dir: str | None = None,
         runtime_env: Mapping[str, str] | None = None,
+        use_output_dir: bool = True,
     ):
         """Initialize sandbox tool.
 
         Args:
             workspace_dir: Base workspace directory for sandbox sessions.
             runtime_env: Host runtime environment exported by env_context.
+            use_output_dir: Chdir kernels into {workspace}/output when True.
         """
         self.workspace_dir = workspace_dir
         self.runtime_env = dict(runtime_env or {})
+        self.use_output_dir = use_output_dir
         self._session_id: Optional[str] = None
 
     def _get_sandbox_env(self) -> SandboxEnvironment:
@@ -1110,6 +1117,8 @@ Example workflow:
 
 Best practices:
 - Break complex analysis into steps
+- Keep each code argument under 8000 characters; split large scripts/templates/data
+  across multiple calls or files instead of inlining them in one tool call
 - Use print() to see intermediate results
 - Never use the bash tool's `pip install` for sandbox packages — bash runs against the
   host Python and the sandbox kernel will not see those packages
@@ -1127,7 +1136,15 @@ Output formats:
             "properties": {
                 "code": {
                     "type": "string",
-                    "description": "Python code to execute. Variables and functions from previous calls in the same session are available. Use %pip install <pkg> to install packages.",
+                    "maxLength": MAX_EXECUTE_CODE_CHARS,
+                    "description": (
+                        "Python code to execute. Keep this under 8000 characters; "
+                        "split large scripts, templates, data, or generated file "
+                        "content across multiple calls/files instead of inlining "
+                        "one huge argument. Variables and functions from previous "
+                        "calls in the same session are available. Use %pip install "
+                        "<pkg> to install packages."
+                    ),
                 },
                 "session_id": {
                     "type": "string",
@@ -1165,6 +1182,18 @@ Output formats:
                 success=False,
                 content="",
                 error="Code appears to be empty or contains only comments.",
+            )
+        if len(code) > MAX_EXECUTE_CODE_CHARS:
+            return ToolResult(
+                success=False,
+                content="",
+                error=(
+                    "EXECUTE_CODE_TOO_LARGE: code is "
+                    f"{len(code)} characters; limit is {MAX_EXECUTE_CODE_CHARS}. "
+                    "Split the work into multiple execute_code calls because "
+                    "kernel state persists. Do not inline large file content, "
+                    "templates, base64, or data; write/read files in smaller chunks."
+                ),
             )
         if self._looks_like_python_pptx_new_deck(code):
             return ToolResult(
@@ -1331,15 +1360,23 @@ Output formats:
     def _get_workspace(self, session_id: str) -> Path:
         """Get the directory the kernel chdirs into for a session.
 
-        Returns ``{workspace_dir}/output/`` so every artifact the user code
-        writes (``plt.savefig("chart.png")``, ``df.to_csv("out.csv")``) lands
-        in the canonical artifact location. The user can still reach the
-        workspace root via ``../`` if they need to read uploaded inputs.
+        In default artifact mode this returns ``{workspace_dir}/output/`` so
+        generated files land in the canonical artifact location. In project
+        workspace mode, callers disable ``use_output_dir`` and the kernel uses
+        the workspace/project root directly.
         """
         from box_agent.core import ensure_output_dir
         if self.workspace_dir:
-            return ensure_output_dir(self.workspace_dir)
-        return ensure_output_dir(SANDBOX_BASE_DIR / "sessions" / session_id)
+            root = Path(self.workspace_dir).expanduser().resolve()
+            if self.use_output_dir:
+                return ensure_output_dir(root)
+            root.mkdir(parents=True, exist_ok=True)
+            return root
+        session_root = SANDBOX_BASE_DIR / "sessions" / session_id
+        if self.use_output_dir:
+            return ensure_output_dir(session_root)
+        session_root.mkdir(parents=True, exist_ok=True)
+        return session_root
 
     @staticmethod
     def _extract_missing_module(error: str) -> str | None:

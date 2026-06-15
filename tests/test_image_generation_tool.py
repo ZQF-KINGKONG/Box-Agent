@@ -80,6 +80,14 @@ async def test_generate_image_saves_base64_response(
     assert result.success
     assert (tmp_path / "assets/generated/hero.png").read_bytes() == PNG_BYTES
     assert result.raw_output
+    assert result.raw_output["type"] == "artifact"
+    assert result.raw_output["kind"] == "image"
+    assert result.raw_output["filename"] == "hero.png"
+    assert result.raw_output["rel_path"] == "assets/generated/hero.png"
+    assert result.raw_output["abs_path"] == str(tmp_path / "assets/generated/hero.png")
+    assert result.raw_output["uri"] == (tmp_path / "assets/generated/hero.png").as_uri()
+    assert result.raw_output["mime"] == "image/png"
+    assert result.raw_output["size_bytes"] == len(PNG_BYTES)
     assert result.raw_output["path"] == "assets/generated/hero.png"
     assert result.raw_output["mime_type"] == "image/png"
     assert result.raw_output["width"] == 1536
@@ -310,6 +318,38 @@ async def test_generate_image_uses_default_size_for_seedream_models(
 
 
 @pytest.mark.asyncio
+async def test_generate_image_passes_explicit_size_through_for_remote_passthrough_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "1024x1024"
+        return httpx.Response(
+            200,
+            json={"b64_json": base64.b64encode(PNG_BYTES).decode("ascii")},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="http://10.158.136.99:9000/api/web/llm/v2/images/gen",
+    )
+
+    result = await tool.execute(
+        prompt="海边的落日",
+        output_path="assets/generated/sunset.png",
+        size="1024x1024",
+    )
+
+    assert result.success, result.error
+    assert result.raw_output
+    assert result.raw_output["size"] == "1024x1024"
+    assert result.raw_output["image_mode"] == "text_to_image"
+
+
+@pytest.mark.asyncio
 async def test_generate_image_maps_seedream_explicit_size_to_supported(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -377,6 +417,92 @@ async def test_generate_image_respects_seedream_exact_ratio_input(
     assert (tmp_path / "assets/generated/ds-wide.png").read_bytes() == PNG_BYTES
     assert result.raw_output
     assert result.raw_output["size"] == "4096x2304"
+
+
+@pytest.mark.asyncio
+async def test_generate_image_edits_reference_image_with_multipart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(PNG_BYTES)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://image.example.test/api/web/llm/v2/images/edits"
+        assert request.headers["authorization"] == "Bearer secret"
+        assert request.headers["content-type"].startswith("multipart/form-data")
+        body = request.read()
+        assert b'name="image"; filename="reference.png"' in body
+        assert PNG_BYTES in body
+        assert b'name="prompt"' in body
+        assert "图片里添加水印".encode("utf-8") in body
+        assert b'name="size"' in body
+        assert b"1024x1024" in body
+        assert b"gpt-image-1" not in body
+        return httpx.Response(
+            200,
+            json={"b64_json": base64.b64encode(JPEG_BYTES).decode("ascii")},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/api/web/llm/v2/images/gen",
+        api_key="secret",
+    )
+
+    result = await tool.execute(
+        prompt="图片里添加水印: 网宿科技",
+        output_path="assets/generated/edited.jpg",
+        size="1024x1024",
+        image_mode="image_to_image",
+        reference_images=["reference.png"],
+    )
+
+    assert result.success, result.error
+    assert (tmp_path / "assets/generated/edited.jpg").read_bytes() == JPEG_BYTES
+    assert result.raw_output
+    assert result.raw_output["image_mode"] == "image_to_image"
+    assert result.raw_output["reference_images"] == ["reference.png"]
+
+
+@pytest.mark.asyncio
+async def test_generate_image_edit_requires_reference_image(tmp_path: Path) -> None:
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/api/web/llm/v2/images/gen",
+    )
+
+    result = await tool.execute(
+        prompt="edit image",
+        output_path="assets/generated/edit.png",
+        image_mode="image_to_image",
+    )
+
+    assert not result.success
+    assert "requires at least one reference image" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_generate_image_edit_rejects_reference_outside_workspace(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside-reference.png"
+    outside.write_bytes(PNG_BYTES)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/api/web/llm/v2/images/gen",
+    )
+
+    result = await tool.execute(
+        prompt="edit image",
+        output_path="assets/generated/edit.png",
+        reference_images=[str(outside)],
+    )
+
+    assert not result.success
+    assert "outside the workspace" in (result.error or "")
 
 
 @pytest.mark.asyncio

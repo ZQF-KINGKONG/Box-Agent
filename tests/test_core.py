@@ -16,6 +16,7 @@ from box_agent.events import (
     DoneEvent,
     ErrorEvent,
     InjectedMessageEvent,
+    LLMOutputEvent,
     PlanSnapshotEvent,
     ProgressEvent,
     StepEnd,
@@ -234,6 +235,17 @@ def _msgs():
     return [
         Message(role="system", content="sys"),
         Message(role="user", content="hi"),
+    ]
+
+
+def _echo_tool_calls(count: int) -> list[ToolCall]:
+    return [
+        ToolCall(
+            id=f"t{i}",
+            type="function",
+            function=FunctionCall(name="echo", arguments={"text": str(i)}),
+        )
+        for i in range(count)
     ]
 
 
@@ -574,6 +586,8 @@ async def test_write_file_large_artifact_arguments_are_compacted_in_model_histor
     )
 
     start = next(e for e in events if isinstance(e, ToolCallStart))
+    llm_output = next(e for e in events if isinstance(e, LLMOutputEvent))
+    assert marker in llm_output.tool_calls[0]["function"]["arguments"]["content"]
     assert marker in start.arguments["content"]
     assert (tmp_path / "deck.html").read_text(encoding="utf-8") == html
 
@@ -833,6 +847,100 @@ async def test_max_steps():
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert len(done) == 1
     assert done[0].stop_reason == StopReason.MAX_STEPS
+
+
+@pytest.mark.asyncio
+async def test_tool_heavy_turn_injects_hidden_final_summary_guidance():
+    """After many visible tools, the runtime nudges the model to end with a conclusion."""
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=_echo_tool_calls(11),
+                finish_reason="tool",
+            ),
+            LLMResponse(content="结论：已完成。", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"echo": EchoTool()},
+            max_steps=5,
+        )
+    )
+
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert any(
+        not e.user_visible
+        and "many visible tool calls" in e.content
+        and "final user-visible response must be a concise conclusion" in e.content
+        for e in injected
+    )
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done[-1].final_content == "结论：已完成。"
+
+
+@pytest.mark.asyncio
+async def test_ten_tool_calls_do_not_inject_final_summary_guidance():
+    """Simple or small tool turns keep the existing behavior unchanged."""
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=_echo_tool_calls(10),
+                finish_reason="tool",
+            ),
+            LLMResponse(content="done", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"echo": EchoTool()},
+            max_steps=5,
+        )
+    )
+
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert not any("many visible tool calls" in e.content for e in injected)
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done[-1].final_content == "done"
+
+
+@pytest.mark.asyncio
+async def test_tool_heavy_empty_final_answer_retries_for_conclusion():
+    """A long tool-heavy turn should not end with an empty visible answer."""
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=_echo_tool_calls(11),
+                finish_reason="tool",
+            ),
+            LLMResponse(content="", finish_reason="stop"),
+            LLMResponse(content="最终结论：文件已处理。", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"echo": EchoTool()},
+            max_steps=5,
+        )
+    )
+
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert any("many visible tool calls" in e.content for e in injected)
+    assert any("produced no visible final answer" in e.content for e in injected)
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done[-1].final_content == "最终结论：文件已处理。"
 
 
 @pytest.mark.asyncio
@@ -1339,6 +1447,61 @@ async def test_run_agent_loop_emits_artifact_without_attribute_error(tmp_path):
     assert len(artifacts) == 1, f"expected exactly one artifact, got {artifacts}"
     assert artifacts[0].rel_path == "output/chart.png"
 
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done and done[0].stop_reason == StopReason.END_TURN
+
+
+@pytest.mark.asyncio
+async def test_run_agent_loop_can_disable_output_artifact_detection(tmp_path):
+    from pathlib import Path as _Path
+
+    class WriteAndAnnounceTool(Tool):
+        @property
+        def name(self):
+            return "make_chart"
+
+        @property
+        def description(self):
+            return "Writes a PNG under output/ and references it in result"
+
+        @property
+        def parameters(self):
+            return {"type": "object", "properties": {}}
+
+        async def execute(self):
+            out = _Path(tmp_path) / "output"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "chart.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+            return ToolResult(success=True, content="Saved [chart.png]")
+
+    msgs = _msgs()
+    llm = MockLLM([
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="t1",
+                    type="function",
+                    function=FunctionCall(name="make_chart", arguments={}),
+                )
+            ],
+            finish_reason="tool",
+        ),
+        LLMResponse(content="done", finish_reason="stop"),
+    ])
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=msgs,
+            tools={"make_chart": WriteAndAnnounceTool()},
+            max_steps=5,
+            workspace_dir=str(tmp_path),
+            artifact_detection_enabled=False,
+        )
+    )
+
+    assert [e for e in events if isinstance(e, ArtifactEvent)] == []
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert done and done[0].stop_reason == StopReason.END_TURN
 

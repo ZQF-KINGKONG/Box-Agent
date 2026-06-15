@@ -221,9 +221,11 @@ be under the limit; whichever crosses first triggers compaction.
 ```
 context_token_limit = int((context_window - max_output_tokens) * 0.9)
 ```
-Box-Agent ships with defaults `context_window = 180_000` and
-`max_output_tokens = 80_000`, giving `context_token_limit = 90_000`
-(~90k). Both are user-overridable in `config.yaml`. The 10% headroom
+Box-Agent defaults to `context_window = 180_000`. For user-configured endpoints,
+omitting `max_output_tokens` defaults to `63_999`, giving
+`context_token_limit = 104_400` (~104k). Hosted `xiaohuanxiong.com` endpoints
+default to `max_output_tokens = 80_000`, giving `context_token_limit = 90_000`
+(~90k). Both values are user-overridable in `config.yaml`. The 10% headroom
 absorbs token-estimate drift and the summarization request itself.
 
 ### Algorithm

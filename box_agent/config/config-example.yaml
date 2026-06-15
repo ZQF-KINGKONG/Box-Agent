@@ -28,10 +28,12 @@ provider: "anthropic"
 
 # Model token budget. `context_window` is the total context the model accepts;
 # `max_output_tokens` is the per-request output cap (`max_tokens` on the wire).
-# Defaults target Claude Sonnet 4 (200k window, 64k output). The summarization
-# trigger is derived: 90% of (context_window - max_output_tokens).
+# Default for user-configured endpoints stays below the common 65,536
+# output-token ceiling. Hosted xiaohuanxiong.com endpoints default to 80,000
+# when this field is omitted. The summarization trigger is derived: 90% of
+# (context_window - max_output_tokens).
 context_window: 180000
-max_output_tokens: 80000
+max_output_tokens: 63999
 
 # Per-request wall-clock cap (seconds) handed to the provider SDK. For streaming
 # calls this bounds the gap between bytes (connect + per-read), not the total
@@ -65,6 +67,8 @@ max_steps: 200 # Maximum execution steps
 max_parallel_tools: 8 # Hard cap on concurrent parallel_safe tool calls (sub_agent, generate_image) per step
 workspace_dir: "./workspace" # Working directory
 system_prompt_path: "system_prompt.md" # System prompt file (same config directory)
+analysis_prompt_path: "analysis_prompt.md" # Extra prompt for data_analysis sessions
+code_prompt_path: "code_prompt.md" # Extra prompt for code_agent sessions
 
 # ===== Memory Configuration =====
 enable_memory: true # Enable cross-session memory system
@@ -103,8 +107,10 @@ tools:
 
 # ===== Image Generation Service =====
 # The built-in generate_image tool reads this block the same way LLM requests
-# read api_base/api_key/auth_file. If api_key is empty and the endpoint is a
-# hosted officev3 domain, Box-Agent reuses auth.json / BOX_AGENT_AUTH_TOKEN.
+# read api_base/api_key/auth_file. Text-to-image posts JSON to endpoint.
+# Image-to-image edits derive /images/edits from /images/gen and post multipart
+# fields: image, prompt, size. If api_key is empty and the endpoint is a hosted
+# officev3 domain, Box-Agent reuses auth.json / BOX_AGENT_AUTH_TOKEN.
 image_generation:
   endpoint: "http://10.158.136.99:9000/api/web/llm/v2/images/gen" # e.g. "https://your-service/v1/images/generations"
   api_key: "" # optional dedicated bearer token; leave empty to reuse hosted auth
@@ -117,15 +123,9 @@ image_generation:
 # BOX_AGENT_IMAGE_GENERATION_ENDPOINT, BOX_AGENT_IMAGE_GENERATION_API_KEY,
 # BOX_AGENT_IMAGE_GENERATION_TIMEOUT, BOX_AGENT_IMAGE_GEN_ENDPOINT,
 # BOX_AGENT_IMAGE_GEN_API_KEY.
-# For this image backend, prefer exact `size` values from the supported presets:
-# 1:1 2048x2048 / 3072x3072 / 4096x4096
-# 16:9 2848x1600 / 4096x2304 / 5504x3040
-# 9:16 1600x2848 / 2304x4096 / 3040x5504
-# 4:3 2304x1728 / 3456x2592 / 4704x3520
-# 3:4 1728x2304 / 2592x3456 / 3520x4704
-# 3:2 2496x1664 / 3744x2496 / 4992x3328
-# 2:3 1664x2496 / 2496x3744 / 3328x4992
-# 21:9 3136x1344 / 4704x2016 / 6240x2656
+# This relay is pure pass-through: explicit `size` values such as 1024x1024 are
+# forwarded as-is. Doubao/Seedream models still map width/height to their
+# supported presets when no exact passthrough size is requested.
 
 # ===== officev3 Permission Settings =====
 # Optional. Only honored when this whole block is present in the loaded

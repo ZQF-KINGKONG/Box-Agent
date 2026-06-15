@@ -55,6 +55,8 @@ _MIME_EXTENSIONS = {
 _BASE64_IMAGE_KEYS = ("b64_json", "base64", "image_base64", "image", "image_data")
 _URL_IMAGE_KEYS = ("url", "image_url", "imageUrl", "image_urls", "imageUrls", "output_url", "signed_url")
 _NESTED_IMAGE_KEYS = ("data", "images", "output", "outputs", "result", "results")
+_EDIT_ENDPOINT_SUFFIXES = ("/images/gen", "/images/generations")
+_IMAGE_EDIT_MODES = {"image_to_image", "edit", "image_edit"}
 
 
 def _is_large_image_service(endpoint: str | None, model: str | None) -> bool:
@@ -62,7 +64,6 @@ def _is_large_image_service(endpoint: str | None, model: str | None) -> bool:
     return (
         "doubao" in needle
         or "seedream" in needle
-        or "/api/web/llm/v2/images/gen" in needle
     )
 
 
@@ -206,6 +207,17 @@ def _compose_openai_prompt(prompt: str, style: str | None, negative_prompt: str 
     return "\n\n".join(part for part in parts if part)
 
 
+def _derive_edit_endpoint(endpoint: str) -> str:
+    normalized = endpoint.strip()
+    if normalized.rstrip("/").endswith("/images/edits"):
+        return normalized
+    trimmed = normalized.rstrip("/")
+    for suffix in _EDIT_ENDPOINT_SUFFIXES:
+        if trimmed.endswith(suffix):
+            return f"{trimmed[: -len(suffix)]}/images/edits"
+    return f"{trimmed}/edits"
+
+
 class GenerateImageTool(Tool):
     """Generate an image through a configured HTTP service and save it locally."""
 
@@ -238,8 +250,10 @@ class GenerateImageTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Generate a bitmap image with the host-configured image service, save it inside the workspace, "
-            "and return a local path for use in HTML/PPTX assets. Use for PPT image_plan items marked "
+            "Generate or edit a bitmap image with the host-configured image service, save it inside the "
+            "workspace, and return a local path for use in HTML/PPTX assets. Use text-to-image when the user "
+            "asks for a new image. Use image-to-image with reference_images when the user asks to modify, "
+            "redraw, restyle, or preserve a supplied image/logo/sketch. Use for PPT image_plan items marked "
             "`generate`. If the service is not configured, report the blocked image generation instead of "
             "pretending an asset exists. Configuration: image_generation.endpoint in config.yaml; optional "
             "image_generation.api_key for a dedicated bearer token. Environment overrides are also supported."
@@ -283,6 +297,22 @@ class GenerateImageTool(Tool):
                     "type": "string",
                     "description": "Optional things to avoid.",
                 },
+                "image_mode": {
+                    "type": "string",
+                    "enum": ["text_to_image", "image_to_image"],
+                    "description": (
+                        "Use image_to_image when editing or restyling supplied reference images. "
+                        "Defaults to image_to_image if reference_images is non-empty."
+                    ),
+                },
+                "reference_images": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Workspace-relative image paths to preserve or edit. Required for image_to_image tasks "
+                        "such as 'change this logo', 'use this sketch', or 'based on this image'."
+                    ),
+                },
                 "metadata": {
                     "type": "object",
                     "description": "Optional metadata such as slide, purpose, placement, kind, or aspect ratio.",
@@ -302,6 +332,8 @@ class GenerateImageTool(Tool):
         style: str | None = None,
         negative_prompt: str | None = None,
         alt_text: str | None = None,
+        image_mode: str | None = None,
+        reference_images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ToolResult:
         if not self.endpoint:
@@ -314,6 +346,15 @@ class GenerateImageTool(Tool):
             )
 
         try:
+            reference_images = reference_images or []
+            normalized_mode = (image_mode or "").strip().lower()
+            edit_requested = bool(reference_images) or normalized_mode in _IMAGE_EDIT_MODES
+            if edit_requested and not reference_images:
+                return ToolResult(
+                    success=False,
+                    error="Image-to-image editing requires at least one reference image path.",
+                )
+
             requested_width = width
             requested_height = height
             if size and size.strip():
@@ -329,12 +370,26 @@ class GenerateImageTool(Tool):
             if permission_error:
                 return permission_error
 
-            image_bytes, mime_type = await self._request_image(
-                prompt=prompt,
-                size=size,
-                style=style,
-                negative_prompt=negative_prompt,
-            )
+            reference_paths: list[Path] = []
+            if edit_requested:
+                try:
+                    reference_paths = [self._resolve_readable_path(path) for path in reference_images]
+                except ValueError as exc:
+                    return ToolResult(success=False, error=str(exc))
+                image_bytes, mime_type = await self._request_image_edit(
+                    prompt=prompt,
+                    size=size,
+                    style=style,
+                    negative_prompt=negative_prompt,
+                    reference_paths=reference_paths,
+                )
+            else:
+                image_bytes, mime_type = await self._request_image(
+                    prompt=prompt,
+                    size=size,
+                    style=style,
+                    negative_prompt=negative_prompt,
+                )
 
             target = self._ensure_extension(target, mime_type)
             permission_error = self._check_write_permission(target)
@@ -346,6 +401,14 @@ class GenerateImageTool(Tool):
 
             rel_path = self._display_path(target)
             info = {
+                "type": "artifact",
+                "kind": "image",
+                "filename": target.name,
+                "rel_path": rel_path,
+                "abs_path": str(target),
+                "uri": target.as_uri(),
+                "mime": mime_type,
+                "size_bytes": len(image_bytes),
                 "path": rel_path,
                 "absolute_path": str(target),
                 "mime_type": mime_type,
@@ -355,6 +418,8 @@ class GenerateImageTool(Tool):
                 "size": size,
                 "requested_width": requested_width,
                 "requested_height": requested_height,
+                "image_mode": "image_to_image" if edit_requested else "text_to_image",
+                "reference_images": [self._display_path(path) for path in reference_paths],
                 "alt_text": alt_text or "",
                 "metadata": metadata or {},
             }
@@ -396,6 +461,72 @@ class GenerateImageTool(Tool):
                 return ToolResult(success=False, error=error)
         return None
 
+    def _resolve_readable_path(self, image_path: str) -> Path:
+        path = Path(image_path).expanduser()
+        if not path.is_absolute():
+            path = self.workspace_dir / path
+        path = path.absolute()
+
+        if self._perm:
+            decision = self._perm.check(
+                capability="filesystem.read",
+                resource={"path": str(path)},
+                tool_name=self.name,
+            )
+            if not decision.allowed:
+                raise ValueError(decision.reason)
+        elif not self.allow_full_access:
+            error = validate_path_in_workspace(path, self.workspace_dir)
+            if error:
+                raise ValueError(error)
+        if not path.exists():
+            raise ValueError(f"Reference image not found: {self._display_path(path)}")
+        if not path.is_file():
+            raise ValueError(f"Reference image is not a file: {self._display_path(path)}")
+        return path
+
+    def _request_headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json, image/*"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+            return headers
+        return request_auth_headers(auth_file=self.auth_file, existing=headers, url=self.endpoint)
+
+    @staticmethod
+    def _raise_status(response: httpx.Response) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = response.text.strip()
+            if len(body) > 1000:
+                body = f"{body[:1000]}..."
+            detail = f"{exc}"
+            if body:
+                detail = f"{detail}; response body: {body}"
+            raise ValueError(detail) from exc
+
+    async def _image_from_response(self, client: httpx.AsyncClient, response: httpx.Response) -> tuple[bytes, str]:
+        self._raise_status(response)
+
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type.startswith("image/"):
+            return response.content, content_type
+
+        data = response.json()
+        found = _find_first_image_payload(data)
+        if not found:
+            raise ValueError("service response did not contain image bytes, b64_json, base64, url, or image_url")
+        kind, value = found
+        if kind == "base64":
+            return _decode_base64_image(value)
+
+        download = await client.get(value)
+        download.raise_for_status()
+        download_type = download.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if not download_type.startswith("image/"):
+            download_type = mimetypes.guess_type(value)[0] or _DEFAULT_MIME_TYPE
+        return download.content, download_type
+
     async def _request_image(
         self,
         *,
@@ -410,44 +541,41 @@ class GenerateImageTool(Tool):
             "size": size,
         }
 
-        headers = {"Accept": "application/json, image/*"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        else:
-            headers = request_auth_headers(auth_file=self.auth_file, existing=headers, url=self.endpoint)
-
         timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            response = await client.post(self.endpoint, json=payload, headers=headers)
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                body = response.text.strip()
-                if len(body) > 1000:
-                    body = f"{body[:1000]}..."
-                detail = f"{exc}"
-                if body:
-                    detail = f"{detail}; response body: {body}"
-                raise ValueError(detail) from exc
+            response = await client.post(self.endpoint, json=payload, headers=self._request_headers())
+            return await self._image_from_response(client, response)
 
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            if content_type.startswith("image/"):
-                return response.content, content_type
+    async def _request_image_edit(
+        self,
+        *,
+        prompt: str,
+        size: str,
+        style: str | None,
+        negative_prompt: str | None,
+        reference_paths: list[Path],
+    ) -> tuple[bytes, str]:
+        files: list[tuple[str, tuple[str, bytes, str]]] = []
+        for path in reference_paths:
+            image_bytes = path.read_bytes()
+            mime_type = mimetypes.guess_type(str(path))[0] or _guess_mime_from_bytes(image_bytes)
+            if not mime_type.startswith("image/"):
+                raise ValueError(f"Unsupported reference image type: {self._display_path(path)}")
+            files.append(("image", (path.name, image_bytes, mime_type)))
 
-            data = response.json()
-            found = _find_first_image_payload(data)
-            if not found:
-                raise ValueError("service response did not contain image bytes, b64_json, base64, url, or image_url")
-            kind, value = found
-            if kind == "base64":
-                return _decode_base64_image(value)
-
-            download = await client.get(value)
-            download.raise_for_status()
-            download_type = download.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            if not download_type.startswith("image/"):
-                download_type = mimetypes.guess_type(value)[0] or _DEFAULT_MIME_TYPE
-            return download.content, download_type
+        data = {
+            "prompt": _compose_openai_prompt(prompt, style, negative_prompt),
+            "size": size,
+        }
+        timeout = self.timeout if self.timeout is not None else float(os.environ.get(_TIMEOUT_ENV, _DEFAULT_TIMEOUT))
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.post(
+                _derive_edit_endpoint(self.endpoint or ""),
+                data=data,
+                files=files,
+                headers=self._request_headers(),
+            )
+            return await self._image_from_response(client, response)
 
     def _ensure_extension(self, target: Path, mime_type: str) -> Path:
         if target.suffix:

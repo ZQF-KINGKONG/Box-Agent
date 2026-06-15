@@ -125,6 +125,16 @@ class MockNegotiator:
         return self._grant
 
 
+class SafetyNegotiator:
+    def __init__(self, grant: bool):
+        self._grant = grant
+        self.requests: list[dict] = []
+
+    async def negotiate(self, permission_request: dict) -> bool:
+        self.requests.append(permission_request)
+        return self._grant
+
+
 @pytest.fixture
 def workspace(tmp_path: Path) -> Path:
     ws = tmp_path / "workspace"
@@ -437,3 +447,66 @@ class TestLegacyPermissionEvent:
         assert len(perm_events) == 1
         assert perm_events[0].scope == "filesystem"
         assert perm_events[0].requested_scope == "user_home"
+
+
+class TestSafetyPermissionNegotiation:
+    @pytest.mark.asyncio
+    async def test_dangerous_bash_command_retries_after_approval(self, tmp_path: Path):
+        from box_agent.tools.bash_tool import BashTool
+
+        victim = tmp_path / "victim.txt"
+        victim.write_text("delete me")
+        tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+        negotiator = SafetyNegotiator(grant=True)
+
+        events = await collect(run_agent_loop(
+            llm=_llm_with_tool_call("bash", {"command": "rm victim.txt"}),
+            messages=_msgs(),
+            tools={"bash": tool},
+            max_steps=5,
+            permission_negotiator=negotiator,
+            workspace_dir=str(tmp_path),
+        ))
+
+        assert not victim.exists()
+        assert len(negotiator.requests) == 1
+        assert negotiator.requests[0]["scope"] == "safety"
+        assert negotiator.requests[0]["requested_scope"] == "dangerous_command"
+        assert negotiator.requests[0]["persistent_supported"] is False
+        results = [e for e in events if isinstance(e, ToolCallResult)]
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].policy_decision is not None
+        assert results[0].policy_decision["type"] == "policy_decision"
+        assert results[0].policy_decision["decision"] == "approved"
+        assert results[0].policy_decision["retry_count"] == 1
+        assert results[0].policy_decision["scope"] == "safety"
+
+    @pytest.mark.asyncio
+    async def test_dangerous_bash_command_denial_does_not_execute(self, tmp_path: Path):
+        from box_agent.tools.bash_tool import BashTool
+
+        victim = tmp_path / "victim.txt"
+        victim.write_text("keep me")
+        tool = BashTool(workspace_dir=str(tmp_path), non_interactive=True)
+        negotiator = SafetyNegotiator(grant=False)
+
+        events = await collect(run_agent_loop(
+            llm=_llm_with_tool_call("bash", {"command": "rm victim.txt"}),
+            messages=_msgs(),
+            tools={"bash": tool},
+            max_steps=5,
+            permission_negotiator=negotiator,
+            workspace_dir=str(tmp_path),
+        ))
+
+        assert victim.exists()
+        assert len(negotiator.requests) == 1
+        results = [e for e in events if isinstance(e, ToolCallResult)]
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "requires approval" in (results[0].error or "")
+        assert results[0].policy_decision is not None
+        assert results[0].policy_decision["type"] == "policy_decision"
+        assert results[0].policy_decision["decision"] == "denied"
+        assert results[0].policy_decision["scope"] == "safety"

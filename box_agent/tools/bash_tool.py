@@ -21,7 +21,6 @@ from .base import Tool, ToolResult
 from .pptx_safety import detect_pptx_self_check_bypass
 from .runtime import bundled_win_bash
 from .safety import (
-    ask_user_confirmation,
     backup_file,
     detect_dangerous_command,
     detect_scope_escape,
@@ -35,6 +34,23 @@ log = logging.getLogger(__name__)
 
 # Shells whose syntax is POSIX-compatible (supports &&, ||, for/do/done, etc.)
 _POSIX_SHELLS = frozenset({"bash", "zsh", "sh", "dash", "ksh", "ash"})
+_LARK_CLI_RE = re.compile(
+    r"(?:\blark-cli(?:\.(?:cmd|exe))?\b|\$BOX_AGENT_LARK_CLI\b|\$\{BOX_AGENT_LARK_CLI\}|%BOX_AGENT_LARK_CLI%)",
+    re.IGNORECASE,
+)
+_LARK_USER_FLAG_RE = re.compile(r"--as(?:=|\s+)user\b", re.IGNORECASE)
+_LARK_BOT_FLAG_RE = re.compile(r"--as(?:=|\s+)bot\b", re.IGNORECASE)
+_LARK_BOT_ONLY_RE = re.compile(r"--(?:identity|auth)(?:=|\s+)bot-only\b", re.IGNORECASE)
+_LARK_USER_DEFAULT_RE = re.compile(r"--identity(?:=|\s+)user-default\b", re.IGNORECASE)
+_LARK_CONFIG_BIND_RE = re.compile(r"\bconfig\s+bind\b", re.IGNORECASE)
+_LARK_STRICT_MODE_RE = re.compile(r"\bconfig\s+strict-mode\b", re.IGNORECASE)
+_LARK_COMMAND_SEPARATOR_RE = re.compile(r"&&|\|\||[;\n|]")
+_LARK_CLI_ENV_ASSIGNMENT_RE = re.compile(
+    r"^(?:export\s+|set\s+)BOX_AGENT_LARK_CLI\s*=",
+    re.IGNORECASE,
+)
+_SAFETY_SCOPE = "safety"
+_DANGEROUS_COMMAND_SCOPE = "dangerous_command"
 
 
 def _resolve_login_shell() -> str:
@@ -51,6 +67,63 @@ def _resolve_login_shell() -> str:
         if os.access(fallback, os.X_OK):
             return fallback
     return "/bin/sh"  # last resort — always present on Unix
+
+
+def _detect_lark_user_mode_violation(command: str) -> str | None:
+    """Reject lark-cli calls that can switch away from user identity.
+
+    officev3 treats Feishu as a user-authorized integration.  The agent may
+    receive bundled ``lark-cli`` through PATH, but it must not mutate the
+    user's global CLI workspace into bot-only/strict bot mode.
+    """
+    for raw_part in _LARK_COMMAND_SEPARATOR_RE.split(command):
+        part = raw_part.strip()
+        if _LARK_CLI_ENV_ASSIGNMENT_RE.match(part):
+            continue
+        if not _LARK_CLI_RE.search(part):
+            continue
+        lowered = part.lower()
+
+        if _LARK_BOT_FLAG_RE.search(part):
+            return "lark-cli bot identity is disabled in officev3 local-agent sessions; use `--as user`."
+        if _LARK_BOT_ONLY_RE.search(part):
+            return "lark-cli bot-only binding is disabled; officev3 requires user identity."
+        if _LARK_STRICT_MODE_RE.search(part):
+            return "lark-cli strict-mode changes are disabled; the product owns Feishu identity policy."
+        if _LARK_CONFIG_BIND_RE.search(part) and not _LARK_USER_DEFAULT_RE.search(part):
+            return "lark-cli config bind must not change Feishu to bot-only; use user-default identity or product settings."
+
+        # Diagnostics, setup, and OAuth commands either do not accept --as or
+        # are specifically how user identity is obtained.
+        if (
+            "--help" in lowered
+            or re.search(r"\s(?:--version|-v)\b", lowered)
+            or re.search(r"\blark-cli(?:\.(?:cmd|exe))?\s+(?:auth|config|schema|doctor|update)\b", lowered)
+        ):
+            continue
+
+        if not _LARK_USER_FLAG_RE.search(part):
+            return "lark-cli business commands must pass `--as user` in officev3 local-agent sessions."
+    return None
+
+
+def _safety_approval_key(command: str, risk: str) -> str:
+    return f"{_DANGEROUS_COMMAND_SCOPE}\0{risk}\0{command}"
+
+
+def _dangerous_command_permission_request(command: str, risk: str) -> dict[str, Any]:
+    return {
+        "type": "permission_request",
+        "scope": _SAFETY_SCOPE,
+        "requested_scope": _DANGEROUS_COMMAND_SCOPE,
+        "path": "",
+        "reason": f"Dangerous command detected: {risk}",
+        "temporary_supported": True,
+        "persistent_supported": False,
+        "persistent_label": "",
+        "command": command,
+        "risk": risk,
+    }
 
 
 class BashOutputResult(ToolResult):
@@ -276,7 +349,8 @@ class BashTool(Tool):
                            If provided, all commands run in this directory.
                            If None, commands run in the process's cwd.
             allow_full_access: If False, block commands that escape the workspace.
-            non_interactive: If True, dangerous commands are rejected without prompting.
+            non_interactive: If True, never prompt on stdin; dangerous commands
+                             return an approval request for the core/host.
             sandbox_venv_path: If set, prepend venv bin to PATH and set VIRTUAL_ENV
                                so subprocess commands use the sandbox Python.
             permission_engine: If provided, use capability-based permission checks.
@@ -335,6 +409,7 @@ class BashTool(Tool):
         self.allow_full_access = allow_full_access
         self.non_interactive = non_interactive
         self._perm = permission_engine
+        self._approved_safety_commands: set[str] = set()
         self._subprocess_env = None
         self._use_login_shell = True
         if sandbox_venv_path or runtime_env:
@@ -348,6 +423,24 @@ class BashTool(Tool):
             self._use_login_shell = False
         if runtime_env:
             self._subprocess_env.update(runtime_env)
+
+    def approve_permission_request(self, permission_request: dict[str, Any]) -> None:
+        """Record a one-shot approval before core retries a safety-gated command."""
+        if permission_request.get("scope") != _SAFETY_SCOPE:
+            return
+        if permission_request.get("requested_scope") != _DANGEROUS_COMMAND_SCOPE:
+            return
+        command = permission_request.get("command")
+        risk = permission_request.get("risk") or permission_request.get("reason")
+        if isinstance(command, str) and isinstance(risk, str):
+            self._approved_safety_commands.add(_safety_approval_key(command, risk))
+
+    def _consume_safety_approval(self, command: str, risk: str) -> bool:
+        key = _safety_approval_key(command, risk)
+        if key not in self._approved_safety_commands:
+            return False
+        self._approved_safety_commands.remove(key)
+        return True
 
     async def _create_subprocess(
         self, command: str, *, merge_stderr: bool = False,
@@ -524,33 +617,36 @@ Examples:
                     exit_code=1,
                 )
 
+            lark_identity_error = _detect_lark_user_mode_violation(command)
+            if lark_identity_error:
+                return BashOutputResult(
+                    success=False,
+                    error=f"Blocked: {lark_identity_error}\nCommand: {command}",
+                    stdout="",
+                    stderr=f"Blocked: {lark_identity_error}",
+                    exit_code=1,
+                )
+
             # 1. Dangerous command detection (always active)
             danger_reason = detect_dangerous_command(command)
             if danger_reason:
-                if self.non_interactive:
-                    return BashOutputResult(
-                        success=False,
-                        error=f"Dangerous command blocked (non-interactive mode): {danger_reason}\nCommand: {command}",
-                        stdout="",
-                        stderr=f"Blocked: {danger_reason}",
-                        exit_code=-1,
-                    )
-                confirmed = await ask_user_confirmation(
-                    f"Dangerous command detected: {danger_reason}\nCommand: {command}"
-                )
-                if not confirmed:
+                if not self._consume_safety_approval(command, danger_reason):
                     return BashOutputResult(
                         success=False,
                         error=(
-                            f"Command rejected by user: {danger_reason}. "
-                            f"IMPORTANT: Do NOT retry this operation with alternative commands. "
-                            f"Inform the user the operation was cancelled and ask how to proceed."
+                            f"Dangerous command requires approval: {danger_reason}. "
+                            f"Command: {command}"
                         ),
                         stdout="",
-                        stderr=f"Rejected: {danger_reason}",
+                        stderr=f"Approval required: {danger_reason}",
                         exit_code=-1,
+                        permission_request=_dangerous_command_permission_request(
+                            command,
+                            danger_reason,
+                        ),
                     )
-                # User confirmed — try to backup rm targets before execution
+                # User confirmed through the core approval path — try to backup
+                # rm targets before execution.
                 if "rm" in command or "rmdir" in command:
                     for target in extract_rm_targets(command, self.workspace_dir):
                         backup_file(target)

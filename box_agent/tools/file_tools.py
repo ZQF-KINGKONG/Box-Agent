@@ -71,6 +71,11 @@ def truncate_text_by_tokens(
 _MODEL_CONTEXT_EXTS = {".html", ".htm", ".json", ".md", ".txt", ".log", ".xml"}
 _MODEL_CONTEXT_PATH_PARTS = {"qa", "rendered", "slides", "vision_inputs"}
 _MODEL_CONTEXT_SIZE_THRESHOLD = 8_000
+_MODEL_HISTORY_PLACEHOLDER_PREFIXES = (
+    "[Full tool-call argument omitted from model history]",
+    "[Full file content omitted from model history]",
+    "[Full tool output omitted from model history]",
+)
 
 
 def _strip_number_prefix(line: str) -> str:
@@ -108,6 +113,17 @@ def _looks_like_generated_artifact(file_path: Path, content: str) -> bool:
     if any(part in _MODEL_CONTEXT_PATH_PARTS for part in file_path.parts) and suffix in _MODEL_CONTEXT_EXTS:
         return True
     return len(content) > _MODEL_CONTEXT_SIZE_THRESHOLD and suffix in _MODEL_CONTEXT_EXTS
+
+
+def _model_history_placeholder_error(*values: str) -> str | None:
+    """Reject internal history placeholders before they reach real files."""
+    for value in values:
+        if any(value.startswith(prefix) for prefix in _MODEL_HISTORY_PLACEHOLDER_PREFIXES):
+            return (
+                "Refusing to write a model-history placeholder to disk. "
+                "Regenerate the real file content, or read the existing file with read_file before editing."
+            )
+    return None
 
 
 def _summarize_json_for_model(raw_text: str) -> list[str]:
@@ -367,6 +383,10 @@ class WriteTool(Tool):
                 if error:
                     return ToolResult(success=False, content="", error=error)
 
+            placeholder_error = _model_history_placeholder_error(content)
+            if placeholder_error:
+                return ToolResult(success=False, content="", error=placeholder_error)
+
             bypass_error = detect_pptx_self_check_bypass(str(file_path), content)
             if bypass_error:
                 return ToolResult(success=False, content="", error=bypass_error)
@@ -466,6 +486,10 @@ class EditTool(Tool):
                 )
 
             content = file_path.read_text(encoding="utf-8")
+
+            placeholder_error = _model_history_placeholder_error(old_str, new_str)
+            if placeholder_error:
+                return ToolResult(success=False, content="", error=placeholder_error)
 
             bypass_error = detect_pptx_self_check_bypass(str(file_path), f"{content}\n{old_str}\n{new_str}")
             if bypass_error:

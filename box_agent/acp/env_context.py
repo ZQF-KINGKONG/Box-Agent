@@ -286,6 +286,12 @@ def _format_cli_section(cli: dict[str, str | None]) -> list[str]:
     if available:
         lines.append("- 可用 CLI（机器上已安装，可以通过 bash 工具直接调用）：")
         lines.extend(available)
+        if cli.get("lark-cli"):
+            lines.append(
+                "- 飞书/Lark CLI 策略：officev3 本地会话只允许用户身份；业务命令必须显式加 "
+                "`--as user`，不要使用 `--as bot`、`config bind --identity bot-only` 或 "
+                "`config strict-mode`。"
+            )
     if missing:
         lines.append("- 未安装 CLI（不要假装能调用）：" + ", ".join(missing))
     return lines

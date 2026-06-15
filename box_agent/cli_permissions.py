@@ -29,6 +29,8 @@ class CLIPermissionNegotiator:
         scope = permission_request.get("scope", "")
         requested_scope = permission_request.get("requested_scope", "")
         path = permission_request.get("path", "")
+        command = permission_request.get("command", "")
+        is_safety_request = scope == "safety"
 
         # Dedup: filesystem requests look up directory grants; other
         # capabilities use the legacy (scope, requested_scope) table.
@@ -39,33 +41,50 @@ class CLIPermissionNegotiator:
                 target = None
             if target is not None and self._store.has_filesystem_dir_grant(target):
                 return True
-        elif self._store.has_grant(scope, requested_scope):
+        elif not is_safety_request and self._store.has_grant(scope, requested_scope):
             return True
 
         reason = permission_request.get("reason", "")
+        temporary_supported = permission_request.get("temporary_supported", True) is not False
+        persistent_supported = permission_request.get("persistent_supported", True) is not False
 
         print()
         print("\033[1m\033[33m🔒 权限申请\033[0m")
         if path:
             print(f"   路径: \033[36m{path}\033[0m")
+        if command:
+            print(f"   命令: \033[36m{command}\033[0m")
         print(f"   原因: {reason}")
         print()
-        print("   \033[1m[1]\033[0m 仅本次允许")
-        print("   \033[1m[2]\033[0m 始终允许（本次会话）")
-        print("   \033[1m[3]\033[0m 拒绝")
+        choices: dict[str, str] = {}
+        next_choice = 1
+        if temporary_supported:
+            key = str(next_choice)
+            choices[key] = "prompt"
+            print(f"   \033[1m[{key}]\033[0m 仅本次允许")
+            next_choice += 1
+        if persistent_supported:
+            key = str(next_choice)
+            choices[key] = "session"
+            print(f"   \033[1m[{key}]\033[0m 始终允许（本次会话）")
+            next_choice += 1
+        reject_key = str(next_choice)
+        choices[reject_key] = "reject"
+        print(f"   \033[1m[{reject_key}]\033[0m 拒绝")
 
         choice = await _prompt_choice()
+        selected = choices.get(choice, "reject")
 
-        if choice in ("1", "2"):
-            grant_lifetime = "prompt" if choice == "1" else "session"
-            label = "仅本次" if choice == "1" else "本次会话"
+        if selected in ("prompt", "session"):
+            grant_lifetime = selected
+            label = "仅本次" if selected == "prompt" else "本次会话"
             if scope == "filesystem" and path:
                 grant_dir = _derive_grant_dir(path)
                 if grant_dir is None:
                     print("\033[31m   ✗ 无法解析路径，已拒绝\033[0m\n")
                     return False
                 self._store.add_filesystem_dir_grant(grant_dir, grant_lifetime)
-            else:
+            elif not is_safety_request:
                 self._store.add_grant(scope, requested_scope, grant_lifetime)
             print(f"\033[32m   ✓ 已允许（{label}）\033[0m\n")
             return True
@@ -96,7 +115,7 @@ def _read_with_echo() -> str:
     its prompt session returns.  We restore canonical mode + echo via
     termios before calling ``input()``, then put the old state back.
     """
-    prompt_text = "\n   请选择 [1/2/3]: "
+    prompt_text = "\n   请选择: "
 
     try:
         import termios

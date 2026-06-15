@@ -17,7 +17,12 @@ from box_agent.tools.base import Tool
 from box_agent.tools.bash_tool import BashKillTool, BashOutputTool, BashTool
 from box_agent.tools.file_tools import EditTool, ReadTool, WriteTool
 from box_agent.tools.image_generation_tool import GenerateImageTool
-from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxEnvironment, SandboxStatusTool
+from box_agent.tools.jupyter_tool import (
+    JupyterSandboxTool,
+    MAX_EXECUTE_CODE_CHARS,
+    SandboxEnvironment,
+    SandboxStatusTool,
+)
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
@@ -31,23 +36,32 @@ if TYPE_CHECKING:
     from box_agent.tools.permissions import PermissionEngine
 
 
-# Single source of truth for the sandbox / Python-execution block injected
-# into the system prompt. Both CLI and ACP paths substitute {SANDBOX_INFO}
-# with this text so the model gets one consistent description of:
-#   - where Python actually runs (isolated Jupyter kernel, not host python),
-#   - how to install extra packages (inside execute_code via !pip, never bash),
-#   - which packages are pre-bundled,
-#   - document processing priorities that depend on sandbox packages.
-SANDBOX_INFO_PROMPT = """
+def build_sandbox_info_prompt(use_output_dir: bool = True) -> str:
+    """Build the sandbox prompt block for output or project workspace mode."""
+    if use_output_dir:
+        location_line = (
+            "沙箱有独立 `sys.executable`，cwd 已是 `{workspace}/output/`，"
+            "存盘用相对路径（如 `plt.savefig(\"chart.png\")`）；禁写 `/mnt/data/`、"
+            "`sandbox:` 前缀；读用户上传文件用 `../<name>` 回 workspace 根。"
+        )
+    else:
+        location_line = (
+            "沙箱有独立 `sys.executable`，cwd 已是当前工作区/代码项目根目录，"
+            "存盘用项目内相对路径；不要默认创建或使用 `output/` 目录；"
+            "禁写 `/mnt/data/`、`sandbox:` 前缀。"
+        )
+
+    return f"""
 ## Python Sandbox (execute_code)
 
 Python 代码通过 `execute_code` 在**隔离 Jupyter kernel** 中运行，和 host Python 独立：
 
-- **运行位置**：沙箱有独立 `sys.executable`，cwd 已是 `{workspace}/output/`，存盘用相对路径（如 `plt.savefig("chart.png")`）；禁写 `/mnt/data/`、`sandbox:` 前缀；读用户上传文件用 `../<name>` 回 workspace 根。
+- **运行位置**：{location_line}
 - **状态持久**：同会话内变量、import、已加载数据保留到下一次调用；保持分步执行避免错误。
 - **预装包**：pandas、numpy、matplotlib、seaborn、scikit-learn、openpyxl、xlrd、python-docx、pypdf、pdfplumber、reportlab、python-pptx、beautifulsoup4、lxml、pillow、requests、pyyaml、python-dateutil、chardet + 标准库——**不要重装**，会拖慢首次执行。
 - **装新包**：仅在确认缺失时，在 `execute_code` 内用 `%pip install <pkg>` / `!pip install <pkg>`（走当前 kernel 的 pip，落沙箱 venv）。**绝对禁止** `bash` 跑 `pip install`——会装到 host，沙箱仍 `ModuleNotFoundError`。
 - **用 execute_code**：数据分析、可视化、CSV/Excel/JSON/图片读写、Word/PDF/PPT 处理、多步计算、需保留状态的脚本。
+- **单次代码大小**：每次 `execute_code(code=...)` 控制在 {MAX_EXECUTE_CODE_CHARS} 字符以内；大脚本/模板/数据/生成文件内容要分多次执行或落盘后读写，不要把大段内容塞进一个工具参数。
 - **必须执行**：用户要求“用/使用/运行 Python”得到一个具体结果（如生成随机数、计算数值、处理数据/文件、运行脚本）时，必须调用 `execute_code` 返回真实执行结果；不要只给代码示例。只有用户明确问“怎么写/示例代码/解释代码”时才只返回代码。
 - **用 bash**：仓库代码编辑、测试/构建、系统命令、git——与沙箱无关。
 
@@ -62,6 +76,12 @@ Excel/Word/PDF/PowerPoint 优先在沙箱内用 Python 包，避免外部 CLI：
 
 **Skill vs Sandbox**：数据抽取/格式转换/表格处理 → 沙箱；复杂版式/OOXML 精操作/模板化生成/公式重算 → 先加载 skill。
 """
+
+
+# Single source of truth for the default sandbox / Python-execution block
+# injected into the system prompt. ACP may build a per-session variant when a
+# host marks the session as an existing project workspace.
+SANDBOX_INFO_PROMPT = build_sandbox_info_prompt(use_output_dir=True)
 
 
 # Minimal color constants used in status messages.
@@ -243,7 +263,8 @@ def merge_mcp_tools(base_tools: list[Tool], mcp_tools: list[Tool]) -> None:
 def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, sandbox_mode: bool = False,
                         allow_full_access: bool = True, non_interactive: bool = False, output=None,
                         llm=None, permission_engine: PermissionEngine | None = None,
-                        skill_runtime_context: SkillRuntimeContext | None = None):
+                        skill_runtime_context: SkillRuntimeContext | None = None,
+                        use_output_dir: bool = True):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -254,11 +275,13 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         workspace_dir: Workspace directory path
         sandbox_mode: If True, enable Jupyter sandbox mode
         allow_full_access: If True, tools can access full system; if False, restricted to workspace
-        non_interactive: If True, dangerous commands are rejected without prompting
+        non_interactive: If True, bash never prompts on stdin; dangerous
+            commands return approval requests for the core/host.
         output: Callable for status messages (default: print)
         llm: LLM client instance (needed for sub_agent tool)
         permission_engine: If provided, tools use capability-based permission checks
         skill_runtime_context: Runtime env to expose to subprocess-backed tools
+        use_output_dir: If True, execute_code chdirs into {workspace}/output.
     """
     _out = output or print
     # Ensure workspace directory exists
@@ -311,6 +334,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         sandbox_tool = JupyterSandboxTool(
             workspace_dir=str(workspace_dir),
             runtime_env=runtime_context.env(),
+            use_output_dir=use_output_dir,
         )
         tools.append(sandbox_tool)
         # Also add sandbox status tool
@@ -358,6 +382,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
             llm=llm,
             parent_tools=parent_tools,
             workspace_dir=str(workspace_dir),
+            artifact_detection_enabled=use_output_dir,
         )
         tools.append(sub_agent_tool)
         _out(f"{Colors.GREEN}✅ Loaded sub-agent tool (sub_agent){Colors.RESET}")

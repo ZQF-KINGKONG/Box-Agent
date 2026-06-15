@@ -19,7 +19,7 @@ from box_agent.config import (
 from box_agent.memory import MemoryManager
 from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
 from box_agent.tools.base import Tool, ToolResult
-from box_agent.tools.setup import SANDBOX_INFO_PROMPT
+from box_agent.tools.setup import SANDBOX_INFO_PROMPT, build_sandbox_info_prompt
 
 
 class DummyConn:
@@ -76,6 +76,19 @@ def test_sandbox_prompt_requires_execute_code_for_explicit_python_results():
     assert "用户要求“用/使用/运行 Python”得到一个具体结果" in SANDBOX_INFO_PROMPT
     assert "必须调用 `execute_code` 返回真实执行结果" in SANDBOX_INFO_PROMPT
     assert "不要只给代码示例" in SANDBOX_INFO_PROMPT
+
+
+def test_sandbox_prompt_limits_single_execute_code_argument_size():
+    assert "每次 `execute_code(code=...)` 控制在 8000 字符以内" in SANDBOX_INFO_PROMPT
+    assert "不要把大段内容塞进一个工具参数" in SANDBOX_INFO_PROMPT
+
+
+def test_project_sandbox_prompt_does_not_point_at_output_dir():
+    prompt = build_sandbox_info_prompt(use_output_dir=False)
+
+    assert "当前工作区/代码项目根目录" in prompt
+    assert "不要默认创建或使用 `output/`" in prompt
+    assert "cwd 已是 `{workspace}/output/`" not in prompt
 
 
 class TodoLLM:
@@ -417,6 +430,52 @@ async def test_acp_turn_executes_tool(acp_agent):
     assert progress_outputs == []
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
+
+
+@pytest.mark.asyncio
+async def test_acp_project_artifact_mode_does_not_create_output(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, DoneLLM(), [], "system {SANDBOX_INFO}")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(tmp_path), field_meta={"artifact_mode": "project"})
+    )
+    state = agent._sessions[session.sessionId]
+
+    assert not (tmp_path / "output").exists()
+    assert state.output_dir is None
+    assert state.artifact_mode == "project"
+    assert "Do not create or use an `output/` folder" in state.agent.system_prompt
+    assert "当前工作区/代码项目根目录" in state.agent.system_prompt
+    assert "{SANDBOX_INFO}" not in state.agent.system_prompt
+    assert session.field_meta["artifact_mode"] == "project"
+
+
+@pytest.mark.asyncio
+async def test_acp_default_artifact_mode_creates_output(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=1, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, DoneLLM(), [], "system {SANDBOX_INFO}")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=str(tmp_path), field_meta={"session_mode": "general"})
+    )
+    state = agent._sessions[session.sessionId]
+
+    assert (tmp_path / "output").is_dir()
+    assert state.output_dir == str(tmp_path / "output")
+    assert state.artifact_mode == "output"
+    assert "cwd 已是 `{workspace}/output/`" in state.agent.system_prompt
+    assert session.field_meta is None
 
 
 @pytest.mark.asyncio

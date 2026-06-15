@@ -7,8 +7,8 @@ JSON blob, e.g.::
 
 Dumping that straight to the user is unfriendly. ``humanize_llm_error`` maps the
 common, actionable failure classes (content moderation, auth, rate limit, quota,
-context-length, server errors) to a short Chinese sentence, and falls back to a
-trimmed raw message for anything unrecognized.
+context-length, endpoint 404, server errors) to a short Chinese sentence, and
+falls back to a trimmed raw message for anything unrecognized.
 
 Detection is best-effort and SDK-agnostic: we never hard-import openai/anthropic
 (they're optional providers), so we inspect attributes if present and otherwise
@@ -82,6 +82,13 @@ _RULES: tuple[tuple[str, tuple[str, ...], str], ...] = (
         ("model_not_found", "model not found", "does not exist", "no such model",
          "unknown model"),
         "指定的模型不存在或当前账号不可用。请在配置中确认 model 名称是否正确。",
+    ),
+    (
+        "endpoint_not_found",
+        ("404 page not found", "404 not found", "page not found", "not found: /"),
+        "模型接口返回 404。通常是 api_base 路径错误，或 provider 协议与接口不匹配；"
+        "如果 api_base 是小浣熊默认接口 xiaohuanxiong.com/api/web/llm/v2，"
+        "请使用 provider: openai，不要使用 anthropic。",
     ),
     (
         "server_error",

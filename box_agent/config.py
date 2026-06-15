@@ -5,6 +5,7 @@ Provides unified configuration loading and management functionality
 
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 from pydantic import BaseModel, Field, PrivateAttr
@@ -14,6 +15,23 @@ from .auth import should_attach_auth_header
 DEFAULT_API_KEY_PLACEHOLDER = "YOUR_API_KEY_HERE"
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 HOSTED_GATEWAY_API_KEY_PLACEHOLDER = "box-agent-auth-json"
+XIAOHUANXIONG_MAX_OUTPUT_TOKENS = 80000
+USER_CONFIGURED_MAX_OUTPUT_TOKENS = 63999
+
+
+def _is_xiaohuanxiong_api_base(api_base: str) -> bool:
+    try:
+        hostname = urlparse(api_base).hostname or ""
+    except ValueError:
+        return False
+    hostname = hostname.lower().rstrip(".")
+    return hostname == "xiaohuanxiong.com" or hostname.endswith(".xiaohuanxiong.com")
+
+
+def _default_max_output_tokens_for_api_base(api_base: str) -> int:
+    if _is_xiaohuanxiong_api_base(api_base):
+        return XIAOHUANXIONG_MAX_OUTPUT_TOKENS
+    return USER_CONFIGURED_MAX_OUTPUT_TOKENS
 
 
 class RetryConfig(BaseModel):
@@ -35,7 +53,7 @@ class LLMConfig(BaseModel):
     provider: str = "anthropic"  # "anthropic" or "openai"
     auth_file: str = ""
     context_window: int = 180000
-    max_output_tokens: int = 80000
+    max_output_tokens: int = USER_CONFIGURED_MAX_OUTPUT_TOKENS
     # Wall-clock cap (seconds) handed to the underlying provider SDK. For
     # streaming calls this bounds the gap between bytes (connect + per-read),
     # not the total generation, so a long answer is fine as long as tokens keep
@@ -104,6 +122,7 @@ class AgentConfig(BaseModel):
     max_parallel_tools: int = 8
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
+    code_prompt_path: str = "code_prompt.md"
     # Memory
     enable_memory: bool = True
     memory_dir: str = "~/.box-agent/memory"
@@ -288,6 +307,7 @@ class Config(BaseModel):
             exponential_base=retry_data.get("exponential_base", 2.0),
         )
 
+        default_max_output_tokens = _default_max_output_tokens_for_api_base(api_base)
         llm_config = LLMConfig(
             api_key=api_key,
             api_base=api_base,
@@ -295,7 +315,7 @@ class Config(BaseModel):
             provider=data.get("provider", "anthropic"),
             auth_file=data.get("auth_file") or str(config_path.parent / "auth.json"),
             context_window=data.get("context_window", 180000),
-            max_output_tokens=data.get("max_output_tokens", 80000),
+            max_output_tokens=data.get("max_output_tokens", default_max_output_tokens),
             timeout=float(data.get("timeout", 600.0) or 600.0),
             retry=retry_config,
         )
@@ -372,6 +392,8 @@ class Config(BaseModel):
             workspace_dir=data.get("workspace_dir", "./workspace"),
             max_parallel_tools=data.get("max_parallel_tools", 8),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
+            analysis_prompt_path=data.get("analysis_prompt_path", "analysis_prompt.md"),
+            code_prompt_path=data.get("code_prompt_path", "code_prompt.md"),
             enable_memory=data.get("enable_memory", True),
             memory_dir=data.get("memory_dir", "~/.box-agent/memory"),
             enable_memory_extraction=data.get("enable_memory_extraction", True),

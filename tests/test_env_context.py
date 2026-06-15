@@ -137,6 +137,17 @@ def test_prompt_renders_cli_split_by_availability() -> None:
     assert "`wecom-cli`" in out and "`dingtalk-cli`" in out
 
 
+def test_prompt_declares_lark_user_identity_policy() -> None:
+    ctx = EnvContext.from_meta({"cli": {"lark-cli": "/usr/local/bin/lark-cli"}})
+
+    out = build_env_context_prompt(ctx)
+
+    assert "飞书/Lark CLI 策略" in out
+    assert "`--as user`" in out
+    assert "`--as bot`" in out
+    assert "bot-only" in out
+
+
 def test_prompt_drops_extras_from_output() -> None:
     """Extras must never reach the system prompt — only sanitized known fields do."""
     ctx = EnvContext.from_meta(

@@ -268,14 +268,18 @@ class TestBashToolSafety:
         tool = BashTool(non_interactive=True)
         result = await tool.execute(command="rm test.txt")
         assert not result.success
-        assert "Dangerous command blocked" in result.error
+        assert "requires approval" in result.error
+        assert result.permission_request is not None
+        assert result.permission_request["scope"] == "safety"
+        assert result.permission_request["requested_scope"] == "dangerous_command"
+        assert result.permission_request["persistent_supported"] is False
+        assert result.permission_request["command"] == "rm test.txt"
 
     @pytest.mark.asyncio
     async def test_scope_escape_blocked(self):
         from box_agent.tools.bash_tool import BashTool
 
         tool = BashTool(workspace_dir="/tmp/test_workspace", allow_full_access=False)
-        # Patch ask_user_confirmation to avoid terminal prompt for cd check
         result = await tool.execute(command="cd /etc && ls")
         assert not result.success
         assert "blocked" in result.error.lower()

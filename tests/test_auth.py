@@ -142,6 +142,36 @@ def test_hosted_gateway_allows_missing_api_key_and_model(tmp_path: Path) -> None
     config = Config.from_yaml(config_path)
     assert config.llm.api_key == "box-agent-auth-json"
     assert config.llm.model == ""
+    assert config.llm.max_output_tokens == 80000
+
+
+def test_user_configured_endpoint_defaults_main_max_output_tokens_to_common_ceiling(
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'api_key: "user-key"\n'
+        'api_base: "https://token.sensenova.cn/v1"\n'
+        'model: "deepseek-v4-flash"\n'
+        'provider: "openai"\n',
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.llm.max_output_tokens == 63999
+
+
+def test_explicit_main_max_output_tokens_overrides_domain_default(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        'api_base: "https://code-test.xiaohuanxiong.com/api/web/llm/v2"\n'
+        'provider: "openai"\n'
+        "max_output_tokens: 12345\n",
+        encoding="utf-8",
+    )
+
+    config = Config.from_yaml(config_path)
+    assert config.llm.max_output_tokens == 12345
 
 
 def test_hosted_gateway_drops_unconfigured_default_model(tmp_path: Path) -> None:

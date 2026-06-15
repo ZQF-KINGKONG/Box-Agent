@@ -125,3 +125,23 @@ def test_data_analysis_prompt_includes_plot_contract_and_general_prompt_does_not
     assert "Interactive Chart Data Output" in analysis_prompt
     assert "<!--PLOT_DATA:" in analysis_prompt
     assert "sandbox:/mnt/data/<filename>" in analysis_prompt
+
+
+def test_code_agent_prompt_includes_software_engineering_contract(tmp_path):
+    llm = _TrackingLLM(mode_label="general")
+    agent, _ = _make_agent(tmp_path, llm)
+    agent._system_prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    general_prompt = agent._build_session_prompt("general", workspace=tmp_path)
+    code_prompt = agent._build_session_prompt(
+        "code_agent",
+        workspace=tmp_path,
+        artifact_mode="project",
+    )
+
+    assert "Software Engineering Mode (code_agent)" not in general_prompt
+    assert "Software Engineering Mode (code_agent)" in code_prompt
+    assert "优先用 `rg` 定位" in code_prompt
+    assert "代码工作区就是交付位置" in code_prompt
+    assert "不要默认创建或使用 `output/`" in code_prompt
+    assert "cwd 已是 `{workspace}/output/`" not in code_prompt

@@ -15,8 +15,8 @@
 # 重要:
 # - 世界杯小组赛多为中性场,故 neutral 默认 true(predict.py 不施加主场加成)。
 #   仅东道主(美/加/墨)在本国比赛时 neutral:false。
-# - 当前球队库聚焦 25 队;库外球队(如 CPV/EGY/KSA 等)对阵会标「缺数据」,
-#   需先在 references/teams/ 扩充后才能预测。
+# - 球队库已覆盖全部 48 队(references/teams/),正常对阵均可直接预测。
+#   若个别球队需更新,按相同格式修改对应 references/teams/<name>.yaml 即可。
 # - predict.py 用 --today YYYY-MM-DD 过滤 [today, today+1] 内的比赛。
 
 fixtures:

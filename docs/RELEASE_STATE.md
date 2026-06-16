@@ -1,5 +1,43 @@
 # Release State
 
+## v0.8.70 (2026-06-16)
+
+- **Commit:** `3160ce3a1ab79d73d9814c5e4688d911810a6a81` (main)
+- **PyPI:** https://pypi.org/project/box-agent/0.8.70/
+- **GitHub release:** https://github.com/Raccoon-Office/Box-Agent/releases/tag/v0.8.70
+- **Compare:** https://github.com/Raccoon-Office/Box-Agent/compare/v0.8.68...v0.8.70
+- **Note:** 0.8.69 was bumped in code but never tagged/released; v0.8.70 is the first published release since v0.8.68.
+
+### Artifacts (SHA256)
+
+| File | SHA256 |
+|------|--------|
+| `box_agent-0.8.70-py3-none-any.whl` | `0e55faeaa5c966d634dba2635bfb53689c29e8fc29b8f91ca53d13accedf321e` |
+| `box_agent-0.8.70.tar.gz` | `6be546098969d681cd3b2b958fc9b22078031edba430de8480089193a0dfee57` |
+| `box-agent-runtime-v0.8.70-darwin-arm64.tar.gz` | `e0269c518ddb8880f71dc61671d392318348fbb3747a7816a213ad7e78b9db0b` |
+
+### What shipped
+
+Community-submitted "featured" skills (officev3 on-demand install, NOT builtin):
+- Five submitted skills now ship inside the wheel/runtime as orphans (present on disk, excluded from the builtin `_manifest.json` whitelist) so officev3 surfaces them as "精选推荐" cards and installs them on demand into `~/.box-agent/skills/`:
+  - `viral-topic` (suite: `wechat-/x-/bilibili-/youtube-viral-topic`) + `viral-title` — author **袋鼠帝**
+  - `self-media-ad-workflow` — author **金三**
+  - `worldcup-prediction` + `world-cup-briefing` — author **贝贝**
+- Each `SKILL.md` carries an `author` frontmatter field; officev3 reads it to attribute the card.
+- `scripts/generate_skills_manifest.py`: new `EXCLUDED_SKILL_DIRS` excludes these top-level skill dirs (and their nested sub-skills) from the builtin manifest by **path prefix** (name-only would miss the `viral-topic` suite's sub-skills). Regenerating still yields the same 28 builtin skills.
+
+worldcup-prediction docs correction:
+- The team-database section in `SKILL.md` and the comment in `references/schedule.yaml` claimed "聚焦 25 队 / 库外缺数据" (even listing already-present teams like CPV/EGY/KSA as missing). Corrected to the real **48 teams / 12 groups (A–L)**, rebuilt directly from `references/teams/*.yaml` data. No team data changed — documentation only.
+
+Build hygiene:
+- The wheel/runtime were built after removing untracked local cruft (`__pycache__/*.pyc`, `.omx/` runtime state) that `MANIFEST.in`'s `recursive-include box_agent/skills *` had been sweeping into prior artifacts from other skills (document-skills, research-synthesis, etc.). 0.8.70 wheel and runtime contain 0 such files.
+
+### Follow-ups / known gaps
+
+- **Runtime: darwin-arm64 only.** Built from this macOS host. `darwin-x64` / `linux-*` / Windows (`scripts/build_win_runtime.py`) runtimes are NOT built for 0.8.70; downstream apps on those platforms get the featured skills only after their runtime is rebuilt/repackaged.
+- **officev3 build-resources not synced.** This release publishes the runtime artifact; it does not push it into officev3's `build-resources/box-agent-runtime`. The featured cards can only install once officev3 runs `npm run box-agent:install` (or repackages) with the 0.8.70 runtime. Until then the cards render (with author attribution) but install fails with "不是有效目录".
+- **Builtin cruft is upstream local state, not git-tracked.** The `__pycache__`/`.omx` swept into earlier artifacts came from running those skills locally; consider a `MANIFEST.in` prune or a pre-build clean step so future releases don't depend on a clean checkout.
+
 ## v0.8.67 (2026-06-08)
 
 - **Commit:** `7a59269814340a50b6b9a1e4a0a285c90f53a28c` (main)

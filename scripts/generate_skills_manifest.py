@@ -29,6 +29,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = REPO_ROOT / "box_agent" / "skills"
 MANIFEST_PATH = SKILLS_DIR / "_manifest.json"
 
+# Top-level skill directories that physically live under box_agent/skills/ (so
+# they ship inside the wheel/runtime) but must NOT be loaded as builtin —
+# including any nested sub-skills (e.g. viral-topic is a suite with
+# wechat-/x-/bilibili-/youtube-viral-topic). officev3 vendors these as
+# "featured" recommended cards and installs them on demand into the user skills
+# dir (~/.box-agent/skills/). Keeping them out of the manifest leaves them as
+# orphans here — ignored by the builtin SkillLoader, available for on-demand
+# install. Do NOT remove unless you intend to make them always-on builtin.
+EXCLUDED_SKILL_DIRS: frozenset[str] = frozenset(
+    {
+        "viral-topic",
+        "viral-title",
+        "self-media-ad-workflow",
+        "worldcup-prediction",
+        "world-cup-briefing",
+    }
+)
+
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 
 
@@ -67,10 +85,18 @@ def _collect_skills() -> List[Tuple[str, str]]:
 
     entries: List[Tuple[str, str]] = []
     for skill_md in sorted(SKILLS_DIR.rglob("SKILL.md")):
+        rel = skill_md.relative_to(SKILLS_DIR).as_posix()
+        top_dir = rel.split("/", 1)[0]
+        if top_dir in EXCLUDED_SKILL_DIRS:
+            print(
+                f"info: excluding '{rel}' from builtin manifest "
+                f"(officev3 on-demand recommended skill)",
+                file=sys.stderr,
+            )
+            continue
         name = _parse_skill_name(skill_md)
         if not name:
             continue
-        rel = skill_md.relative_to(SKILLS_DIR).as_posix()
         entries.append((name, rel))
 
     seen: dict[str, str] = {}

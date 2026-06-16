@@ -27,6 +27,7 @@ from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_con
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
+from box_agent.tools.schedule_tool import CreateScheduledTaskTool
 from box_agent.tools.skill_tool import create_skill_tools
 from box_agent.tools.sub_agent_tool import SubAgentTool
 from box_agent.tools.todo_tool import TodoReadTool, TodoStore, TodoWriteTool
@@ -137,6 +138,13 @@ async def initialize_base_tools(config: Config, output=None, memory_manager=None
         bash_kill_tool = BashKillTool()
         tools.append(bash_kill_tool)
         _out(f"{Colors.GREEN}✅ Loaded Bash Kill tool{Colors.RESET}")
+
+    # 1b. Scheduled-task draft tool (workspace-independent).
+    # Pops a pre-filled "create scheduled task" window on the desktop host via
+    # ToolResult.raw_output → tool_call_update.rawOutput. Does not persist anything
+    # itself; the renderer owns the actual save.
+    tools.append(CreateScheduledTaskTool())
+    _out(f"{Colors.GREEN}✅ Loaded Scheduled Task tool (create_scheduled_task){Colors.RESET}")
 
     # 2. Claude Skills (loaded from package directory)
     if config.tools.enable_skills:

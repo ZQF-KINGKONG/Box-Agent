@@ -139,6 +139,45 @@ async def test_generate_image_accepts_explicit_size(
 
 
 @pytest.mark.asyncio
+async def test_generate_image_upscales_too_small_explicit_size_for_openai_style_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["size"] == "1366x768"
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "b64_json": base64.b64encode(PNG_BYTES).decode("ascii"),
+                    }
+                ]
+            },
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/v1/images/generations",
+    )
+
+    result = await tool.execute(
+        prompt="wide edit frame",
+        output_path="assets/generated/wide-safe.png",
+        size="1024x576",
+    )
+
+    assert result.success
+    assert result.raw_output
+    assert result.raw_output["size"] == "1366x768"
+    assert result.raw_output["width"] == 1366
+    assert result.raw_output["height"] == 768
+
+
+@pytest.mark.asyncio
 async def test_generate_image_saves_direct_image_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -465,6 +504,45 @@ async def test_generate_image_edits_reference_image_with_multipart(
     assert result.raw_output
     assert result.raw_output["image_mode"] == "image_to_image"
     assert result.raw_output["reference_images"] == ["reference.png"]
+
+
+@pytest.mark.asyncio
+async def test_generate_image_edit_upscales_too_small_explicit_size_for_openai_style_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(PNG_BYTES)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.read()
+        assert b'name="size"' in body
+        assert b"1366x768" in body
+        return httpx.Response(
+            200,
+            json={"b64_json": base64.b64encode(JPEG_BYTES).decode("ascii")},
+        )
+
+    patch_async_client(monkeypatch, handler)
+    tool = GenerateImageTool(
+        workspace_dir=str(tmp_path),
+        allow_full_access=False,
+        endpoint="https://image.example.test/api/web/llm/v2/images/gen",
+    )
+
+    result = await tool.execute(
+        prompt="给图右下角加一个角标",
+        output_path="assets/generated/edit-safe.jpg",
+        size="1024x576",
+        image_mode="image_to_image",
+        reference_images=["reference.png"],
+    )
+
+    assert result.success, result.error
+    assert result.raw_output
+    assert result.raw_output["size"] == "1366x768"
+    assert result.raw_output["width"] == 1366
+    assert result.raw_output["height"] == 768
 
 
 @pytest.mark.asyncio

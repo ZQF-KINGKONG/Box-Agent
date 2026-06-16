@@ -123,8 +123,9 @@ image_generation:
 # BOX_AGENT_IMAGE_GENERATION_ENDPOINT, BOX_AGENT_IMAGE_GENERATION_API_KEY,
 # BOX_AGENT_IMAGE_GENERATION_TIMEOUT, BOX_AGENT_IMAGE_GEN_ENDPOINT,
 # BOX_AGENT_IMAGE_GEN_API_KEY.
-# This relay is pure pass-through: explicit `size` values such as 1024x1024 are
-# forwarded as-is. Doubao/Seedream models still map width/height to their
+# Explicit `size` values are usually forwarded as-is, but OpenAI-style
+# `/images/gen` / `/images/generations` endpoints are first normalized to avoid
+# undersized requests. Doubao/Seedream models still map width/height to their
 # supported presets when no exact passthrough size is requested.
 
 # ===== officev3 Permission Settings =====

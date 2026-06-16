@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import mimetypes
 import os
 import re
@@ -25,6 +26,7 @@ _API_KEY_ENV = ("BOX_AGENT_IMAGE_GENERATION_API_KEY", "BOX_AGENT_IMAGE_GEN_API_K
 _TIMEOUT_ENV = "BOX_AGENT_IMAGE_GENERATION_TIMEOUT"
 _DEFAULT_TIMEOUT = 120.0
 _MIN_IMAGE_DIMENSION = 1024
+_MIN_OPENAI_IMAGE_PIXELS = _MIN_IMAGE_DIMENSION * _MIN_IMAGE_DIMENSION
 _SEEDREAM_PRESETS: dict[tuple[int, int], list[tuple[int, int]]] = {
     (1, 1): [(2048, 2048), (3072, 3072), (4096, 4096)],
     (3, 4): [(1728, 2304), (2592, 3456), (3520, 4704)],
@@ -56,6 +58,7 @@ _BASE64_IMAGE_KEYS = ("b64_json", "base64", "image_base64", "image", "image_data
 _URL_IMAGE_KEYS = ("url", "image_url", "imageUrl", "image_urls", "imageUrls", "output_url", "signed_url")
 _NESTED_IMAGE_KEYS = ("data", "images", "output", "outputs", "result", "results")
 _EDIT_ENDPOINT_SUFFIXES = ("/images/gen", "/images/generations")
+_OPENAI_IMAGE_ENDPOINT_HINTS = ("/images/gen", "/images/generations", "/images/edits")
 _IMAGE_EDIT_MODES = {"image_to_image", "edit", "image_edit"}
 
 
@@ -186,6 +189,11 @@ def _openai_image_size(width: int, height: int) -> tuple[str, int, int]:
     return size, normalized_width, normalized_height
 
 
+def _is_openai_image_service(endpoint: str | None) -> bool:
+    normalized = (endpoint or "").strip().lower().rstrip("/")
+    return any(normalized.endswith(suffix) for suffix in _OPENAI_IMAGE_ENDPOINT_HINTS)
+
+
 def _normalize_explicit_size(size: str) -> tuple[str, int, int]:
     match = _SIZE_RE.match(size)
     if not match:
@@ -196,6 +204,22 @@ def _normalize_explicit_size(size: str) -> tuple[str, int, int]:
     if width <= 0 or height <= 0:
         raise ValueError("Image size width/height must be positive integers")
     return f"{width}x{height}", width, height
+
+
+def _normalize_openai_explicit_size(size: str) -> tuple[str, int, int]:
+    normalized_size, width, height = _normalize_explicit_size(size)
+    pixel_count = width * height
+    if pixel_count >= _MIN_OPENAI_IMAGE_PIXELS:
+        return normalized_size, width, height
+
+    scale = math.sqrt(_MIN_OPENAI_IMAGE_PIXELS / float(pixel_count))
+    normalized_width = max(width, math.ceil(width * scale))
+    normalized_height = max(height, math.ceil(height * scale))
+    return (
+        f"{normalized_width}x{normalized_height}",
+        normalized_width,
+        normalized_height,
+    )
 
 
 def _compose_openai_prompt(prompt: str, style: str | None, negative_prompt: str | None) -> str:
@@ -358,7 +382,10 @@ class GenerateImageTool(Tool):
             requested_width = width
             requested_height = height
             if size and size.strip():
-                size, width, height = _normalize_explicit_size(size)
+                if _is_openai_image_service(self.endpoint):
+                    size, width, height = _normalize_openai_explicit_size(size)
+                else:
+                    size, width, height = _normalize_explicit_size(size)
             if _is_large_image_service(self.endpoint, self.model):
                 size, width, height = _seedream_size_for_ratio(width, height)
             else:

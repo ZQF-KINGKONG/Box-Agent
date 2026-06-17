@@ -47,6 +47,24 @@ TOOL_CALL_LIMITS: Final[dict[str, int]] = {
     WEB_SEARCH_TOOL_NAME: WEB_SEARCH_TOTAL_LIMIT,
 }
 
+# Setup/bookkeeping tools that must NOT count toward the final-summary
+# wrap-up threshold. That threshold targets process-log answers after many
+# *substantive* tool calls; loading skills, publishing the plan/todos, or
+# touching memory are workflow scaffolding, not the activity it targets.
+# Counting them tripped the wrap-up nudge before real work began (notably in
+# multi-stage PPT / expert-team flows).
+FINAL_SUMMARY_EXCLUDED_TOOLS: Final[frozenset[str]] = frozenset(
+    {
+        "get_skill",
+        "plan_write",
+        "todo_write",
+        "todo_read",
+        "memory_read",
+        "memory_write",
+        "memory_search",
+    }
+)
+
 # Reserve this many trailing steps for synthesis (near-limit wrap-up).
 WRAPUP_REMAINING: Final[int] = 3
 

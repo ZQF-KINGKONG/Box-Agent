@@ -10,6 +10,7 @@ from box_agent.core import (
     _snapshot_workspace,
     run_agent_loop,
 )
+from box_agent.core import FINAL_SUMMARY_TOOL_CALL_THRESHOLD as _FS_THRESHOLD
 from box_agent.events import (
     ArtifactEvent,
     ContentEvent,
@@ -244,6 +245,39 @@ def _echo_tool_calls(count: int) -> list[ToolCall]:
             id=f"t{i}",
             type="function",
             function=FunctionCall(name="echo", arguments={"text": str(i)}),
+        )
+        for i in range(count)
+    ]
+
+
+class NamedTool(Tool):
+    """Minimal tool that reports an arbitrary name (for threshold tests)."""
+
+    def __init__(self, tool_name: str):
+        self._name = tool_name
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def description(self):
+        return f"Tool named {self._name}"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"text": {"type": "string"}}}
+
+    async def execute(self, text: str = ""):
+        return ToolResult(success=True, content=f"{self._name}:{text}")
+
+
+def _named_tool_calls(name: str, count: int) -> list[ToolCall]:
+    return [
+        ToolCall(
+            id=f"{name}-{i}",
+            type="function",
+            function=FunctionCall(name=name, arguments={"text": str(i)}),
         )
         for i in range(count)
     ]
@@ -856,7 +890,7 @@ async def test_tool_heavy_turn_injects_hidden_final_summary_guidance():
         [
             LLMResponse(
                 content="",
-                tool_calls=_echo_tool_calls(11),
+                tool_calls=_echo_tool_calls(_FS_THRESHOLD + 1),
                 finish_reason="tool",
             ),
             LLMResponse(content="结论：已完成。", finish_reason="stop"),
@@ -884,13 +918,13 @@ async def test_tool_heavy_turn_injects_hidden_final_summary_guidance():
 
 
 @pytest.mark.asyncio
-async def test_ten_tool_calls_do_not_inject_final_summary_guidance():
-    """Simple or small tool turns keep the existing behavior unchanged."""
+async def test_at_threshold_does_not_inject_final_summary_guidance():
+    """Exactly at the threshold (boundary) does not trigger the wrap-up nudge."""
     llm = MockLLM(
         [
             LLMResponse(
                 content="",
-                tool_calls=_echo_tool_calls(10),
+                tool_calls=_echo_tool_calls(_FS_THRESHOLD),
                 finish_reason="tool",
             ),
             LLMResponse(content="done", finish_reason="stop"),
@@ -919,7 +953,7 @@ async def test_tool_heavy_empty_final_answer_retries_for_conclusion():
         [
             LLMResponse(
                 content="",
-                tool_calls=_echo_tool_calls(11),
+                tool_calls=_echo_tool_calls(_FS_THRESHOLD + 1),
                 finish_reason="tool",
             ),
             LLMResponse(content="", finish_reason="stop"),
@@ -941,6 +975,67 @@ async def test_tool_heavy_empty_final_answer_retries_for_conclusion():
     assert any("produced no visible final answer" in e.content for e in injected)
     done = [e for e in events if isinstance(e, DoneEvent)]
     assert done[-1].final_content == "最终结论：文件已处理。"
+
+
+@pytest.mark.asyncio
+async def test_setup_tools_do_not_count_toward_final_summary_threshold():
+    """Setup/bookkeeping tools (skills, plan, todos, memory) must not trip the
+    wrap-up nudge — even far beyond the threshold they are not 'process log' work."""
+    n = _FS_THRESHOLD + 10
+    llm = MockLLM(
+        [
+            LLMResponse(
+                content="",
+                tool_calls=_named_tool_calls("todo_write", n),
+                finish_reason="tool",
+            ),
+            LLMResponse(content="done", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"todo_write": NamedTool("todo_write")},
+            max_steps=5,
+        )
+    )
+
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert not any("many visible tool calls" in e.content for e in injected)
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done[-1].final_content == "done"
+
+
+@pytest.mark.asyncio
+async def test_substantive_calls_still_count_when_mixed_with_setup_tools():
+    """Excluded setup tools don't count, but substantive tools beyond the
+    threshold still trigger the wrap-up nudge."""
+    setup = _named_tool_calls("get_skill", 8)
+    substantive = _echo_tool_calls(_FS_THRESHOLD + 1)
+    # Re-id substantive calls to avoid collisions with any other ids.
+    mixed = setup + substantive
+    llm = MockLLM(
+        [
+            LLMResponse(content="", tool_calls=mixed, finish_reason="tool"),
+            LLMResponse(content="结论：完成。", finish_reason="stop"),
+        ]
+    )
+
+    events = await collect(
+        run_agent_loop(
+            llm=llm,
+            messages=_msgs(),
+            tools={"get_skill": NamedTool("get_skill"), "echo": EchoTool()},
+            max_steps=5,
+        )
+    )
+
+    injected = [e for e in events if isinstance(e, InjectedMessageEvent)]
+    assert any("many visible tool calls" in e.content for e in injected)
+    done = [e for e in events if isinstance(e, DoneEvent)]
+    assert done[-1].final_content == "结论：完成。"
 
 
 @pytest.mark.asyncio

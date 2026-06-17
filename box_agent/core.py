@@ -56,6 +56,7 @@ from .logger import AgentLogger
 from .llm.debug_logging import reset_llm_debug_sink, set_llm_debug_sink
 from .loop_guards import (
     EMPTY_ARGS_LIMIT,
+    FINAL_SUMMARY_EXCLUDED_TOOLS,
     TOOL_CALL_LIMITS,
     WEB_SEARCH_BATCH_SIZE,
     WEB_SEARCH_TOOL_NAME,
@@ -115,7 +116,7 @@ _FORCED_PLAN_RETRY_GUIDANCE = (
     "Call `plan_write` with action `set` now before continuing the answer."
 )
 
-FINAL_SUMMARY_TOOL_CALL_THRESHOLD: Final[int] = 10
+FINAL_SUMMARY_TOOL_CALL_THRESHOLD: Final[int] = 50
 
 
 def final_summary_wrapup_text(tool_call_count: int) -> str:
@@ -2155,7 +2156,7 @@ async def run_agent_loop(
             else:
                 allowed_to_execute, internal_skip_error = _reserve_tool_budget(fn_name)
             tool_user_visible = allowed_to_execute
-            if tool_user_visible:
+            if tool_user_visible and fn_name not in FINAL_SUMMARY_EXCLUDED_TOOLS:
                 visible_tool_call_total += 1
 
             yield ToolCallStart(
@@ -2414,7 +2415,7 @@ async def run_agent_loop(
                 else:
                     allowed_to_execute, internal_skip_error = _reserve_tool_budget(tc.function.name)
                 par_user_visible[tc.id] = allowed_to_execute
-                if allowed_to_execute:
+                if allowed_to_execute and tc.function.name not in FINAL_SUMMARY_EXCLUDED_TOOLS:
                     visible_tool_call_total += 1
                 yield ToolCallStart(
                     tool_call_id=tc.id,

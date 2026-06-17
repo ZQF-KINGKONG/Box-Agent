@@ -23,6 +23,10 @@ _DEFAULT_CLI_NAME = "obsidian"
 _NOTE_TITLE_RE = re.compile(r"[^A-Za-z0-9\u4e00-\u9fff._ -]+")
 
 
+def obsidian_config_path() -> Path:
+    return Path(os.environ.get(OBSIDIAN_CONFIG_ENV, str(_DEFAULT_CONFIG_PATH))).expanduser()
+
+
 def _launch_permission_request(reason: str) -> dict[str, Any]:
     return {
         "type": "permission_request",
@@ -75,8 +79,7 @@ def _config_from_env_context(env_context: Any) -> dict[str, Any]:
 
 
 def load_obsidian_config(env_context: Any = None) -> dict[str, Any]:
-    config_path = Path(os.environ.get(OBSIDIAN_CONFIG_ENV, str(_DEFAULT_CONFIG_PATH))).expanduser()
-    file_config = _read_json(config_path)
+    file_config = _read_json(obsidian_config_path())
     host_config = _config_from_env_context(env_context)
     merged = {**file_config, **{k: v for k, v in host_config.items() if v is not None}}
 
@@ -218,7 +221,7 @@ class ObsidianCliClient:
         if permission_request.get("scope") == OBSIDIAN_PERMISSION_SCOPE and permission_request.get("requested_scope") == OBSIDIAN_LAUNCH_SCOPE:
             self._launch_approved_once = True
 
-    async def run(self, args: list[str], *, open_operation: bool = False) -> ToolResult:
+    async def run(self, args: list[str]) -> ToolResult:
         config = load_obsidian_config(self.env_context)
         ok, error = _validate_config(config)
         if not ok:
@@ -237,7 +240,20 @@ class ObsidianCliClient:
             self._launch_performed_once = True
             await _wait_cli_ready(config)
 
-        code, stdout, stderr = await _run_process([_cli_executable(config), *args])
+        try:
+            code, stdout, stderr = await _run_process([_cli_executable(config), *args])
+        except FileNotFoundError:
+            return ToolResult(
+                success=False,
+                error="Obsidian CLI 未找到。请在 officev3 的 设置-连接数据源 中检测或安装 CLI。",
+            )
+        except PermissionError:
+            return ToolResult(
+                success=False,
+                error=f"Obsidian CLI 无法执行，请检查权限：{_cli_executable(config)}",
+            )
+        except OSError as exc:
+            return ToolResult(success=False, error=f"Obsidian CLI 执行失败：{exc}")
         if code != 0:
             return ToolResult(success=False, error=stderr or stdout or f"Obsidian CLI 退出码 {code}")
         return ToolResult(success=True, content=stdout or "Obsidian 操作已完成。", raw_output={"argv": args})
@@ -288,7 +304,7 @@ class ObsidianCreateNoteTool(_ObsidianToolBase):
             args.append("overwrite")
         if open_after:
             args.append("open")
-        result = await self.client.run(args, open_operation=open_after)
+        result = await self.client.run(args)
         if result.success:
             result.content = f"已创建 Obsidian 笔记：{note_path}"
             result.raw_output = {"path": note_path, "operation": "create"}
@@ -331,14 +347,14 @@ class ObsidianUpdateNoteTool(_ObsidianToolBase):
             args = ["create", f"path={note_path}", f"content={_encode_cli_value(content)}", "overwrite"]
             if open_after:
                 args.append("open")
-            result = await self.client.run(args, open_operation=open_after)
+            result = await self.client.run(args)
         else:
             args = [mode, f"path={note_path}", f"content={_encode_cli_value(content)}"]
             if inline:
                 args.append("inline")
-            result = await self.client.run(args, open_operation=False)
+            result = await self.client.run(args)
             if result.success and open_after:
-                result = await self.client.run(["open", f"path={note_path}"], open_operation=True)
+                result = await self.client.run(["open", f"path={note_path}"])
         if result.success:
             result.content = f"已更新 Obsidian 笔记：{note_path}"
             result.raw_output = {"path": note_path, "operation": mode}
@@ -376,17 +392,17 @@ class ObsidianDailyNoteTool(_ObsidianToolBase):
 
         if action == "open":
             args = ["daily"]
-            result = await self.client.run(args, open_operation=True)
+            result = await self.client.run(args)
         elif action == "read":
             args = ["daily:read"]
-            result = await self.client.run(args, open_operation=False)
+            result = await self.client.run(args)
         else:
             args = [f"daily:{action}", f"content={_encode_cli_value(content or '')}"]
             if inline:
                 args.append("inline")
-            result = await self.client.run(args, open_operation=False)
+            result = await self.client.run(args)
             if result.success and open_after:
-                result = await self.client.run(["daily"], open_operation=True)
+                result = await self.client.run(["daily"])
         if result.success:
             result.raw_output = {"operation": f"daily:{action}"}
         return result

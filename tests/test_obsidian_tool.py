@@ -153,6 +153,28 @@ async def test_non_vault_directory_fails(tmp_path: Path, monkeypatch: pytest.Mon
     assert ".obsidian" in (result.error or "")
 
 
+async def test_missing_bare_cli_returns_friendly_error(
+    tmp_path: Path,
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    write_config(
+        tmp_path,
+        monkeypatch,
+        {
+            "enabled": True,
+            "vault_path": str(vault),
+            "cli_path": "definitely-missing-obsidian-cli",
+            "app_running": True,
+        },
+    )
+
+    result = await ObsidianCreateNoteTool().execute(title="t", content="c", open_after=False)
+
+    assert not result.success
+    assert "Obsidian CLI 未找到" in (result.error or "")
+
+
 async def test_permission_request_then_retry_launches_app(
     tmp_path: Path,
     vault: Path,

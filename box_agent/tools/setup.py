@@ -25,6 +25,7 @@ from box_agent.tools.jupyter_tool import (
 )
 from box_agent.tools.mcp_loader import load_mcp_tools_async, set_mcp_timeout_config
 from box_agent.tools.memory_tool import MemoryReadTool, MemorySearchTool, MemoryWriteTool
+from box_agent.tools.obsidian_tool import create_obsidian_tools
 from box_agent.tools.plan_tool import PlanReadTool, PlanStore, PlanWriteTool
 from box_agent.tools.runtime import SkillRuntimeContext, build_skill_runtime_context
 from box_agent.tools.schedule_tool import CreateScheduledTaskTool
@@ -272,7 +273,7 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
                         allow_full_access: bool = True, non_interactive: bool = False, output=None,
                         llm=None, permission_engine: PermissionEngine | None = None,
                         skill_runtime_context: SkillRuntimeContext | None = None,
-                        use_output_dir: bool = True):
+                        use_output_dir: bool = True, env_context=None):
     """Add workspace-dependent tools
 
     These tools need to know the workspace directory.
@@ -382,6 +383,12 @@ def add_workspace_tools(tools: List[Tool], config: Config, workspace_dir: Path, 
         )
     )
     _out(f"{Colors.GREEN}✅ Loaded image generation tool (generate_image){Colors.RESET}")
+
+    # Obsidian tools — host/Vault dependent, so register with workspace tools
+    # before sub-agent so child agents inherit the native Obsidian capability.
+    obsidian_tools = create_obsidian_tools(env_context=env_context)
+    tools.extend(obsidian_tools)
+    _out(f"{Colors.GREEN}✅ Loaded Obsidian tools (obsidian_create_note, obsidian_update_note, obsidian_daily_note){Colors.RESET}")
 
     # Sub-agent tool — must be registered last so it can reference all other tools
     if config.tools.enable_sub_agent and llm is not None:

@@ -597,6 +597,69 @@ def cmd_config(edit: bool = False):
         subprocess.run([editor, str(config_path)])
 
 
+def build_cli_env_context():
+    """Build host-style environment facts for standalone CLI sessions."""
+    from box_agent.acp.env_context import EnvContext
+    from box_agent.tools.obsidian_tool import load_obsidian_config
+
+    obsidian_config = load_obsidian_config()
+    if not obsidian_config:
+        return None
+    return EnvContext.from_meta(
+        {
+            "platform": platform.system().lower(),
+            "obsidian": obsidian_config,
+        }
+    )
+
+
+def _resolve_obsidian_cli(cli_path: str | None) -> str | None:
+    candidate = (cli_path or "").strip() or "obsidian"
+    if "/" in candidate or "\\" in candidate:
+        candidate = str(Path(candidate).expanduser())
+    return shutil.which(candidate)
+
+
+def _doctor_obsidian_status_line() -> str:
+    from box_agent.tools.obsidian_tool import load_obsidian_config, obsidian_config_path
+
+    config_path = obsidian_config_path()
+    config = load_obsidian_config()
+    if not config and not config_path.exists():
+        return "  ⚠️  Obsidian — not configured (officev3 will create obsidian.json after Vault binding)"
+    if config.get("enabled") is False:
+        return "  ⚠️  Obsidian — disabled (bind a Vault in officev3 Settings → Connect Data Sources)"
+
+    problems: list[str] = []
+    vault_path = config.get("vault_path")
+    vault: Path | None = None
+    if isinstance(vault_path, str) and vault_path.strip():
+        vault = Path(vault_path).expanduser()
+        if not vault.exists() or not vault.is_dir():
+            problems.append(f"Vault missing or not a directory: {vault}")
+        elif not (vault / ".obsidian").is_dir():
+            problems.append(f"Vault missing .obsidian: {vault}")
+    else:
+        problems.append("Vault not configured")
+
+    cli_path = config.get("cli_path") if isinstance(config.get("cli_path"), str) else None
+    resolved_cli = _resolve_obsidian_cli(cli_path)
+    if not resolved_cli:
+        problems.append(f"CLI not found: {(cli_path or 'obsidian').strip() or 'obsidian'}")
+
+    if problems:
+        return f"  ❌ Obsidian — {'; '.join(problems)}"
+
+    vault_label = config.get("vault_name") if isinstance(config.get("vault_name"), str) else None
+    if not vault_label and vault is not None:
+        vault_label = vault.name
+    return f"  ✅ Obsidian — Vault: {vault_label or 'configured'}; CLI: {resolved_cli}"
+
+
+def _doctor_check_obsidian() -> None:
+    print(_doctor_obsidian_status_line())
+
+
 async def cmd_doctor():
     """Check environment health: config, API, sandbox, MCP."""
     print(f"{Colors.BOLD}Box Agent Doctor{Colors.RESET}\n")
@@ -672,6 +735,10 @@ async def cmd_doctor():
 
     # 5. Browser runtime (Playwright)
     _doctor_check_browser()
+
+    # 6. Obsidian host configuration. This is diagnostic only; never starts
+    # Obsidian or runs write/open CLI commands.
+    _doctor_check_obsidian()
 
     print()
 
@@ -1077,7 +1144,8 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             policy = CapabilityPolicy(session_workspace_root=str(workspace_dir))
         perm_engine = PermissionEngine(policy, workspace_dir, grant_store=grant_store)
 
-    skill_runtime_context = build_skill_runtime_context(sandbox_mode=sandbox_mode)
+    cli_env_context = build_cli_env_context()
+    skill_runtime_context = build_skill_runtime_context(sandbox_mode=sandbox_mode, env_context=cli_env_context)
 
     add_workspace_tools(
         tools, config, workspace_dir,
@@ -1087,6 +1155,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         llm=llm_client,
         permission_engine=perm_engine,
         skill_runtime_context=skill_runtime_context,
+        env_context=cli_env_context,
     )
 
     if not allow_full_access:
@@ -1127,6 +1196,14 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         system_prompt = system_prompt.replace("{SANDBOX_INFO}", "")
 
     system_prompt = f"{system_prompt.rstrip()}\n\n{build_skill_runtime_prompt(skill_runtime_context)}"
+
+    if cli_env_context is not None:
+        from box_agent.acp.env_context import build_env_context_prompt
+
+        env_prompt = build_env_context_prompt(cli_env_context)
+        if env_prompt:
+            system_prompt = f"{system_prompt.rstrip()}\n\n{env_prompt}"
+            print(f"{Colors.GREEN}✅ Loaded CLI environment context{Colors.RESET}")
 
     # 6.6 Inject Memory context
     if memory_mgr:

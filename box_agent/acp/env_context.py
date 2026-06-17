@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field
 logger = logging.getLogger(__name__)
 
 _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"cli", "platform", "browser_tools", "image_service", "memory_configured", "runtimes"}
+    {"cli", "platform", "browser_tools", "image_service", "memory_configured", "runtimes", "obsidian"}
 )
 
 _MAX_PATH_LEN = 512
@@ -128,6 +128,17 @@ def _sanitize_provider(raw: Any) -> str | None:
     return raw
 
 
+def _sanitize_label(raw: Any, *, max_len: int = _MAX_NAME_LEN) -> str | None:
+    if raw is None or not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not raw or len(raw) > max_len:
+        return None
+    if _has_unsafe_chars(raw):
+        return None
+    return raw
+
+
 def _sanitize_runtimes(raw: Any) -> dict[str, dict[str, Any]]:
     if not isinstance(raw, dict):
         return {}
@@ -163,6 +174,31 @@ def _sanitize_runtimes(raw: Any) -> dict[str, dict[str, Any]]:
 
         if runtime:
             cleaned[kind] = runtime
+    return cleaned
+
+
+def _sanitize_obsidian(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+
+    cleaned: dict[str, Any] = {}
+    for field_name in ("enabled", "cli_available", "app_running"):
+        value = raw.get(field_name)
+        if isinstance(value, bool):
+            cleaned[field_name] = value
+
+    vault_name = _sanitize_label(raw.get("vault_name"))
+    if vault_name is not None:
+        cleaned["vault_name"] = vault_name
+
+    for field_name in ("vault_path", "cli_path", "app_path"):
+        value = raw.get(field_name)
+        if value is None:
+            continue
+        path = _sanitize_path(f"obsidian.{field_name}", value)
+        if path is not None:
+            cleaned[field_name] = path
+
     return cleaned
 
 
@@ -208,6 +244,20 @@ class HostRuntime(BaseModel):
     provider: str | None = None
 
 
+class ObsidianState(BaseModel):
+    """Sanitized host-provided Obsidian integration metadata."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool | None = None
+    vault_path: str | None = None
+    vault_name: str | None = None
+    cli_path: str | None = None
+    app_path: str | None = None
+    cli_available: bool | None = None
+    app_running: bool | None = None
+
+
 class EnvContext(BaseModel):
     """Parsed view of ``session/new._meta.env_context``.
 
@@ -225,6 +275,7 @@ class EnvContext(BaseModel):
     image_service: ImageServiceState | None = None
     memory_configured: bool | None = None
     runtimes: dict[str, HostRuntime] = Field(default_factory=dict)
+    obsidian: ObsidianState | None = None
     extras: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
@@ -252,6 +303,8 @@ class EnvContext(BaseModel):
             known["platform"] = _sanitize_platform(known["platform"])
         if "runtimes" in known:
             known["runtimes"] = _sanitize_runtimes(known["runtimes"])
+        if "obsidian" in known:
+            known["obsidian"] = _sanitize_obsidian(known["obsidian"])
 
         try:
             ctx = cls.model_validate(known)
@@ -269,6 +322,7 @@ class EnvContext(BaseModel):
             or self.browser_tools is not None
             or self.image_service is not None
             or self.memory_configured is not None
+            or self.obsidian is not None
         )
 
 
@@ -315,6 +369,35 @@ def _format_image_service(state: ImageServiceState) -> list[str]:
     return [f"- 生图服务状态：{label}"]
 
 
+def _format_obsidian(state: ObsidianState) -> list[str]:
+    parts: list[str] = []
+    if state.enabled is not None:
+        parts.append(f"enabled={str(state.enabled).lower()}")
+    if state.cli_available is not None:
+        parts.append(f"cli_available={str(state.cli_available).lower()}")
+    if state.app_running is not None:
+        parts.append(f"app_running={str(state.app_running).lower()}")
+
+    lines: list[str] = []
+    if parts:
+        lines.append(f"- Obsidian 状态：{', '.join(parts)}")
+    if state.vault_name:
+        lines.append(f"  - Vault：{state.vault_name}")
+    if state.vault_path:
+        lines.append(f"  - Vault 路径：`{state.vault_path}`")
+    if state.cli_path:
+        lines.append(f"  - Obsidian CLI：`{state.cli_path}`")
+    if state.app_path:
+        lines.append(f"  - Obsidian App：`{state.app_path}`")
+    if state.enabled is True:
+        lines.append(
+            "- Obsidian 写入/打开策略：当用户要求导出、写入、保存或追加到 Obsidian 时，"
+            "必须优先使用 `obsidian_create_note`、`obsidian_update_note` 或 `obsidian_daily_note`；"
+            "不要用 bash 直接调用 `obsidian create/append/prepend/open/daily`。"
+        )
+    return lines
+
+
 def build_env_context_prompt(ctx: EnvContext | None) -> str:
     """Render ``EnvContext`` into a markdown checklist for the system prompt.
 
@@ -333,6 +416,8 @@ def build_env_context_prompt(ctx: EnvContext | None) -> str:
         lines.extend(_format_browser_tools(ctx.browser_tools))
     if ctx.image_service is not None:
         lines.extend(_format_image_service(ctx.image_service))
+    if ctx.obsidian is not None:
+        lines.extend(_format_obsidian(ctx.obsidian))
     if ctx.memory_configured is not None:
         state = "已完成" if ctx.memory_configured else "未完成"
         lines.append(f"- 个人记忆配置：{state}")

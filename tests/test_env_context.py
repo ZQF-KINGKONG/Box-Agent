@@ -71,6 +71,32 @@ def test_from_meta_parses_runtimes() -> None:
     assert ctx.runtimes["python"].sandbox_path == "/opt/officev3/sandbox-python"
 
 
+def test_from_meta_parses_obsidian_state() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "obsidian": {
+                "enabled": True,
+                "vault_path": "/Users/me/Vault",
+                "vault_name": "工作笔记",
+                "cli_path": "/usr/local/bin/obsidian",
+                "app_path": "/Applications/Obsidian.app",
+                "cli_available": True,
+                "app_running": False,
+                "ignored": "not rendered",
+            }
+        }
+    )
+    assert ctx is not None
+    assert ctx.obsidian is not None
+    assert ctx.obsidian.enabled is True
+    assert ctx.obsidian.vault_path == "/Users/me/Vault"
+    assert ctx.obsidian.vault_name == "工作笔记"
+    assert ctx.obsidian.cli_path == "/usr/local/bin/obsidian"
+    assert ctx.obsidian.app_path == "/Applications/Obsidian.app"
+    assert ctx.obsidian.cli_available is True
+    assert ctx.obsidian.app_running is False
+
+
 def test_from_meta_passthrough_unknown_keys() -> None:
     raw = {
         "platform": "linux",
@@ -214,6 +240,30 @@ def test_prompt_renders_memory_configured() -> None:
 
     ctx_pending = EnvContext.from_meta({"memory_configured": False})
     assert "未完成" in build_env_context_prompt(ctx_pending)
+
+
+def test_prompt_renders_obsidian_policy() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "obsidian": {
+                "enabled": True,
+                "vault_path": "/Users/me/Vault",
+                "vault_name": "工作笔记",
+                "cli_path": "/usr/local/bin/obsidian",
+                "cli_available": True,
+                "app_running": True,
+            }
+        }
+    )
+
+    out = build_env_context_prompt(ctx)
+
+    assert "Obsidian 状态" in out
+    assert "enabled=true" in out
+    assert "工作笔记" in out
+    assert "`/Users/me/Vault`" in out
+    assert "`obsidian_create_note`" in out
+    assert "不要用 bash" in out
 
 
 def test_prompt_includes_truth_anchor_instruction() -> None:

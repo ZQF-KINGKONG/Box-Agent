@@ -10,6 +10,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import sys
 import time
 import uuid
@@ -49,6 +50,22 @@ _LARK_CLI_ENV_ASSIGNMENT_RE = re.compile(
     r"^(?:export\s+|set\s+)BOX_AGENT_LARK_CLI\s*=",
     re.IGNORECASE,
 )
+_OBSIDIAN_COMMAND_SEPARATOR_RE = re.compile(r"&&|\|\||[;\n|]")
+_OBSIDIAN_CLI_NAMES = frozenset({"obsidian", "obsidian.exe", "obsidian.cmd"})
+_OBSIDIAN_WRITE_COMMANDS = frozenset({
+    "create",
+    "append",
+    "prepend",
+    "open",
+    "daily",
+    "daily:read",
+    "daily:append",
+    "daily:prepend",
+    "delete",
+    "move",
+    "rename",
+    "property:set",
+})
 _SAFETY_SCOPE = "safety"
 _DANGEROUS_COMMAND_SCOPE = "dangerous_command"
 
@@ -104,6 +121,50 @@ def _detect_lark_user_mode_violation(command: str) -> str | None:
 
         if not _LARK_USER_FLAG_RE.search(part):
             return "lark-cli business commands must pass `--as user` in officev3 local-agent sessions."
+    return None
+
+
+def _detect_obsidian_cli_violation(command: str) -> str | None:
+    """Reject direct Obsidian writes/opens that should go through native tools."""
+    for raw_part in _OBSIDIAN_COMMAND_SEPARATOR_RE.split(command):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            tokens = shlex.split(part, posix=platform.system() != "Windows")
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+
+        # Diagnostics are allowed through bash.
+        if len(tokens) >= 2 and tokens[0] in {"which", "where"} and os.path.basename(tokens[1]).lower() in _OBSIDIAN_CLI_NAMES:
+            continue
+
+        exe_index = None
+        for index, token in enumerate(tokens):
+            if token in {"env", "command"}:
+                continue
+            if "=" in token and not token.startswith("-"):
+                continue
+            base = os.path.basename(token).lower()
+            if base in _OBSIDIAN_CLI_NAMES or token in {"$BOX_AGENT_OBSIDIAN_CLI", "${BOX_AGENT_OBSIDIAN_CLI}", "%BOX_AGENT_OBSIDIAN_CLI%"}:
+                exe_index = index
+            break
+        if exe_index is None:
+            continue
+
+        args = tokens[exe_index + 1 :]
+        if not args:
+            continue
+        first = args[0].lower()
+        if first in {"help", "--help", "-h", "version", "--version", "-v"}:
+            continue
+        if first in _OBSIDIAN_WRITE_COMMANDS:
+            return (
+                "Obsidian 写入、打开或修改命令必须通过原生工具执行；"
+                "请改用 `obsidian_create_note`、`obsidian_update_note` 或 `obsidian_daily_note`。"
+            )
     return None
 
 
@@ -624,6 +685,16 @@ Examples:
                     error=f"Blocked: {lark_identity_error}\nCommand: {command}",
                     stdout="",
                     stderr=f"Blocked: {lark_identity_error}",
+                    exit_code=1,
+                )
+
+            obsidian_cli_error = _detect_obsidian_cli_violation(command)
+            if obsidian_cli_error:
+                return BashOutputResult(
+                    success=False,
+                    error=f"Blocked: {obsidian_cli_error}\nCommand: {command}",
+                    stdout="",
+                    stderr=f"Blocked: {obsidian_cli_error}",
                     exit_code=1,
                 )
 

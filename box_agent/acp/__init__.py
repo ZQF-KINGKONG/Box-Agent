@@ -631,6 +631,7 @@ class BoxACPAgent:
                 permission_engine=perm_engine,
                 skill_runtime_context=skill_runtime_context,
                 use_output_dir=artifact_mode != "project",
+                env_context=env_context,
             )
         agent = Agent(
             llm_client=self._llm,

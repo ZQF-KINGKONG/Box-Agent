@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
+from box_agent.config import AgentConfig, Config, LLMConfig, ToolsConfig
+from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool, add_workspace_tools
 
 
 @pytest.mark.asyncio
@@ -204,6 +205,58 @@ async def test_bash_tool_allows_setting_lark_cli_env_without_invoking_cli():
     result = await tool.execute(command='export BOX_AGENT_LARK_CLI=/tmp/lark-cli')
 
     assert result.success
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_blocks_direct_obsidian_write_commands():
+    tool = BashTool()
+
+    for command in [
+        "obsidian create path=t.md content=hi",
+        "/usr/local/bin/obsidian append path=t.md content=hi",
+        "$BOX_AGENT_OBSIDIAN_CLI open path=t.md",
+        "obsidian daily:append content=hi",
+    ]:
+        result = await tool.execute(command=command)
+        assert not result.success
+        assert "obsidian_create_note" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_bash_tool_allows_obsidian_diagnostics():
+    tool = BashTool()
+
+    for command in [
+        "which obsidian",
+        "obsidian help",
+        "obsidian version",
+    ]:
+        result = await tool.execute(command=command)
+        # The command may fail when Obsidian CLI is not installed; the point is
+        # that BashTool itself must not block diagnostics with the native-tool policy.
+        assert "Blocked:" not in (result.error or "")
+
+
+def test_add_workspace_tools_registers_obsidian_tools(tmp_path: Path):
+    tools = []
+
+    add_workspace_tools(
+        tools,
+        Config(
+            llm=LLMConfig(api_key="test-key"),
+            agent=AgentConfig(workspace_dir=str(tmp_path)),
+            tools=ToolsConfig(enable_mcp=False),
+        ),
+        tmp_path,
+        allow_full_access=False,
+        output=lambda *_: None,
+        llm=None,
+    )
+
+    names = {tool.name for tool in tools}
+    assert "obsidian_create_note" in names
+    assert "obsidian_update_note" in names
+    assert "obsidian_daily_note" in names
 
 
 async def main():

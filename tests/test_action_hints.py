@@ -167,3 +167,13 @@ def test_prompt_includes_both_scenarios() -> None:
     assert "browser-tools" in out
     assert "action_hint" in out
     assert "open_settings" in out
+
+
+def test_prompt_forbids_xml_action_hint_tags() -> None:
+    """Prompt must hard-forbid the <action_hint> XML wrapper the model
+    occasionally emits, which the frontend cannot reliably parse."""
+    out = build_action_hints_prompt(memory_scarce=True, playwright_unavailable=False)
+    assert "<action_hint>" in out  # mentioned only as a prohibited form
+    assert "禁止" in out
+    # The positive example must use the triple-backtick fence.
+    assert "```action_hint" in out

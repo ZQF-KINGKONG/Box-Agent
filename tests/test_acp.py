@@ -17,7 +17,7 @@ from box_agent.config import (
     ToolsConfig,
 )
 from box_agent.memory import MemoryManager
-from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.setup import SANDBOX_INFO_PROMPT, build_sandbox_info_prompt
 
@@ -199,6 +199,132 @@ class DoneLLM:
 
     async def generate(self, messages, tools=None):
         return LLMResponse(content="done", finish_reason="stop")
+
+
+class SkillUsageLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="skill-1",
+                        type="function",
+                        function=FunctionCall(
+                            name="get_skill",
+                            arguments={"skill_name": "theme-factory"},
+                        ),
+                    )
+                ],
+            )
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="skill-2",
+                        type="function",
+                        function=FunctionCall(
+                            name="get_skill",
+                            arguments={"skill_name": "html-templates"},
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class SkillTool(Tool):
+    @property
+    def name(self):
+        return "get_skill"
+
+    @property
+    def description(self):
+        return "Load a skill"
+
+    @property
+    def parameters(self):
+        return {
+            "type": "object",
+            "properties": {"skill_name": {"type": "string"}},
+            "required": ["skill_name"],
+        }
+
+    async def execute(self, skill_name: str):
+        return ToolResult(success=True, content=f"loaded {skill_name}")
+
+
+class CapabilityUsageLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="echo-1",
+                        type="function",
+                        function=FunctionCall(name="echo", arguments={"text": "ping"}),
+                    ),
+                    ToolCall(
+                        id="mcp-1",
+                        type="function",
+                        function=FunctionCall(name="browser_open", arguments={"url": "https://example.com"}),
+                    ),
+                ],
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(
+                type="finish",
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+            )
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class FakeMCPTool(Tool):
+    @property
+    def name(self):
+        return "browser_open"
+
+    @property
+    def server_name(self):
+        return "browser"
+
+    @property
+    def tool_name(self):
+        return "open"
+
+    @property
+    def description(self):
+        return "Open a browser URL"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"url": {"type": "string"}}}
+
+    async def execute(self, url: str):
+        return ToolResult(success=True, content=f"opened {url}")
 
 
 class CaptureMessagesLLM:
@@ -469,6 +595,99 @@ async def test_acp_turn_executes_tool(acp_agent):
     assert progress_outputs == []
     await agent.cancel(SimpleNamespace(sessionId=session.sessionId))
     assert agent._sessions[session.sessionId].cancelled
+
+
+@pytest.mark.asyncio
+async def test_acp_emits_skills_usage_raw_output(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, SkillUsageLLM(), [SkillTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "make infographic"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    skill_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "skills_usage"
+    ]
+    assert skill_outputs == [
+        {
+            "type": "skills_usage",
+            "skills": ["theme-factory"],
+            "current": "theme-factory",
+        },
+        {
+            "type": "skills_usage",
+            "skills": ["theme-factory", "html-templates"],
+            "current": "html-templates",
+        },
+    ]
+    turn_usage_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "turn_usage"
+    ]
+    assert any(item["skills"] == ["theme-factory"] for item in turn_usage_outputs)
+    assert turn_usage_outputs[-1]["skills"] == ["theme-factory", "html-templates"]
+
+
+@pytest.mark.asyncio
+async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(
+        conn,
+        config,
+        CapabilityUsageLLM(),
+        [EchoTool(), FakeMCPTool()],
+        "system",
+    )
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "open and echo"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    turn_usage_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "turn_usage"
+    ]
+    assert any(item["tools"] == [{"name": "echo", "count": 1}] for item in turn_usage_outputs)
+    assert any(
+        item["mcp"]
+        == [{"server": "browser", "tool": "open", "name": "browser.open", "count": 1}]
+        for item in turn_usage_outputs
+    )
+    assert turn_usage_outputs[-1]["tokenUsage"] == {
+        "promptTokens": 12,
+        "completionTokens": 6,
+        "totalTokens": 18,
+        "calls": 2,
+    }
 
 
 @pytest.mark.asyncio

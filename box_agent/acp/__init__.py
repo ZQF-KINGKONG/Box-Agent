@@ -1502,6 +1502,167 @@ class BoxACPAgent:
                 except Exception as exc:
                     log.exception("expert_team/progress_send_error", exc, session_id=session_id)
 
+        skill_name_by_tool_call_id: dict[str, str] = {}
+        used_skill_names: list[str] = []
+        used_tool_counts: dict[str, int] = {}
+        used_mcp_tool_counts: dict[tuple[str, str], int] = {}
+        turn_token_usage = {
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "totalTokens": 0,
+            "calls": 0,
+        }
+        usage_tool_call_id = f"turn-usage-{uuid4().hex[:8]}"
+
+        def _get_skill_name_from_args(args: Any) -> str | None:
+            if not isinstance(args, dict):
+                return None
+            value = args.get("skill_name") or args.get("skillName") or args.get("name")
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            return value or None
+
+        def _record_skill_usage(skill_name: str | None) -> dict[str, Any] | None:
+            if not skill_name:
+                return None
+            if skill_name not in used_skill_names:
+                used_skill_names.append(skill_name)
+            return {
+                "type": "skills_usage",
+                "skills": list(used_skill_names),
+                "current": skill_name,
+            }
+
+        def _as_int(mapping: dict[str, Any], *keys: str) -> int:
+            for key in keys:
+                value = mapping.get(key)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, float):
+                    return int(value)
+            return 0
+
+        def _record_token_usage(usage: Any) -> bool:
+            if not isinstance(usage, dict):
+                return False
+            prompt_tokens = _as_int(usage, "prompt_tokens", "promptTokens")
+            completion_tokens = _as_int(usage, "completion_tokens", "completionTokens")
+            total_tokens = _as_int(usage, "total_tokens", "totalTokens")
+            if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+                total_tokens = prompt_tokens + completion_tokens
+            if prompt_tokens <= 0 and completion_tokens <= 0 and total_tokens <= 0:
+                return False
+            turn_token_usage["promptTokens"] += prompt_tokens
+            turn_token_usage["completionTokens"] += completion_tokens
+            turn_token_usage["totalTokens"] += total_tokens
+            turn_token_usage["calls"] += 1
+            return True
+
+        def _mcp_tool_info(tool_name: str) -> tuple[str, str] | None:
+            tool = agent.tools.get(tool_name)
+            server_name = ""
+            mcp_tool_name = tool_name
+            if tool is not None:
+                raw_server = getattr(tool, "server_name", None) or getattr(tool, "_server_name", None)
+                raw_tool_name = getattr(tool, "tool_name", None) or getattr(tool, "_mcp_tool_name", None)
+                if isinstance(raw_server, str):
+                    server_name = raw_server.strip()
+                if isinstance(raw_tool_name, str) and raw_tool_name.strip():
+                    mcp_tool_name = raw_tool_name.strip()
+
+            if not server_name and tool_name.startswith("mcp__"):
+                parts = tool_name.split("__", 2)
+                if len(parts) == 3 and parts[1] and parts[2]:
+                    server_name = parts[1]
+                    mcp_tool_name = parts[2]
+
+            if not server_name:
+                return None
+            return server_name, mcp_tool_name
+
+        def _record_tool_usage(tool_name: str, *, user_visible: bool) -> dict[str, Any] | None:
+            if not user_visible or not tool_name or tool_name == "get_skill":
+                return None
+            mcp_info = _mcp_tool_info(tool_name)
+            if mcp_info is not None:
+                used_mcp_tool_counts[mcp_info] = used_mcp_tool_counts.get(mcp_info, 0) + 1
+                server_name, mcp_tool_name = mcp_info
+                return {
+                    "type": "mcp",
+                    "name": f"{server_name}.{mcp_tool_name}",
+                    "server": server_name,
+                    "tool": mcp_tool_name,
+                }
+
+            used_tool_counts[tool_name] = used_tool_counts.get(tool_name, 0) + 1
+            return {
+                "type": "tool",
+                "name": tool_name,
+            }
+
+        def _turn_usage_payload(current: dict[str, Any] | None = None) -> dict[str, Any]:
+            meter = get_token_meter()
+            token_usage = (
+                {
+                    "promptTokens": meter.prompt_tokens,
+                    "completionTokens": meter.completion_tokens,
+                    "totalTokens": meter.total_tokens,
+                    "calls": meter.calls,
+                }
+                if meter is not None and meter.total_tokens > 0
+                else dict(turn_token_usage)
+            )
+            payload: dict[str, Any] = {
+                "type": "turn_usage",
+                "version": 1,
+                "skills": list(used_skill_names),
+                "tools": [
+                    {"name": name, "count": count}
+                    for name, count in used_tool_counts.items()
+                ],
+                "mcp": [
+                    {
+                        "server": server_name,
+                        "tool": tool_name,
+                        "name": f"{server_name}.{tool_name}",
+                        "count": count,
+                    }
+                    for (server_name, tool_name), count in used_mcp_tool_counts.items()
+                ],
+                "tokenUsage": token_usage,
+            }
+            if current:
+                payload["current"] = current
+            return payload
+
+        async def _send_turn_usage(current: dict[str, Any] | None = None) -> None:
+            payload = _turn_usage_payload(current)
+            log.debug(
+                "turn/usage",
+                session_id=session_id,
+                payload=payload,
+            )
+            await self._send(
+                session_id,
+                update_tool_call(usage_tool_call_id, raw_output=payload),
+            )
+
+        async def _send_skill_usage(
+            tool_call_id: str,
+            payload: dict[str, Any],
+        ) -> None:
+            log.debug(
+                "skills/usage",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                payload=payload,
+            )
+            await self._send(
+                session_id,
+                update_tool_call(tool_call_id, raw_output=payload),
+            )
+
         async for event in run_agent_loop(
             llm=agent.llm,
             messages=agent.messages,
@@ -1618,6 +1779,8 @@ class BoxACPAgent:
                             session_id,
                             update_tool_call(f"llm-output-{s}", raw_output=payload),
                         )
+                        if _record_token_usage(usage):
+                            await _send_turn_usage()
 
                     case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args, user_visible=user_visible):
                         log.info(
@@ -1628,6 +1791,13 @@ class BoxACPAgent:
                             arguments=args,
                             user_visible=user_visible,
                         )
+                        if name == "get_skill":
+                            skill_name = _get_skill_name_from_args(args)
+                            if skill_name:
+                                skill_name_by_tool_call_id[tid] = skill_name
+                        tool_usage_current = _record_tool_usage(name, user_visible=user_visible)
+                        if tool_usage_current:
+                            await _send_turn_usage(tool_usage_current)
                         if not user_visible:
                             continue
                         if name == "sub_agent" and isinstance(args, dict):
@@ -1657,7 +1827,17 @@ class BoxACPAgent:
                             log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text, user_visible=user_visible)
                         else:
                             log.warn("tool/fail", session_id=session_id, tool_call_id=tid, tool_name=tname, error=err, user_visible=user_visible)
+                        skill_usage_payload = (
+                            _record_skill_usage(skill_name_by_tool_call_id.get(tid))
+                            if tname == "get_skill" and ok
+                            else None
+                        )
                         if not user_visible:
+                            if skill_usage_payload:
+                                await _send_skill_usage(tid, skill_usage_payload)
+                                await _send_turn_usage(
+                                    {"type": "skill", "name": skill_usage_payload["current"]}
+                                )
                             continue
                         status = "completed" if ok else "failed"
                         prefix = "[OK]" if ok else "[ERROR]"
@@ -1667,6 +1847,11 @@ class BoxACPAgent:
                             session_id,
                             update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output),
                         )
+                        if skill_usage_payload:
+                            await _send_skill_usage(tid, skill_usage_payload)
+                            await _send_turn_usage(
+                                {"type": "skill", "name": skill_usage_payload["current"]}
+                            )
 
                     case ArtifactEvent() as art:
                         log.info(
@@ -1722,9 +1907,42 @@ class BoxACPAgent:
 
                     case DoneEvent(stop_reason=reason):
                         log.debug("done", session_id=session_id, stop_reason=reason.value)
+                        await _send_turn_usage()
                         return reason.value
 
                     case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id, title=sub_title):
+                        if (
+                            isinstance(inner, ToolCallStartEvent)
+                            and inner.tool_name == "get_skill"
+                        ):
+                            skill_name = _get_skill_name_from_args(inner.arguments)
+                            if skill_name:
+                                skill_name_by_tool_call_id[inner.tool_call_id] = skill_name
+                        if isinstance(inner, ToolCallStartEvent):
+                            tool_usage_current = _record_tool_usage(
+                                inner.tool_name,
+                                user_visible=inner.user_visible,
+                            )
+                            if tool_usage_current:
+                                await _send_turn_usage(tool_usage_current)
+
+                        if (
+                            isinstance(inner, ToolCallResultEvent)
+                            and inner.tool_name == "get_skill"
+                            and inner.success
+                        ):
+                            skill_usage_payload = _record_skill_usage(
+                                skill_name_by_tool_call_id.get(inner.tool_call_id)
+                            )
+                            if skill_usage_payload:
+                                await _send_skill_usage(tid, skill_usage_payload)
+                                await _send_turn_usage(
+                                    {"type": "skill", "name": skill_usage_payload["current"]}
+                                )
+
+                        if isinstance(inner, LLMOutputEvent) and _record_token_usage(inner.usage):
+                            await _send_turn_usage()
+
                         if getattr(inner, "user_visible", True) is False:
                             continue
                         if isinstance(inner, WebSearchEvent):

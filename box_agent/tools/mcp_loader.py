@@ -143,9 +143,11 @@ class MCPTool(Tool):
         description: str,
         parameters: dict[str, Any],
         session: ClientSession,
+        server_name: str = "",
         execute_timeout: float | None = None,
     ):
         self._name = name
+        self._server_name = server_name
         self._description = description
         self._parameters = parameters
         self._session = session
@@ -154,6 +156,10 @@ class MCPTool(Tool):
     @property
     def name(self) -> str:
         return self._name
+
+    @property
+    def server_name(self) -> str:
+        return self._server_name
 
     @property
     def description(self) -> str:
@@ -301,6 +307,7 @@ class MCPServerConnection:
                     description=tool.description or "",
                     parameters=parameters,
                     session=session,
+                    server_name=self.name,
                     execute_timeout=execute_timeout,
                 )
                 self.tools.append(mcp_tool)
@@ -691,4 +698,3 @@ async def ensure_lazy_mcp_loaded(query: str) -> list[Tool]:
         _warn(f"✓ Lazy MCP server '{conn.name}' loaded ({len(conn.tools)} tools)")
 
     return new_tools
-

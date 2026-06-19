@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 
 from box_agent.acp.action_hints import (
+    ActionHintStreamNormalizer,
     build_action_hints_prompt,
     is_memory_scarce,
     is_playwright_unavailable,
+    normalize_action_hint_blocks,
 )
 
 
@@ -177,3 +179,59 @@ def test_prompt_forbids_xml_action_hint_tags() -> None:
     assert "禁止" in out
     # The positive example must use the triple-backtick fence.
     assert "```action_hint" in out
+
+
+def test_prompt_forbids_json_on_action_hint_fence_line() -> None:
+    out = build_action_hints_prompt(memory_scarce=True, playwright_unavailable=False)
+
+    assert "不要在同一行追加" in out
+    assert "JSON 必须从下一行开始" in out
+    assert "display_text" in out
+    assert "不要包含换行符" in out
+
+
+def test_normalize_action_hint_repairs_json_on_fence_line() -> None:
+    malformed = (
+        "```action_hint { "
+        '"action": "open_settings", '
+        '"params": {"tab": "onboarding"}, '
+        '"display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。\n" '
+        "} ```"
+    )
+
+    out = normalize_action_hint_blocks(malformed)
+
+    assert out.startswith("```action_hint\n")
+    assert "```action_hint {" not in out
+    payload = out.removeprefix("```action_hint\n").removesuffix("\n```")
+    data = json.loads(payload)
+    assert data == {
+        "action": "open_settings",
+        "params": {"tab": "onboarding"},
+        "display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。",
+    }
+
+
+def test_action_hint_stream_normalizer_handles_split_fence_start() -> None:
+    normalizer = ActionHintStreamNormalizer()
+
+    chunks = []
+    chunks.extend(normalizer.push("好的。```action"))
+    chunks.extend(
+        normalizer.push(
+            '_hint { "action": "open_settings", '
+            '"params": {"tab": "browser-tools"}, '
+            '"display_text": "去启用浏览器工具" } ```'
+        )
+    )
+    chunks.extend(normalizer.finish())
+    out = "".join(chunks)
+
+    assert out.startswith("好的。```action_hint\n")
+    assert "```action_hint {" not in out
+    payload = out.split("```action_hint\n", 1)[1].removesuffix("\n```")
+    assert json.loads(payload) == {
+        "action": "open_settings",
+        "params": {"tab": "browser-tools"},
+        "display_text": "去启用浏览器工具",
+    }

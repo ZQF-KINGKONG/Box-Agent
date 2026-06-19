@@ -100,9 +100,11 @@ from box_agent.llm import LLMClient
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
 from box_agent.loop_guards import CompletionGate, build_auto_completion_gate
 from box_agent.acp.action_hints import (
+    ActionHintStreamNormalizer,
     build_action_hints_prompt,
     is_memory_scarce,
     is_playwright_unavailable,
+    normalize_action_hint_blocks,
 )
 from box_agent.acp.env_context import EnvContext, build_env_context_prompt
 from box_agent.acp.project_context import build_project_startup_context_prompt
@@ -178,6 +180,58 @@ def _inject_item_id(item: Any) -> str | None:
         return None
     item_id = item.get("id")
     return item_id if isinstance(item_id, str) else None
+
+
+class _ActionHintNormalizingLLM:
+    """Normalize action_hint protocol drift before core/history see content."""
+
+    def __init__(self, wrapped: Any):
+        self._wrapped = wrapped
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    async def generate_stream(self, *args: Any, **kwargs: Any):
+        normalizer = ActionHintStreamNormalizer()
+        text_template = None
+        async for event in self._wrapped.generate_stream(*args, **kwargs):
+            if getattr(event, "type", None) != "text":
+                for text in normalizer.finish():
+                    if text:
+                        yield _text_stream_event_like(event, text)
+                yield event
+                continue
+
+            text_template = event
+            for text in normalizer.push(event.delta or ""):
+                if text:
+                    yield event.model_copy(update={"delta": text})
+
+        if text_template is not None:
+            for text in normalizer.finish():
+                if text:
+                    yield text_template.model_copy(update={"delta": text})
+
+    async def generate(self, *args: Any, **kwargs: Any):
+        response = await self._wrapped.generate(*args, **kwargs)
+        content = normalize_action_hint_blocks(response.content)
+        if content == response.content:
+            return response
+        return response.model_copy(update={"content": content})
+
+
+def _text_stream_event_like(event: Any, text: str) -> Any:
+    return event.model_copy(
+        update={
+            "type": "text",
+            "delta": text,
+            "finish_reason": None,
+            "usage": None,
+            "tool_calls": None,
+            "provider_request_id": None,
+            "truncated_tool_calls": None,
+        }
+    )
 
 
 def _injected_marker(text: str, injection_id: str | None = None) -> str:
@@ -1694,8 +1748,10 @@ class BoxACPAgent:
                 update_tool_call(tool_call_id, raw_output=payload),
             )
 
+        llm = _ActionHintNormalizingLLM(agent.llm)
+
         async for event in run_agent_loop(
-            llm=agent.llm,
+            llm=llm,
             messages=agent.messages,
             tools=agent.tools,
             max_steps=agent.max_steps,

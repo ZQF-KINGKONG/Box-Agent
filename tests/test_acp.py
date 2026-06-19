@@ -528,6 +528,21 @@ class LongAnswerLLM:
         return LLMResponse(content="", finish_reason="stop")
 
 
+class MalformedActionHintLLM:
+    async def generate_stream(self, messages, tools=None, **_):
+        for chunk in [
+            "好的。",
+            "```action",
+            '_hint { "action": "open_settings", "params": {"tab": "onboarding"}, ',
+            '"display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。\n" } ```',
+        ]:
+            yield StreamEvent(type="text", delta=chunk)
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="", finish_reason="stop")
+
+
 class SubAgentLLM:
     def __init__(self):
         self.calls = 0
@@ -1145,6 +1160,63 @@ async def test_acp_streams_long_plain_answer_chunks(tmp_path):
     streamed_text = "".join(chunk.update.content.text for chunk in message_chunks)
     assert "李白是唐代诗人" in streamed_text
     assert "后世称他为诗仙" in streamed_text
+
+
+@pytest.mark.asyncio
+async def test_acp_normalizes_malformed_action_hint_chunks(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, MalformedActionHintLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "你好"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    message_chunks = [
+        update
+        for update in conn.updates
+        if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
+    ]
+    streamed_text = "".join(chunk.update.content.text for chunk in message_chunks)
+    assert "```action_hint {" not in streamed_text
+    assert streamed_text.startswith("好的。```action_hint\n")
+    payload = streamed_text.split("```action_hint\n", 1)[1].removesuffix("\n```")
+    expected_hint = {
+        "action": "open_settings",
+        "params": {"tab": "onboarding"},
+        "display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。",
+    }
+    assert json.loads(payload) == expected_hint
+
+    llm_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "llm_output"
+    ]
+    assert "```action_hint {" not in llm_outputs[-1]["content"]
+    assert json.loads(
+        llm_outputs[-1]["content"].split("```action_hint\n", 1)[1].removesuffix("\n```")
+    ) == expected_hint
+
+    assistant_messages = [
+        msg.content
+        for msg in agent._sessions[session.sessionId].agent.messages
+        if msg.role == "assistant"
+    ]
+    assert "```action_hint {" not in assistant_messages[-1]
+    assert json.loads(
+        assistant_messages[-1].split("```action_hint\n", 1)[1].removesuffix("\n```")
+    ) == expected_hint
 
 
 @pytest.mark.asyncio

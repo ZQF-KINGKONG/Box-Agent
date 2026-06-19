@@ -70,7 +70,7 @@ from box_agent.tools.setup import (
     register_mcp_tools,
 )
 from box_agent.config import Config
-from box_agent.core import OUTPUT_SUBDIR, run_agent_loop
+from box_agent.core import run_agent_loop
 from box_agent.events import (
     ArtifactEvent,
     ContentEvent,
@@ -92,7 +92,7 @@ from box_agent.events import (
 )
 from box_agent.llm import LLMClient
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
-from box_agent.loop_guards import CompletionGate, artifact_signatures_for_globs
+from box_agent.loop_guards import CompletionGate, build_auto_completion_gate
 from box_agent.acp.action_hints import (
     build_action_hints_prompt,
     is_memory_scarce,
@@ -254,74 +254,6 @@ def _tool_result_raw_output(
         "text": result_text,
         "policy_decision": policy_decision,
     }
-
-
-_DELIVERABLE_INTENT_KEYWORDS: tuple[str, ...] = (
-    "做一份",
-    "做一个",
-    "制作",
-    "生成",
-    "创建",
-    "新建",
-    "导出",
-    "输出",
-    "保存",
-    "另出",
-    "write",
-    "create",
-    "generate",
-    "make",
-    "build",
-    "export",
-    "save",
-)
-
-_COMPLETION_GATE_PATTERNS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        ("ppt", "pptx", "powerpoint", "演示文稿", "幻灯片", "slide deck", "slides"),
-        (f"{OUTPUT_SUBDIR}/**/*.pptx", f"{OUTPUT_SUBDIR}/**/*.ppt"),
-    ),
-    (
-        ("docx", "word", "简历", "文档"),
-        (f"{OUTPUT_SUBDIR}/**/*.docx",),
-    ),
-    (
-        ("xlsx", "excel", "spreadsheet", "表格"),
-        (f"{OUTPUT_SUBDIR}/**/*.xlsx", f"{OUTPUT_SUBDIR}/**/*.xls"),
-    ),
-    (
-        ("html", "网页", "报告", "md格式", "markdown"),
-        (
-            f"{OUTPUT_SUBDIR}/**/*.html",
-            f"{OUTPUT_SUBDIR}/**/*.htm",
-            f"{OUTPUT_SUBDIR}/**/*.md",
-            f"{OUTPUT_SUBDIR}/**/*.pdf",
-        ),
-    ),
-)
-
-
-def _build_auto_completion_gate(user_text: str, workspace_dir: str | Path) -> CompletionGate | None:
-    text = user_text.strip().lower()
-    if not text or not any(keyword in text for keyword in _DELIVERABLE_INTENT_KEYWORDS):
-        return None
-
-    patterns: list[str] = []
-    for keywords, artifact_patterns in _COMPLETION_GATE_PATTERNS:
-        if any(keyword in text for keyword in keywords):
-            patterns.extend(artifact_patterns)
-
-    if not patterns:
-        return None
-
-    deduped_patterns = tuple(dict.fromkeys(patterns))
-    workspace = str(workspace_dir)
-    return CompletionGate(
-        required_changed_artifact_globs=deduped_patterns,
-        baseline_artifact_signatures=artifact_signatures_for_globs(deduped_patterns, workspace),
-        max_continuations=3,
-        deadline_seconds=900.0,
-    )
 
 
 @dataclass
@@ -972,7 +904,7 @@ class BoxACPAgent:
         completion_gate = (
             None
             if state.artifact_mode == "project"
-            else _build_auto_completion_gate(user_text, state.agent.workspace_dir)
+            else build_auto_completion_gate(user_text, state.agent.workspace_dir)
         )
         if completion_gate is not None:
             log.info(

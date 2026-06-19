@@ -41,6 +41,7 @@ from typing import Final
 WEB_SEARCH_TOOL_NAME: Final = "web_search"
 WEB_SEARCH_BATCH_SIZE: Final = 6
 WEB_SEARCH_TOTAL_LIMIT: Final = 24
+OUTPUT_SUBDIR: Final = "output"
 
 # Per-turn call caps for tools the model tends to over-request.
 TOOL_CALL_LIMITS: Final[dict[str, int]] = {
@@ -179,6 +180,83 @@ class CompletionGate:
     # Safety valve: release the gate once the run exceeds this many seconds.
     # ``None`` disables the time limit.
     deadline_seconds: float | None = None
+
+
+DELIVERABLE_INTENT_KEYWORDS: Final[tuple[str, ...]] = (
+    "做一份",
+    "做一个",
+    "制作",
+    "生成",
+    "创建",
+    "新建",
+    "导出",
+    "输出",
+    "保存",
+    "另出",
+    "write",
+    "create",
+    "generate",
+    "make",
+    "build",
+    "export",
+    "save",
+)
+
+COMPLETION_GATE_PATTERNS: Final[
+    tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]
+] = (
+    (
+        ("ppt", "pptx", "powerpoint", "演示文稿", "幻灯片", "slide deck", "slides"),
+        (f"{OUTPUT_SUBDIR}/**/*.pptx", f"{OUTPUT_SUBDIR}/**/*.ppt"),
+    ),
+    (
+        ("docx", "word", "简历", "文档"),
+        (f"{OUTPUT_SUBDIR}/**/*.docx",),
+    ),
+    (
+        ("xlsx", "excel", "spreadsheet", "表格"),
+        (f"{OUTPUT_SUBDIR}/**/*.xlsx", f"{OUTPUT_SUBDIR}/**/*.xls"),
+    ),
+    (
+        ("html", "网页", "报告", "md格式", "markdown"),
+        (
+            f"{OUTPUT_SUBDIR}/**/*.html",
+            f"{OUTPUT_SUBDIR}/**/*.htm",
+            f"{OUTPUT_SUBDIR}/**/*.md",
+            f"{OUTPUT_SUBDIR}/**/*.pdf",
+        ),
+    ),
+)
+
+
+def build_auto_completion_gate(
+    user_text: str,
+    workspace_dir: str | Path,
+) -> CompletionGate | None:
+    """Create a delivery-artifact gate when the prompt clearly asks for one."""
+    text = user_text.strip().lower()
+    if not text or not any(keyword in text for keyword in DELIVERABLE_INTENT_KEYWORDS):
+        return None
+
+    patterns: list[str] = []
+    for keywords, artifact_patterns in COMPLETION_GATE_PATTERNS:
+        if any(keyword in text for keyword in keywords):
+            patterns.extend(artifact_patterns)
+
+    if not patterns:
+        return None
+
+    deduped_patterns = tuple(dict.fromkeys(patterns))
+    workspace = str(workspace_dir)
+    return CompletionGate(
+        required_changed_artifact_globs=deduped_patterns,
+        baseline_artifact_signatures=artifact_signatures_for_globs(
+            deduped_patterns,
+            workspace,
+        ),
+        max_continuations=3,
+        deadline_seconds=900.0,
+    )
 
 
 def completion_gate_gaps(

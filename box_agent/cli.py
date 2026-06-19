@@ -12,6 +12,7 @@ Examples:
 
 import argparse
 import asyncio
+import json
 import platform
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -26,10 +28,12 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.styles import Style
+import yaml
 
 from box_agent import LLMClient, __version__
 from box_agent.agent import Agent
 from box_agent.config import Config
+from box_agent.loop_guards import build_auto_completion_gate
 from box_agent.schema import LLMProvider
 from box_agent.tools.base import Tool
 from box_agent.tools.jupyter_tool import JupyterSandboxTool, SandboxStatusTool
@@ -132,8 +136,6 @@ def run_setup_wizard(config_path: Path) -> bool:
         return False
 
     # Write config
-    import yaml
-
     with open(config_path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
@@ -184,6 +186,258 @@ class Colors:
     BG_GREEN = "\033[42m"
     BG_YELLOW = "\033[43m"
     BG_BLUE = "\033[44m"
+
+
+MAIN_LLM_KEYS = {
+    "api_key",
+    "api_base",
+    "model",
+    "provider",
+    "auth_file",
+    "context_window",
+    "max_output_tokens",
+    "timeout",
+}
+
+AGENT_KEYS = {
+    "max_steps",
+    "workspace_dir",
+    "max_parallel_tools",
+    "system_prompt_path",
+    "analysis_prompt_path",
+    "code_prompt_path",
+    "enable_memory",
+    "memory_dir",
+    "enable_memory_extraction",
+    "memory_extraction_cooldown",
+    "memory_extraction_step_interval",
+    "memory_maintainer_enabled",
+    "memory_maintainer_interval_hours",
+    "memory_decay_days",
+    "memory_archive_days",
+    "memory_dedup_jaccard",
+    "memory_compaction_enabled",
+    "memory_context_max_entries",
+    "memory_context_max_tokens",
+    "memory_conflict_resolution_enabled",
+    "memory_conflict_cluster_threshold",
+    "memory_conflict_max_clusters_per_run",
+    "memory_promotion_proposal_enabled",
+    "memory_promotion_hit_threshold",
+    "memory_promotion_cooldown_days",
+}
+
+SECRET_KEY_NAMES = {"api_key"}
+
+
+def _mask_secret(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "****"
+    return f"{value[:4]}****{value[-4:]}"
+
+
+def _is_secret_path(parts: list[str]) -> bool:
+    return bool(parts) and parts[-1] in SECRET_KEY_NAMES
+
+
+def _normalize_config_path(key: str) -> list[str]:
+    """Map user-facing dotted keys to the YAML layout consumed by Config."""
+    parts = [part for part in key.strip().split(".") if part]
+    if not parts:
+        raise ValueError("Config key cannot be empty")
+
+    if parts[0] == "llm" and len(parts) >= 2:
+        if parts[1] == "retry":
+            return ["retry", *parts[2:]]
+        if parts[1] in MAIN_LLM_KEYS:
+            return [parts[1], *parts[2:]]
+    if parts[0] == "agent" and len(parts) >= 2 and parts[1] in AGENT_KEYS:
+        return [parts[1], *parts[2:]]
+    return parts
+
+
+def _normalize_display_path(key: str) -> list[str]:
+    """Map user-facing dotted keys to the expanded config summary layout."""
+    parts = [part for part in key.strip().split(".") if part]
+    if not parts:
+        raise ValueError("Config key cannot be empty")
+
+    if parts[0] in MAIN_LLM_KEYS:
+        return ["llm", *parts]
+    if parts[0] == "retry":
+        return ["llm", *parts]
+    if parts[0] in AGENT_KEYS:
+        return ["agent", *parts]
+    return parts
+
+
+def _get_nested(data: dict[str, Any], parts: list[str]) -> Any:
+    current: Any = data
+    for part in parts:
+        if not isinstance(current, dict) or part not in current:
+            raise KeyError(".".join(parts))
+        current = current[part]
+    return current
+
+
+def _set_nested(data: dict[str, Any], parts: list[str], value: Any) -> None:
+    current: dict[str, Any] = data
+    for part in parts[:-1]:
+        child = current.get(part)
+        if child is None:
+            child = {}
+            current[part] = child
+        if not isinstance(child, dict):
+            raise ValueError(f"Cannot set {'.'.join(parts)} because {part} is not a mapping")
+        current = child
+    current[parts[-1]] = value
+
+
+def _parse_config_value(raw: str) -> Any:
+    if raw == "":
+        return ""
+    return yaml.safe_load(raw)
+
+
+def _load_config_yaml(config_path: Path) -> dict[str, Any]:
+    with open(config_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError("Configuration root must be a YAML mapping")
+    return data
+
+
+def _config_summary(config: Config, config_path: Path, show_secrets: bool = False) -> dict[str, Any]:
+    api_key = config.llm.api_key if show_secrets else _mask_secret(config.llm.api_key)
+    lite_api_key = config.lite_llm.api_key if show_secrets else _mask_secret(config.lite_llm.api_key)
+    image_api_key = config.image_generation.api_key if show_secrets else _mask_secret(config.image_generation.api_key)
+    return {
+        "config_file": str(config_path),
+        "llm": {
+            "provider": config.llm.provider,
+            "api_base": config.llm.api_base,
+            "model": config.llm.model,
+            "api_key": api_key,
+            "auth_file": config.llm.auth_file,
+            "context_window": config.llm.context_window,
+            "max_output_tokens": config.llm.max_output_tokens,
+            "timeout": config.llm.timeout,
+            "retry": {
+                "enabled": config.llm.retry.enabled,
+                "max_retries": config.llm.retry.max_retries,
+                "initial_delay": config.llm.retry.initial_delay,
+                "max_delay": config.llm.retry.max_delay,
+                "exponential_base": config.llm.retry.exponential_base,
+            },
+        },
+        "lite_llm": {
+            "enabled": getattr(config.lite_llm, "_present", False),
+            "provider": config.lite_llm.provider,
+            "api_base": config.lite_llm.api_base,
+            "model": config.lite_llm.model,
+            "api_key": lite_api_key,
+            "auth_file": config.lite_llm.auth_file,
+            "max_output_tokens": config.lite_llm.max_output_tokens,
+            "timeout": config.lite_llm.timeout,
+        },
+        "image_generation": {
+            "configured": bool(config.image_generation.endpoint),
+            "endpoint": config.image_generation.endpoint,
+            "model": config.image_generation.model,
+            "api_key": image_api_key,
+            "auth_file": config.image_generation.auth_file,
+            "timeout": config.image_generation.timeout,
+        },
+        "agent": {
+            "max_steps": config.agent.max_steps,
+            "workspace_dir": config.agent.workspace_dir,
+            "max_parallel_tools": config.agent.max_parallel_tools,
+            "enable_memory": config.agent.enable_memory,
+            "memory_dir": config.agent.memory_dir,
+            "enable_memory_extraction": config.agent.enable_memory_extraction,
+            "memory_maintainer_enabled": config.agent.memory_maintainer_enabled,
+            "memory_promotion_proposal_enabled": config.agent.memory_promotion_proposal_enabled,
+        },
+        "tools": {
+            "enable_file_tools": config.tools.enable_file_tools,
+            "enable_bash": config.tools.enable_bash,
+            "enable_todo": config.tools.enable_todo,
+            "enable_plan": config.tools.enable_plan,
+            "enable_sub_agent": config.tools.enable_sub_agent,
+            "allow_full_access": config.tools.allow_full_access,
+            "enable_skills": config.tools.enable_skills,
+            "skills_dir": config.tools.skills_dir,
+            "enable_mcp": config.tools.enable_mcp,
+            "mcp_config_path": config.tools.mcp_config_path,
+            "mcp": {
+                "connect_timeout": config.tools.mcp.connect_timeout,
+                "execute_timeout": config.tools.mcp.execute_timeout,
+                "sse_read_timeout": config.tools.mcp.sse_read_timeout,
+            },
+        },
+        "officev3": {
+            "configured": getattr(config.officev3, "_present", False),
+            "filesystem_scope": config.officev3.permissions.filesystem.scope,
+            "allowed_directories": config.officev3.permissions.filesystem.allowed_directories,
+            "session_workspace_root": config.officev3.paths.session_workspace_root,
+            "openclaw_import": config.officev3.permissions.memory.openclaw_import,
+        },
+        "hooks": config.hooks.hooks,
+    }
+
+
+def _print_config_summary(summary: dict[str, Any]) -> None:
+    print(f"{Colors.BOLD}Config file:{Colors.RESET} {summary['config_file']}\n")
+    llm = summary["llm"]
+    print(f"{Colors.BOLD}LLM{Colors.RESET}")
+    print(f"  provider          : {llm['provider']}")
+    print(f"  api_base          : {llm['api_base']}")
+    print(f"  model             : {llm['model']}")
+    print(f"  api_key           : {llm['api_key']}")
+    print(f"  context_window    : {llm['context_window']}")
+    print(f"  max_output_tokens : {llm['max_output_tokens']}")
+    print(f"  timeout           : {llm['timeout']}")
+    print(f"  retry.enabled     : {llm['retry']['enabled']}")
+
+    agent = summary["agent"]
+    print(f"\n{Colors.BOLD}Agent{Colors.RESET}")
+    print(f"  workspace_dir     : {agent['workspace_dir']}")
+    print(f"  max_steps         : {agent['max_steps']}")
+    print(f"  max_parallel_tools: {agent['max_parallel_tools']}")
+    print(f"  enable_memory     : {agent['enable_memory']}")
+
+    tools = summary["tools"]
+    print(f"\n{Colors.BOLD}Tools{Colors.RESET}")
+    print(f"  file_tools        : {tools['enable_file_tools']}")
+    print(f"  bash              : {tools['enable_bash']}")
+    print(f"  todo              : {tools['enable_todo']}")
+    print(f"  plan              : {tools['enable_plan']}")
+    print(f"  sub_agent         : {tools['enable_sub_agent']}")
+    print(f"  skills            : {tools['enable_skills']} ({tools['skills_dir']})")
+    print(f"  mcp               : {tools['enable_mcp']} ({tools['mcp_config_path']})")
+    print(f"  allow_full_access : {tools['allow_full_access']}")
+
+    lite = summary["lite_llm"]
+    image = summary["image_generation"]
+    print(f"\n{Colors.BOLD}Optional Services{Colors.RESET}")
+    print(f"  lite_llm          : {lite['enabled']} ({lite['provider']} {lite['model']})")
+    print(f"  image_generation  : {image['configured']} ({image['model']})")
+
+
+def _json_print(payload: dict[str, Any]) -> None:
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+def _config_exit_error(message: str, json_output: bool = False) -> int:
+    if json_output:
+        _json_print({"ok": False, "error": message})
+    else:
+        print(f"{Colors.RED}❌ {message}{Colors.RESET}")
+    return 1
 
 
 def get_log_directory() -> Path:
@@ -399,6 +653,21 @@ def print_stats(agent: Agent, session_start: datetime):
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}\n")
 
 
+def _session_stats(agent: Agent, session_start: datetime) -> dict[str, Any]:
+    duration = datetime.now() - session_start
+    return {
+        "duration_seconds": int(duration.total_seconds()),
+        "messages": {
+            "total": len(agent.messages),
+            "user": sum(1 for m in agent.messages if m.role == "user"),
+            "assistant": sum(1 for m in agent.messages if m.role == "assistant"),
+            "tool": sum(1 for m in agent.messages if m.role == "tool"),
+        },
+        "available_tools": len(agent.tools),
+        "api_total_tokens": agent.api_total_tokens,
+    }
+
+
 def print_goal_status(agent: Agent) -> None:
     """Print the current session goal."""
     if agent.goal is None:
@@ -479,10 +748,15 @@ def parse_args() -> argparse.Namespace:
 Examples:
   box-agent                              # Use current directory as workspace
   box-agent --workspace /path/to/dir     # Use specific workspace directory
+  box-agent --task "create a report" --json
+  box-agent --task "create a PPT" --force-plan-start
   box-agent setup                        # Run first-time setup wizard
   box-agent config                       # Show current configuration
+  box-agent config --get model           # Print one config value
+  box-agent config --set max_steps 300   # Update one config value
   box-agent config --edit                # Open config file in editor
   box-agent doctor                       # Check environment and connectivity
+  box-agent doctor --json                # Machine-readable health check
   box-agent log                          # Show log directory and recent files
   box-agent log agent_run_xxx.log        # Read a specific log file
         """,
@@ -500,6 +774,31 @@ Examples:
         type=str,
         default=None,
         help="Execute a task non-interactively and exit",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON where supported (doctor/config; --task appends a summary)",
+    )
+    parser.add_argument(
+        "--no-verify-api",
+        action="store_true",
+        help="Skip the startup API connectivity probe before running the agent",
+    )
+    parser.add_argument(
+        "--deep-think",
+        action="store_true",
+        help="Enable model thinking mode for providers that support it",
+    )
+    parser.add_argument(
+        "--force-plan-start",
+        action="store_true",
+        help="Force the next agent turn to publish a structured plan first",
+    )
+    parser.add_argument(
+        "--no-completion-gate",
+        action="store_true",
+        help="Disable automatic deliverable-artifact completion checks in --task mode",
     )
     parser.add_argument(
         "--version",
@@ -536,9 +835,49 @@ Examples:
         action="store_true",
         help="Open config file in editor",
     )
+    config_parser.add_argument(
+        "key",
+        nargs="?",
+        default=None,
+        help="Config key to print, for example model or tools.enable_mcp",
+    )
+    config_parser.add_argument(
+        "--get",
+        dest="get_key",
+        default=None,
+        help="Print a single config value",
+    )
+    config_parser.add_argument(
+        "--set",
+        dest="set_pair",
+        nargs=2,
+        metavar=("KEY", "VALUE"),
+        default=None,
+        help="Update one config value; VALUE is parsed as YAML",
+    )
+    config_parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Show the expanded config summary",
+    )
+    config_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
+    config_parser.add_argument(
+        "--show-secrets",
+        action="store_true",
+        help="Show raw secret values instead of masked values",
+    )
 
     # doctor subcommand
-    subparsers.add_parser("doctor", help="Check environment and connectivity")
+    doctor_parser = subparsers.add_parser("doctor", help="Check environment and connectivity")
+    doctor_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON",
+    )
 
     # install-browser subcommand
     subparsers.add_parser(
@@ -567,25 +906,20 @@ def cmd_setup():
     run_setup_wizard(config_path)
 
 
-def cmd_config(edit: bool = False):
-    """Show current configuration or open it in an editor."""
+def cmd_config(
+    edit: bool = False,
+    get_key: str | None = None,
+    set_pair: tuple[str, str] | None = None,
+    list_all: bool = False,
+    json_output: bool = False,
+    show_secrets: bool = False,
+) -> int:
+    """Show, read, edit, or update configuration."""
     config_path = Config.find_config_file("config.yaml")
+    if not config_path and set_pair is not None:
+        config_path = Config._ensure_user_config()
     if not config_path:
-        print(f"{Colors.YELLOW}No config.yaml found. Run `box-agent setup` first.{Colors.RESET}")
-        return
-
-    print(f"{Colors.BOLD}Config file:{Colors.RESET} {config_path}\n")
-
-    # Show key settings
-    try:
-        config = Config.from_yaml(config_path)
-        masked_key = config.llm.api_key[:4] + "****" + config.llm.api_key[-4:] if len(config.llm.api_key) > 8 else "****"
-        print(f"  api_base : {config.llm.api_base}")
-        print(f"  provider : {config.llm.provider}")
-        print(f"  model    : {config.llm.model}")
-        print(f"  api_key  : {masked_key}")
-    except Exception as e:
-        print(f"{Colors.RED}  (could not parse config: {e}){Colors.RESET}")
+        return _config_exit_error("No config.yaml found. Run `box-agent setup` first.", json_output)
 
     if edit:
         import os
@@ -593,8 +927,74 @@ def cmd_config(edit: bool = False):
         editor = os.environ.get("EDITOR")
         if not editor:
             editor = "open" if platform.system() == "Darwin" else "vi"
-        print(f"\n{Colors.DIM}Opening with {editor}...{Colors.RESET}")
-        subprocess.run([editor, str(config_path)])
+        if not json_output:
+            print(f"{Colors.BOLD}Config file:{Colors.RESET} {config_path}")
+            print(f"{Colors.DIM}Opening with {editor}...{Colors.RESET}")
+        result = subprocess.run([editor, str(config_path)], check=False)
+        return result.returncode
+
+    if set_pair is not None:
+        key, raw_value = set_pair
+        old_text: str | None = None
+        try:
+            data = _load_config_yaml(config_path)
+            yaml_parts = _normalize_config_path(key)
+            value = _parse_config_value(raw_value)
+            old_text = config_path.read_text(encoding="utf-8")
+            _set_nested(data, yaml_parts, value)
+            config_path.write_text(
+                yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            Config.from_yaml(config_path)
+        except Exception as e:
+            if old_text is not None:
+                config_path.write_text(old_text, encoding="utf-8")
+            return _config_exit_error(f"Failed to update config: {e}", json_output)
+
+        display_value = value
+        if _is_secret_path(yaml_parts) and not show_secrets:
+            display_value = _mask_secret(value)
+        if json_output:
+            _json_print({
+                "ok": True,
+                "config_file": str(config_path),
+                "key": key,
+                "value": display_value,
+            })
+        else:
+            print(f"{Colors.GREEN}✅ Updated {key} = {display_value!r}{Colors.RESET}")
+            print(f"{Colors.DIM}Config file: {config_path}{Colors.RESET}")
+        return 0
+
+    try:
+        config = Config.from_yaml(config_path)
+    except Exception as e:
+        return _config_exit_error(f"Could not parse config: {e}", json_output)
+
+    summary = _config_summary(config, config_path, show_secrets=show_secrets)
+    if get_key:
+        try:
+            display_parts = _normalize_display_path(get_key)
+            value = _get_nested(summary, display_parts)
+        except (KeyError, ValueError):
+            return _config_exit_error(f"Unknown config key: {get_key}", json_output)
+        if _is_secret_path(display_parts) and not show_secrets:
+            value = _mask_secret(value)
+        if json_output:
+            _json_print({"ok": True, "key": get_key, "value": value})
+        else:
+            print(value)
+        return 0
+
+    if json_output:
+        _json_print({"ok": True, **summary})
+    else:
+        _print_config_summary(summary)
+        if not list_all:
+            print(f"\n{Colors.DIM}Use `box-agent config --list --json` for a machine-readable view.{Colors.RESET}")
+            print(f"{Colors.DIM}Use `box-agent config --set KEY VALUE` to update a setting.{Colors.RESET}")
+    return 0
 
 
 def build_cli_env_context():
@@ -620,15 +1020,42 @@ def _resolve_obsidian_cli(cli_path: str | None) -> str | None:
     return shutil.which(candidate)
 
 
-def _doctor_obsidian_status_line() -> str:
+def _doctor_check(status: str, message: str, **details: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"status": status, "message": message}
+    payload.update(details)
+    return payload
+
+
+def _doctor_status_prefix(status: str) -> str:
+    return {
+        "ok": "✅",
+        "warning": "⚠️ ",
+        "error": "❌",
+        "skipped": "⏭️ ",
+    }.get(status, "ℹ️ ")
+
+
+def _doctor_line(name: str, result: dict[str, Any]) -> str:
+    return f"  {_doctor_status_prefix(str(result.get('status')))} {name:<9} — {result.get('message', '')}"
+
+
+def _doctor_obsidian_status() -> dict[str, Any]:
     from box_agent.tools.obsidian_tool import load_obsidian_config, obsidian_config_path
 
     config_path = obsidian_config_path()
     config = load_obsidian_config()
     if not config and not config_path.exists():
-        return "  ⚠️  Obsidian — not configured (officev3 will create obsidian.json after Vault binding)"
+        return _doctor_check(
+            "warning",
+            "not configured (officev3 will create obsidian.json after Vault binding)",
+            config_file=str(config_path),
+        )
     if config.get("enabled") is False:
-        return "  ⚠️  Obsidian — disabled (bind a Vault in officev3 Settings → Connect Data Sources)"
+        return _doctor_check(
+            "warning",
+            "disabled (bind a Vault in officev3 Settings → Connect Data Sources)",
+            config_file=str(config_path),
+        )
 
     problems: list[str] = []
     vault_path = config.get("vault_path")
@@ -648,66 +1075,81 @@ def _doctor_obsidian_status_line() -> str:
         problems.append(f"CLI not found: {(cli_path or 'obsidian').strip() or 'obsidian'}")
 
     if problems:
-        return f"  ❌ Obsidian — {'; '.join(problems)}"
+        return _doctor_check(
+            "error",
+            "; ".join(problems),
+            config_file=str(config_path),
+            vault_path=vault_path,
+            cli_path=cli_path,
+        )
 
     vault_label = config.get("vault_name") if isinstance(config.get("vault_name"), str) else None
     if not vault_label and vault is not None:
         vault_label = vault.name
-    return f"  ✅ Obsidian — Vault: {vault_label or 'configured'}; CLI: {resolved_cli}"
+    return _doctor_check(
+        "ok",
+        f"Vault: {vault_label or 'configured'}; CLI: {resolved_cli}",
+        config_file=str(config_path),
+        vault_path=str(vault) if vault else "",
+        cli_path=resolved_cli,
+    )
+
+
+def _doctor_obsidian_status_line() -> str:
+    return _doctor_line("Obsidian", _doctor_obsidian_status())
 
 
 def _doctor_check_obsidian() -> None:
     print(_doctor_obsidian_status_line())
 
 
-async def cmd_doctor():
-    """Check environment health: config, API, sandbox, MCP."""
-    print(f"{Colors.BOLD}Box Agent Doctor{Colors.RESET}\n")
-
-    # 1. Config
+def _doctor_config_status() -> tuple[dict[str, Any], Config | None]:
     config_path = Config.find_config_file("config.yaml")
     config = None
     if not config_path:
-        print(f"  ❌ Config    — config.yaml not found (run `box-agent setup`)")
-    else:
-        try:
-            config = Config.from_yaml(config_path)
-            print(f"  ✅ Config    — {config_path}")
-        except Exception as e:
-            print(f"  ❌ Config    — parse error: {e}")
+        return _doctor_check("error", "config.yaml not found (run `box-agent setup`)"), None
+    try:
+        config = Config.from_yaml(config_path)
+        return _doctor_check("ok", str(config_path), config_file=str(config_path)), config
+    except Exception as e:
+        return _doctor_check("error", f"parse error: {e}", config_file=str(config_path)), None
 
-    # 2. API connectivity
-    if config:
-        try:
-            from box_agent.retry import RetryConfig as DoctorRetryConfig
-            from box_agent.schema import LLMProvider as LP, Message
 
-            provider = LP.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LP.OPENAI
-            no_retry = DoctorRetryConfig(enabled=False, max_retries=0)
-            client = LLMClient(
-                api_key=config.llm.api_key,
-                provider=provider,
+async def _doctor_api_status(config: Config | None) -> dict[str, Any]:
+    if config is None:
+        return _doctor_check("skipped", "skipped (no valid config)")
+    try:
+        from box_agent.retry import RetryConfig as DoctorRetryConfig
+        from box_agent.schema import LLMProvider as LP, Message
+
+        provider = LP.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LP.OPENAI
+        no_retry = DoctorRetryConfig(enabled=False, max_retries=0)
+        client = LLMClient(
+            api_key=config.llm.api_key,
+            provider=provider,
+            api_base=config.llm.api_base,
+            model=config.llm.model,
+            retry_config=no_retry,
+            max_output_tokens=config.llm.max_output_tokens,
+            auth_file=config.llm.auth_file,
+            timeout=config.llm.timeout,
+        )
+        messages = [Message(role="user", content="hi")]
+        response = await client.generate(messages)
+        if response and response.content:
+            return _doctor_check(
+                "ok",
+                f"{config.llm.api_base} ({config.llm.model})",
                 api_base=config.llm.api_base,
+                provider=config.llm.provider,
                 model=config.llm.model,
-                retry_config=no_retry,
-                max_output_tokens=config.llm.max_output_tokens,
-                auth_file=config.llm.auth_file,
-                timeout=config.llm.timeout,
             )
-            from box_agent.schema import Message
+        return _doctor_check("error", f"empty response from {config.llm.api_base}")
+    except Exception as e:
+        return _doctor_check("error", str(e))
 
-            messages = [Message(role="user", content="hi")]
-            response = await client.generate(messages)
-            if response and response.content:
-                print(f"  ✅ API       — {config.llm.api_base} ({config.llm.model})")
-            else:
-                print(f"  ❌ API       — empty response from {config.llm.api_base}")
-        except Exception as e:
-            print(f"  ❌ API       — {e}")
-    else:
-        print(f"  ⏭️  API       — skipped (no valid config)")
 
-    # 3. Sandbox (Jupyter)
+def _doctor_sandbox_status() -> dict[str, Any]:
     try:
         import jupyter_client  # noqa: F401
 
@@ -720,27 +1162,56 @@ async def cmd_doctor():
             except Exception:
                 kernel_dir = None
         if kernel_dir:
-            print(f"  ✅ Sandbox   — jupyter_client OK, kernel spec found")
-        else:
-            print(f"  ⚠️  Sandbox   — jupyter_client OK, but kernel spec 'mini-agent-sandbox' not found")
+            return _doctor_check("ok", "jupyter_client OK, kernel spec found", kernel_dir=str(kernel_dir))
+        return _doctor_check("warning", "jupyter_client OK, but kernel spec 'mini-agent-sandbox' not found")
     except ImportError:
-        print(f"  ❌ Sandbox   — jupyter_client not installed")
+        return _doctor_check("error", "jupyter_client not installed")
 
-    # 4. MCP
+
+def _doctor_mcp_status() -> dict[str, Any]:
     mcp_path = Config.find_config_file("mcp.json")
     if mcp_path:
-        print(f"  ✅ MCP       — {mcp_path}")
+        return _doctor_check("ok", str(mcp_path), config_file=str(mcp_path))
+    return _doctor_check("warning", "mcp.json not found (optional)")
+
+
+async def cmd_doctor(json_output: bool = False) -> int:
+    """Check environment health: config, API, sandbox, MCP."""
+    checks: dict[str, dict[str, Any]] = {}
+    if not json_output:
+        print(f"{Colors.BOLD}Box Agent Doctor{Colors.RESET}\n")
+
+    checks["config"], config = _doctor_config_status()
+    if not json_output:
+        print(_doctor_line("Config", checks["config"]))
+
+    checks["api"] = await _doctor_api_status(config)
+    if not json_output:
+        print(_doctor_line("API", checks["api"]))
+
+    checks["sandbox"] = _doctor_sandbox_status()
+    if not json_output:
+        print(_doctor_line("Sandbox", checks["sandbox"]))
+
+    checks["mcp"] = _doctor_mcp_status()
+    if not json_output:
+        print(_doctor_line("MCP", checks["mcp"]))
+
+    checks["browser"] = _doctor_browser_status()
+    if not json_output:
+        print(_doctor_line("Browser", checks["browser"]))
+
+    # Obsidian diagnostics are read-only; never start Obsidian or run write/open commands.
+    checks["obsidian"] = _doctor_obsidian_status()
+    if not json_output:
+        print(_doctor_line("Obsidian", checks["obsidian"]))
+
+    ok = not any(check.get("status") == "error" for check in checks.values())
+    if json_output:
+        _json_print({"ok": ok, "checks": checks})
     else:
-        print(f"  ⚠️  MCP       — mcp.json not found (optional)")
-
-    # 5. Browser runtime (Playwright)
-    _doctor_check_browser()
-
-    # 6. Obsidian host configuration. This is diagnostic only; never starts
-    # Obsidian or runs write/open CLI commands.
-    _doctor_check_obsidian()
-
-    print()
+        print()
+    return 0 if ok else 1
 
 
 def _default_browsers_path() -> Path:
@@ -757,12 +1228,16 @@ def _playwright_env() -> dict[str, str]:
     return env
 
 
-def _doctor_check_browser() -> None:
+def _doctor_browser_status() -> dict[str, Any]:
     """Check whether Node.js (npx) and Playwright Chromium are available."""
     npx = shutil.which("npx")
+    browsers_path = _playwright_env()["PLAYWRIGHT_BROWSERS_PATH"]
     if not npx:
-        print(f"  ⚠️  Browser   — Node.js/npx not found (optional; needed for Playwright MCP)")
-        return
+        return _doctor_check(
+            "warning",
+            "Node.js/npx not found (optional; needed for Playwright MCP)",
+            browsers_path=browsers_path,
+        )
 
     try:
         dry_run = subprocess.run(
@@ -773,19 +1248,35 @@ def _doctor_check_browser() -> None:
             env=_playwright_env(),
         )
     except subprocess.TimeoutExpired:
-        print(f"  ⚠️  Browser   — playwright dry-run timed out")
-        return
+        return _doctor_check(
+            "warning",
+            "playwright dry-run timed out",
+            npx=npx,
+            browsers_path=browsers_path,
+        )
 
     combined = (dry_run.stdout or "") + (dry_run.stderr or "")
-    browsers_path = _playwright_env()["PLAYWRIGHT_BROWSERS_PATH"]
     # Playwright prints "browser: chromium ... <install location>" and omits
     # the "Install location" section when already installed. Use "Download url"
     # presence as the "needs download" signal.
     if dry_run.returncode == 0 and "Download url" not in combined:
-        print(f"  ✅ Browser   — Chromium installed ({browsers_path})")
-    else:
-        print(f"  ⚠️  Browser   — Chromium not installed in {browsers_path}")
-        print(f"                 (run `box-agent install-browser`)")
+        return _doctor_check(
+            "ok",
+            f"Chromium installed ({browsers_path})",
+            npx=npx,
+            browsers_path=browsers_path,
+        )
+    return _doctor_check(
+        "warning",
+        f"Chromium not installed in {browsers_path} (run `box-agent install-browser`)",
+        npx=npx,
+        browsers_path=browsers_path,
+        returncode=dry_run.returncode,
+    )
+
+
+def _doctor_check_browser() -> None:
+    print(_doctor_line("Browser", _doctor_browser_status()))
 
 
 async def cmd_install_browser() -> None:
@@ -909,13 +1400,27 @@ async def _quiet_cleanup():
         pass
 
 
-async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = True):
+async def run_agent(
+    workspace_dir: Path,
+    task: str | None = None,
+    sandbox_mode: bool = True,
+    verify_api: bool = True,
+    json_summary: bool = False,
+    deep_think: bool = False,
+    force_plan_start: bool = False,
+    completion_gate_enabled: bool = True,
+) -> int:
     """Run Agent in interactive or non-interactive mode.
 
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
         sandbox_mode: If True (default), enable Jupyter sandbox for Python code execution
+        verify_api: If True, probe API connectivity before starting the session
+        json_summary: If True in non-interactive mode, append a JSON execution summary
+        deep_think: If True, enable thinking mode for the run
+        force_plan_start: If True, require the next turn to publish a plan first
+        completion_gate_enabled: If True, guard deliverable tasks from ending before artifact creation
     """
     session_start = datetime.now()
 
@@ -925,13 +1430,13 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     if not config_path.exists():
         # This shouldn't happen after _ensure_user_config, but just in case
         print(f"{Colors.RED}❌ Configuration file not found: {config_path}{Colors.RESET}")
-        return
+        return 1
 
     try:
         config = Config.from_yaml(config_path)
     except FileNotFoundError:
         print(f"{Colors.RED}❌ Error: Configuration file not found: {config_path}{Colors.RESET}")
-        return
+        return 1
     except ValueError as e:
         error_msg = str(e)
         if "API Key" in error_msg or "api_key" in error_msg or "empty" in error_msg.lower():
@@ -942,16 +1447,16 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
                     config = Config.from_yaml(config_path)
                 except Exception as e2:
                     print(f"{Colors.RED}❌ Error: {e2}{Colors.RESET}")
-                    return
+                    return 1
             else:
-                return
+                return 1
         else:
             print(f"{Colors.RED}❌ Error: {e}{Colors.RESET}")
             print(f"{Colors.YELLOW}Please check: {config_path}{Colors.RESET}")
-            return
+            return 1
     except Exception as e:
         print(f"{Colors.RED}❌ Error: Failed to load configuration file: {e}{Colors.RESET}")
-        return
+        return 1
 
     # 2. Initialize LLM client
     from box_agent.retry import RetryConfig as RetryConfigBase
@@ -993,81 +1498,87 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         print(f"{Colors.GREEN}✅ LLM retry mechanism enabled (max {config.llm.retry.max_retries} retries){Colors.RESET}")
 
     # 2.5 Verify API connectivity with a lightweight test call (no retry)
-    print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
-    try:
-        from box_agent.retry import RetryConfig as VerifyRetryConfig
-        from box_agent.schema import Message as Msg
-        # Use a temporary client with retry disabled to avoid long waits
-        _verify_client = LLMClient(
-            api_key=config.llm.api_key,
-            provider=provider,
-            api_base=config.llm.api_base,
-            model=config.llm.model,
-            retry_config=VerifyRetryConfig(enabled=False),
-            max_output_tokens=config.llm.max_output_tokens,
-            auth_file=config.llm.auth_file,
-            timeout=config.llm.timeout,
-        )
-        await _verify_client.generate(
-            messages=[Msg(role="user", content="hi")],
-        )
-        print(f"{Colors.GREEN}OK{Colors.RESET}")
-    except Exception as e:
-        err_str = str(e)
-        print(f"{Colors.RED}FAILED{Colors.RESET}")
-        print(f"\n{Colors.RED}❌ API connection failed: {err_str}{Colors.RESET}")
-        print()
-        print(f"{Colors.DIM}  api_key:    {config.llm.api_key[:8]}...{Colors.RESET}")
-        print(f"{Colors.DIM}  api_base:   {config.llm.api_base}{Colors.RESET}")
-        print(f"{Colors.DIM}  provider:   {config.llm.provider}{Colors.RESET}")
-        print(f"{Colors.DIM}  model:      {config.llm.model}{Colors.RESET}")
-        print()
-        # Offer to re-run setup wizard
+    if verify_api:
+        print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
         try:
-            answer = input(f"{Colors.BRIGHT_CYAN}Would you like to reconfigure? [Y/n]: {Colors.RESET}").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+            from box_agent.retry import RetryConfig as VerifyRetryConfig
+            from box_agent.schema import Message as Msg
+            # Use a temporary client with retry disabled to avoid long waits
+            _verify_client = LLMClient(
+                api_key=config.llm.api_key,
+                provider=provider,
+                api_base=config.llm.api_base,
+                model=config.llm.model,
+                retry_config=VerifyRetryConfig(enabled=False),
+                max_output_tokens=config.llm.max_output_tokens,
+                auth_file=config.llm.auth_file,
+                timeout=config.llm.timeout,
+            )
+            await _verify_client.generate(
+                messages=[Msg(role="user", content="hi")],
+            )
+            print(f"{Colors.GREEN}OK{Colors.RESET}")
+        except Exception as e:
+            err_str = str(e)
+            print(f"{Colors.RED}FAILED{Colors.RESET}")
+            print(f"\n{Colors.RED}❌ API connection failed: {err_str}{Colors.RESET}")
             print()
-            return
-        if answer in ("", "y", "yes"):
-            if run_setup_wizard(config_path):
-                # Retry loading config and verifying
-                try:
-                    config = Config.from_yaml(config_path)
-                    provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
-                    llm_client = LLMClient(
-                        api_key=config.llm.api_key,
-                        provider=provider,
-                        api_base=config.llm.api_base,
-                        model=config.llm.model,
-                        retry_config=retry_config if config.llm.retry.enabled else None,
-                        max_output_tokens=config.llm.max_output_tokens,
-                        auth_file=config.llm.auth_file,
-                        timeout=config.llm.timeout,
-                    )
-                    if config.llm.retry.enabled:
-                        llm_client.retry_callback = on_retry
-                    print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
-                    _verify_client2 = LLMClient(
-                        api_key=config.llm.api_key,
-                        provider=provider,
-                        api_base=config.llm.api_base,
-                        model=config.llm.model,
-                        retry_config=VerifyRetryConfig(enabled=False),
-                        max_output_tokens=config.llm.max_output_tokens,
-                        auth_file=config.llm.auth_file,
-                        timeout=config.llm.timeout,
-                    )
-                    await _verify_client2.generate(messages=[Msg(role="user", content="hi")])
-                    print(f"{Colors.GREEN}OK{Colors.RESET}")
-                except Exception as e2:
-                    print(f"{Colors.RED}FAILED{Colors.RESET}")
-                    print(f"\n{Colors.RED}❌ API connection still failed: {e2}{Colors.RESET}")
-                    print(f"{Colors.YELLOW}Please check your configuration: {config_path}{Colors.RESET}")
-                    return
+            print(f"{Colors.DIM}  api_key:    {config.llm.api_key[:8]}...{Colors.RESET}")
+            print(f"{Colors.DIM}  api_base:   {config.llm.api_base}{Colors.RESET}")
+            print(f"{Colors.DIM}  provider:   {config.llm.provider}{Colors.RESET}")
+            print(f"{Colors.DIM}  model:      {config.llm.model}{Colors.RESET}")
+            print()
+            if task:
+                print(f"{Colors.YELLOW}Use `--no-verify-api` to skip the startup probe when you expect the first LLM call to handle connectivity.{Colors.RESET}")
+                return 1
+            # Offer to re-run setup wizard
+            try:
+                answer = input(f"{Colors.BRIGHT_CYAN}Would you like to reconfigure? [Y/n]: {Colors.RESET}").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 1
+            if answer in ("", "y", "yes"):
+                if run_setup_wizard(config_path):
+                    # Retry loading config and verifying
+                    try:
+                        config = Config.from_yaml(config_path)
+                        provider = LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
+                        llm_client = LLMClient(
+                            api_key=config.llm.api_key,
+                            provider=provider,
+                            api_base=config.llm.api_base,
+                            model=config.llm.model,
+                            retry_config=retry_config if config.llm.retry.enabled else None,
+                            max_output_tokens=config.llm.max_output_tokens,
+                            auth_file=config.llm.auth_file,
+                            timeout=config.llm.timeout,
+                        )
+                        if config.llm.retry.enabled:
+                            llm_client.retry_callback = on_retry
+                        print(f"{Colors.DIM}Verifying API connection...{Colors.RESET}", end=" ", flush=True)
+                        _verify_client2 = LLMClient(
+                            api_key=config.llm.api_key,
+                            provider=provider,
+                            api_base=config.llm.api_base,
+                            model=config.llm.model,
+                            retry_config=VerifyRetryConfig(enabled=False),
+                            max_output_tokens=config.llm.max_output_tokens,
+                            auth_file=config.llm.auth_file,
+                            timeout=config.llm.timeout,
+                        )
+                        await _verify_client2.generate(messages=[Msg(role="user", content="hi")])
+                        print(f"{Colors.GREEN}OK{Colors.RESET}")
+                    except Exception as e2:
+                        print(f"{Colors.RED}FAILED{Colors.RESET}")
+                        print(f"\n{Colors.RED}❌ API connection still failed: {e2}{Colors.RESET}")
+                        print(f"{Colors.YELLOW}Please check your configuration: {config_path}{Colors.RESET}")
+                        return 1
+                else:
+                    return 1
             else:
-                return
-        else:
-            return
+                return 1
+    else:
+        print(f"{Colors.DIM}Skipping startup API verification (--no-verify-api).{Colors.RESET}")
 
     # 3. Initialize memory manager (before base tools, so tools get the reference)
     memory_mgr = None
@@ -1223,6 +1734,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         workspace_dir=str(workspace_dir),
         token_limit=config.llm.context_token_limit,
         hooks=hooks,
+        thinking_enabled=deep_think,
         max_parallel_tools=config.agent.max_parallel_tools,
         memory_promotion_enabled=config.agent.memory_promotion_proposal_enabled,
         memory_promotion_hit_threshold=config.agent.memory_promotion_hit_threshold,
@@ -1286,16 +1798,39 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
         _apply_skill_filter(task)
         await _apply_mcp_lazy()
         agent.add_user_message(task)
+        completion_gate = (
+            build_auto_completion_gate(task, workspace_dir)
+            if completion_gate_enabled
+            else None
+        )
+        if completion_gate is not None:
+            patterns = ", ".join(completion_gate.required_changed_artifact_globs)
+            print(f"{Colors.DIM}Completion gate enabled for deliverable artifacts: {patterns}{Colors.RESET}")
+        ok = True
+        error: str | None = None
         try:
-            await agent.run()
+            await agent.run(
+                force_plan_start=force_plan_start,
+                completion_gate=completion_gate,
+            )
         except Exception as e:
+            ok = False
+            error = str(e)
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
             print_stats(agent, session_start)
+            if json_summary:
+                _json_print({
+                    "ok": ok,
+                    "error": error,
+                    "workspace": str(workspace_dir),
+                    "task": task,
+                    "stats": _session_stats(agent, session_start),
+                })
 
         # Cleanup MCP connections
         await _quiet_cleanup()
-        return
+        return 0 if ok else 1
 
     # 9. Setup prompt_toolkit session
     # Command completer
@@ -1361,6 +1896,7 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
     )
 
     # 10. Interactive loop
+    force_plan_next_turn = force_plan_start
     while True:
         try:
             # Build prompt with optional sandbox session_id
@@ -1582,7 +2118,10 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
             esc_thread.start()
 
             try:
-                agent_task = asyncio.create_task(agent.run())
+                agent_task = asyncio.create_task(
+                    agent.run(force_plan_start=force_plan_next_turn)
+                )
+                force_plan_next_turn = False
 
                 while not agent_task.done():
                     if esc_cancelled[0]:
@@ -1612,9 +2151,10 @@ async def run_agent(workspace_dir: Path, task: str = None, sandbox_mode: bool = 
 
     # 11. Cleanup MCP connections
     await _quiet_cleanup()
+    return 0
 
 
-def main():
+def main() -> int:
     """Main entry point for CLI"""
     # Parse command line arguments
     args = parse_args()
@@ -1625,32 +2165,38 @@ def main():
             read_log_file(args.filename)
         else:
             show_log_directory(open_file_manager=True)
-        return
+        return 0
 
     # Handle setup subcommand
     if args.command == "setup":
         cmd_setup()
-        return
+        return 0
 
     # Handle config subcommand
     if args.command == "config":
-        cmd_config(edit=args.edit)
-        return
+        get_key = args.get_key or args.key
+        return cmd_config(
+            edit=args.edit,
+            get_key=get_key,
+            set_pair=tuple(args.set_pair) if args.set_pair else None,
+            list_all=args.list,
+            json_output=args.json,
+            show_secrets=args.show_secrets,
+        )
 
     # Handle doctor subcommand
     if args.command == "doctor":
-        asyncio.run(cmd_doctor())
-        return
+        return asyncio.run(cmd_doctor(json_output=args.json))
 
     # Handle install-browser subcommand
     if args.command == "install-browser":
         asyncio.run(cmd_install_browser())
-        return
+        return 0
 
     # Handle install-node subcommand
     if args.command == "install-node":
         cmd_install_node(version=args.version)
-        return
+        return 0
 
     # Ensure user config exists; run setup wizard on first launch
     config_path = Config._ensure_user_config()
@@ -1659,11 +2205,13 @@ def main():
         # If key is still the placeholder, treat as unconfigured
         if config_check.llm.api_key in ("YOUR_API_KEY_HERE", ""):
             print(f"{Colors.BRIGHT_CYAN}First-time setup detected. Let's configure Box Agent.{Colors.RESET}\n")
-            run_setup_wizard(config_path)
+            if not run_setup_wizard(config_path):
+                return 1
     except Exception:
         # Config can't be parsed or key is missing — run wizard
         print(f"{Colors.BRIGHT_CYAN}First-time setup detected. Let's configure Box Agent.{Colors.RESET}\n")
-        run_setup_wizard(config_path)
+        if not run_setup_wizard(config_path):
+            return 1
 
     # Determine workspace directory
     # Priority: CLI --workspace > current working directory
@@ -1681,10 +2229,21 @@ def main():
 
     # Run the agent (config always loaded from package directory)
     try:
-        asyncio.run(run_agent(workspace_dir, task=args.task, sandbox_mode=not args.no_sandbox))
+        return asyncio.run(
+            run_agent(
+                workspace_dir,
+                task=args.task,
+                sandbox_mode=not args.no_sandbox,
+                verify_api=not args.no_verify_api,
+                json_summary=args.json,
+                deep_think=args.deep_think,
+                force_plan_start=args.force_plan_start,
+                completion_gate_enabled=not args.no_completion_gate,
+            )
+        )
     except KeyboardInterrupt:
-        pass
+        return 130
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

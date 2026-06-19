@@ -69,6 +69,19 @@ When running the agent in interactive mode (`box-agent`), the following commands
 | `/goal`                | Show or manage the durable session goal                     |
 | `/memory review`       | Review memory promotion candidates                          |
 
+CLI management commands are also scriptable:
+
+```bash
+box-agent config --get model
+box-agent config --set max_steps 300
+box-agent config --json
+box-agent doctor --json
+box-agent --task "summarize README.md" --json
+box-agent --task "create a PPT" --force-plan-start
+box-agent --task "create a PPT" --no-completion-gate
+box-agent --deep-think --task "review this repository"
+```
+
 ### 2.2 Integrated MCP Tools
 
 This project ships a disabled-by-default MCP example configuration at `box_agent/config/mcp-example.json`.

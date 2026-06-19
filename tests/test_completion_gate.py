@@ -12,6 +12,7 @@ from box_agent.core import run_agent_loop
 from box_agent.loop_guards import (
     CompletionGate,
     artifact_signatures_for_globs,
+    build_auto_completion_gate,
     completion_gate_gaps,
     completion_gate_text,
 )
@@ -101,6 +102,23 @@ def _run(llm, gate, **kw):
 
 
 # ── Pure-function: _completion_gate_gaps ─────────────────────────
+
+
+def test_build_auto_completion_gate_detects_deliverable_ppt_request(tmp_path):
+    gate = build_auto_completion_gate("生成一份 PPT", tmp_path)
+
+    assert gate is not None
+    assert gate.required_changed_artifact_globs == (
+        "output/**/*.pptx",
+        "output/**/*.ppt",
+    )
+    assert gate.max_continuations == 3
+
+
+def test_build_auto_completion_gate_ignores_non_deliverable_prompt(tmp_path):
+    gate = build_auto_completion_gate("解释一下这个函数", tmp_path)
+
+    assert gate is None
 
 
 def test_gaps_empty_when_all_requirements_met(tmp_path):

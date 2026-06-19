@@ -39,6 +39,7 @@ from .events import (
 )
 from .llm import LLMClient
 from .logger import AgentLogger
+from .loop_guards import CompletionGate
 from .schema import Message
 from .tools.base import Tool, ToolResult
 from .utils import calculate_display_width
@@ -383,7 +384,12 @@ class Agent:
     # ── Event-stream API (new) ──────────────────────────────
 
     async def run_events(
-        self, cancel_event: Optional[asyncio.Event] = None
+        self,
+        cancel_event: Optional[asyncio.Event] = None,
+        *,
+        force_plan_start: bool = False,
+        completion_gate: CompletionGate | None = None,
+        artifact_detection_enabled: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         """Execute the agent loop, yielding structured events.
 
@@ -412,6 +418,9 @@ class Agent:
             inject_queue=self.inject_queue,
             thinking_enabled=self.thinking_enabled,
             max_parallel_tools=self.max_parallel_tools,
+            force_plan_start=force_plan_start,
+            completion_gate=completion_gate,
+            artifact_detection_enabled=artifact_detection_enabled,
         ):
             # Track token usage on Agent instance for backward compat
             if isinstance(event, TokenUsageEvent):
@@ -420,14 +429,26 @@ class Agent:
 
     # ── Backward-compatible run() ───────────────────────────
 
-    async def run(self, cancel_event: Optional[asyncio.Event] = None) -> str:
+    async def run(
+        self,
+        cancel_event: Optional[asyncio.Event] = None,
+        *,
+        force_plan_start: bool = False,
+        completion_gate: CompletionGate | None = None,
+        artifact_detection_enabled: bool = True,
+    ) -> str:
         """Execute agent loop with terminal rendering.
 
         Signature and return value are unchanged from before the refactor.
         Internally it now consumes ``run_events()``.
         """
         final_content = ""
-        async for event in self.run_events(cancel_event):
+        async for event in self.run_events(
+            cancel_event,
+            force_plan_start=force_plan_start,
+            completion_gate=completion_gate,
+            artifact_detection_enabled=artifact_detection_enabled,
+        ):
             self._render_event(event)
             if isinstance(event, MemoryProposalEvent) and self._proposal_negotiator is not None:
                 try:

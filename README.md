@@ -183,9 +183,13 @@ max_steps: 200
 ```
 
 ```bash
-box-agent config           # show current config
-box-agent config --edit    # open in editor
-box-agent doctor           # check environment & API connectivity
+box-agent config                    # show current config summary
+box-agent config --get model        # print one config value
+box-agent config --set max_steps 300
+box-agent config --json             # machine-readable config summary
+box-agent config --edit             # open in editor
+box-agent doctor                    # check environment & API connectivity
+box-agent doctor --json             # machine-readable health check
 ```
 
 ## CLI Usage
@@ -198,12 +202,17 @@ box-agent --no-sandbox           # disable Jupyter sandbox
 
 # Non-interactive (CI/CD, scripts)
 box-agent --task "analyze data.csv and create a report"
+box-agent --task "analyze data.csv" --json          # append execution summary JSON
+box-agent --task "local file task" --no-verify-api  # skip startup API probe
+box-agent --task "create a PPT" --force-plan-start  # publish a plan before work
+box-agent --task "create a PPT" --no-completion-gate
+box-agent --deep-think --task "review this repo"    # enable thinking mode when supported
 
 # Subcommands
-box-agent setup     # config wizard
-box-agent config    # show/edit config
-box-agent doctor    # health check
-box-agent log       # open log directory
+box-agent setup              # config wizard
+box-agent config             # show/edit config
+box-agent doctor             # health check
+box-agent log                # open log directory
 box-agent install-browser   # install Chromium for Playwright MCP (~200MB)
 box-agent install-node      # install managed Node.js runtime for skills (macOS)
 ```

@@ -11,7 +11,7 @@ import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -80,9 +80,32 @@ class GoalState:
     status: str
     created_at: str
     updated_at: str
+    evidence: list[str] = field(default_factory=list)
+    progress: list[str] = field(default_factory=list)
+    blocked_reason: str | None = None
+    completed_by: str | None = None
 
 
-def _goal_payload(goal: GoalState | None) -> dict | None:
+def _clean_goal_text(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _coerce_goal_items(value: object) -> list[str]:
+    if isinstance(value, str):
+        item = value.strip()
+        return [item] if item else []
+    if isinstance(value, (list, tuple)):
+        return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return []
+
+
+def _extend_goal_items(target: list[str], items: list[str]) -> None:
+    for item in items:
+        if item not in target:
+            target.append(item)
+
+
+def goal_payload(goal: GoalState | None) -> dict | None:
     if goal is None:
         return None
     return {
@@ -90,17 +113,94 @@ def _goal_payload(goal: GoalState | None) -> dict | None:
         "status": goal.status,
         "createdAt": goal.created_at,
         "updatedAt": goal.updated_at,
+        "evidence": list(goal.evidence),
+        "progress": list(goal.progress),
+        "blockedReason": goal.blocked_reason,
+        "completedBy": goal.completed_by,
     }
+
+
+def goal_state_from_payload(payload: object) -> GoalState | None:
+    """Build a GoalState from a persisted/host-provided payload."""
+    if not isinstance(payload, dict):
+        return None
+
+    objective = _clean_goal_text(payload.get("objective"))
+    if not objective:
+        return None
+
+    now = datetime.now().isoformat()
+    status = _clean_goal_text(payload.get("status")) or "active"
+    return GoalState(
+        objective=objective,
+        status=status,
+        created_at=_clean_goal_text(payload.get("createdAt") or payload.get("created_at")) or now,
+        updated_at=_clean_goal_text(payload.get("updatedAt") or payload.get("updated_at")) or now,
+        evidence=_coerce_goal_items(payload.get("evidence")),
+        progress=_coerce_goal_items(payload.get("progress")),
+        blocked_reason=_clean_goal_text(payload.get("blockedReason") or payload.get("blocked_reason")) or None,
+        completed_by=_clean_goal_text(payload.get("completedBy") or payload.get("completed_by")) or None,
+    )
 
 
 def _goal_snapshot(agent: "Agent", action: str | None = None) -> dict:
     payload = {
         "type": "goal_snapshot",
-        "goal": _goal_payload(agent.goal),
+        "goal": goal_payload(agent.goal),
     }
     if action is not None:
         payload["action"] = action
     return payload
+
+
+def should_continue_goal_autopilot(agent: "Agent", stop_reason: str | None) -> bool:
+    """Return True when an automatic continuation may safely start."""
+    goal = agent.goal
+    if goal is None or goal.status != "active":
+        return False
+    return stop_reason == "end_turn"
+
+
+def goal_autopilot_progress_signature(goal: GoalState | None) -> tuple | None:
+    """Return goal fields that count as autopilot progress."""
+    if goal is None:
+        return None
+    return (
+        goal.objective,
+        goal.status,
+        tuple(goal.progress),
+        tuple(goal.evidence),
+        goal.blocked_reason,
+        goal.completed_by,
+    )
+
+
+def goal_autopilot_prompt(goal: GoalState, continuation: int, max_continuations: int) -> str:
+    """Build the internal prompt used to continue an active goal."""
+    progress = "\n".join(f"- {item}" for item in goal.progress[-5:])
+    evidence = "\n".join(f"- {item}" for item in goal.evidence[-5:])
+    context_parts = []
+    if progress:
+        context_parts.append(f"Recent recorded progress:\n{progress}")
+    if evidence:
+        context_parts.append(f"Recent evidence:\n{evidence}")
+    context = "\n\n".join(context_parts)
+    context_block = f"\n\n{context}" if context else ""
+    return (
+        f"Goal autopilot continuation {continuation}/{max_continuations}.\n"
+        "The previous turn ended while the durable goal is still active. Continue "
+        "working from the current conversation and workspace state without waiting "
+        "for another user instruction. Verify concrete state before claiming the "
+        "goal is done. If the goal is satisfied, call `goal_write` with action "
+        "`complete` and non-empty `evidence`. If an external dependency blocks "
+        "progress, such as missing credentials, authorization, rate limits, a "
+        "third-party service outage, or required user input, call `goal_write` "
+        "with action `block` and a clear `blocked_reason`. If you make verified "
+        "partial progress but the goal is still not done, call `goal_write` with "
+        "action `progress` before ending. Avoid retrying the same failing external "
+        "operation repeatedly without new evidence or a different approach."
+        f"{context_block}"
+    )
 
 
 class _GoalReadTool(Tool):
@@ -153,9 +253,12 @@ class _GoalWriteTool(Tool):
     def description(self) -> str:
         return (
             "Update the durable session goal. Call action='complete' yourself when the "
-            "active goal has been satisfied with concrete evidence; do not ask the user "
-            "to run a slash command for completion. Use set/pause/resume/clear only when "
-            "the user explicitly requests that lifecycle change."
+            "active goal has been satisfied, and include evidence entries that name the "
+            "files, tests, logs, command output, or artifacts proving completion; do not "
+            "ask the user to run a slash command for completion. Use set/pause/resume/clear "
+            "only when the user explicitly requests that lifecycle change. Use action='progress' "
+            "to record verified progress, and action='block' with blocked_reason when external "
+            "input is required."
         )
 
     @property
@@ -165,23 +268,57 @@ class _GoalWriteTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["set", "pause", "resume", "complete", "clear"],
+                    "enum": ["set", "pause", "resume", "complete", "clear", "progress", "block"],
                     "description": "Goal lifecycle operation.",
                 },
                 "objective": {
                     "type": "string",
                     "description": "Goal objective. Required for action='set'.",
                 },
+                "evidence": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Evidence for completion or progress, such as tests run, files changed, logs, or artifacts.",
+                },
+                "progress": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Verified progress updates to append to the goal snapshot.",
+                },
+                "blocked_reason": {
+                    "type": "string",
+                    "description": "Reason the goal is blocked. Required for action='block'.",
+                },
+                "completed_by": {
+                    "type": "string",
+                    "description": "Who or what completed the goal, for example 'model' or 'cli'.",
+                },
             },
             "required": ["action"],
         }
 
-    async def execute(self, action: str, objective: str | None = None) -> ToolResult:
+    async def execute(
+        self,
+        action: str,
+        objective: str | None = None,
+        evidence: object = None,
+        progress: object = None,
+        blocked_reason: str | None = None,
+        completed_by: str | None = None,
+    ) -> ToolResult:
         action = (action or "").strip().lower()
+        evidence_items = _coerce_goal_items(evidence)
+        progress_items = _coerce_goal_items(progress)
         if action == "set":
             if not objective or not objective.strip():
                 return ToolResult(success=False, error="'objective' is required for set.")
-            goal = self._agent.set_goal(objective)
+            goal = self._agent.set_goal(
+                objective,
+                evidence=evidence_items,
+                progress=progress_items,
+                blocked_reason=blocked_reason,
+                completed_by=completed_by,
+            )
             return ToolResult(
                 success=True,
                 content=f"Set goal: {goal.objective}",
@@ -207,12 +344,44 @@ class _GoalWriteTool(Tool):
             )
 
         if action == "complete":
-            if self._agent.complete_goal() is None:
+            if not evidence_items:
+                return ToolResult(
+                    success=False,
+                    error="'evidence' is required for complete. Include files, tests, logs, command output, or artifacts.",
+                )
+            if self._agent.complete_goal(
+                evidence=evidence_items,
+                progress=progress_items,
+                completed_by=completed_by or "model",
+            ) is None:
                 return ToolResult(success=False, error="No goal to complete.")
             return ToolResult(
                 success=True,
                 content="Marked the current goal complete.",
                 raw_output=_goal_snapshot(self._agent, action="complete"),
+            )
+
+        if action == "progress":
+            if not progress_items:
+                return ToolResult(success=False, error="'progress' is required for progress.")
+            if self._agent.update_goal_progress(progress_items, evidence=evidence_items) is None:
+                return ToolResult(success=False, error="No goal to update.")
+            return ToolResult(
+                success=True,
+                content="Updated goal progress.",
+                raw_output=_goal_snapshot(self._agent, action="progress"),
+            )
+
+        if action == "block":
+            reason = (blocked_reason or "").strip()
+            if not reason:
+                return ToolResult(success=False, error="'blocked_reason' is required for block.")
+            if self._agent.block_goal(reason, evidence=evidence_items, progress=progress_items) is None:
+                return ToolResult(success=False, error="No goal to block.")
+            return ToolResult(
+                success=True,
+                content=f"Marked goal blocked: {reason}",
+                raw_output=_goal_snapshot(self._agent, action="block"),
             )
 
         if action == "clear":
@@ -296,6 +465,7 @@ class Agent:
         self.logger = AgentLogger()
         self.api_total_tokens: int = 0
         self._streaming_active: bool = False  # Track if streaming output needs trailing newline
+        self.last_stop_reason: str | None = None
         self.goal: GoalState | None = None
         self.tools["goal_read"] = _GoalReadTool(self)
         self.tools["goal_write"] = _GoalWriteTool(self)
@@ -306,7 +476,15 @@ class Agent:
             content = self._apply_goal_context(content)
         self.messages.append(Message(role="user", content=content))
 
-    def set_goal(self, objective: str) -> GoalState:
+    def set_goal(
+        self,
+        objective: str,
+        *,
+        evidence: object = None,
+        progress: object = None,
+        blocked_reason: str | None = None,
+        completed_by: str | None = None,
+    ) -> GoalState:
         """Set or replace the current session goal."""
         objective = objective.strip()
         if not objective:
@@ -317,6 +495,10 @@ class Agent:
             status="active",
             created_at=now,
             updated_at=now,
+            evidence=_coerce_goal_items(evidence),
+            progress=_coerce_goal_items(progress),
+            blocked_reason=(blocked_reason or "").strip() or None,
+            completed_by=(completed_by or "").strip() or None,
         )
         return self.goal
 
@@ -333,14 +515,61 @@ class Agent:
         if self.goal is None:
             return None
         self.goal.status = "active"
+        self.goal.blocked_reason = None
         self.goal.updated_at = datetime.now().isoformat()
         return self.goal
 
-    def complete_goal(self) -> GoalState | None:
+    def complete_goal(
+        self,
+        *,
+        evidence: object = None,
+        progress: object = None,
+        completed_by: str | None = None,
+    ) -> GoalState | None:
         """Mark the current goal complete, if one exists."""
         if self.goal is None:
             return None
         self.goal.status = "complete"
+        _extend_goal_items(self.goal.evidence, _coerce_goal_items(evidence))
+        _extend_goal_items(self.goal.progress, _coerce_goal_items(progress))
+        self.goal.blocked_reason = None
+        completed_by = (completed_by or "").strip()
+        if completed_by:
+            self.goal.completed_by = completed_by
+        self.goal.updated_at = datetime.now().isoformat()
+        return self.goal
+
+    def update_goal_progress(
+        self,
+        progress: object,
+        *,
+        evidence: object = None,
+    ) -> GoalState | None:
+        """Append progress/evidence to the current goal, if one exists."""
+        if self.goal is None:
+            return None
+        _extend_goal_items(self.goal.progress, _coerce_goal_items(progress))
+        _extend_goal_items(self.goal.evidence, _coerce_goal_items(evidence))
+        self.goal.updated_at = datetime.now().isoformat()
+        return self.goal
+
+    def block_goal(
+        self,
+        blocked_reason: str,
+        *,
+        evidence: object = None,
+        progress: object = None,
+    ) -> GoalState | None:
+        """Mark the current goal blocked with an explicit reason."""
+        if self.goal is None:
+            return None
+        reason = blocked_reason.strip()
+        if not reason:
+            raise ValueError("Goal blocked_reason cannot be empty.")
+        self.goal.status = "blocked"
+        self.goal.blocked_reason = reason
+        _extend_goal_items(self.goal.evidence, _coerce_goal_items(evidence))
+        _extend_goal_items(self.goal.progress, _coerce_goal_items(progress))
         self.goal.updated_at = datetime.now().isoformat()
         return self.goal
 
@@ -349,6 +578,12 @@ class Agent:
         old_goal = self.goal
         self.goal = None
         return old_goal
+
+    def restore_goal(self, payload: object) -> GoalState | None:
+        """Restore goal state from a persisted or host-provided payload."""
+        goal = goal_state_from_payload(payload)
+        self.goal = goal
+        return goal
 
     def _apply_goal_context(self, user_content: str) -> str:
         goal = self.goal
@@ -360,10 +595,11 @@ class Agent:
             "Work toward this durable goal across turns. Treat completion as evidence-based: "
             "verify the objective against concrete files, tests, logs, command output, or artifacts "
             "before saying it is done. Keep changes scoped to the goal and the user's latest message. "
-            "If the goal is satisfied, call `goal_write` with action `complete` before your final "
-            "answer, then state the evidence that proves completion. Do not ask the user to run "
-            "a slash command for this. If blocked, explain the blocker and the smallest input "
-            "that would unlock progress.\n\n"
+            "If the goal is satisfied, call `goal_write` with action `complete` and non-empty "
+            "`evidence` before your final answer, then state the evidence that proves completion. "
+            "Use `goal_write` action `progress` for verified partial progress and action `block` "
+            "with `blocked_reason` when external input is required. Do not ask the user to run "
+            "a slash command for this.\n\n"
             "## Latest User Message\n"
             f"{user_content}"
         )
@@ -443,6 +679,7 @@ class Agent:
         Internally it now consumes ``run_events()``.
         """
         final_content = ""
+        self.last_stop_reason = None
         async for event in self.run_events(
             cancel_event,
             force_plan_start=force_plan_start,
@@ -457,6 +694,7 @@ class Agent:
                     pass
             if isinstance(event, DoneEvent):
                 final_content = event.final_content
+                self.last_stop_reason = event.stop_reason.value
         return final_content
 
     # ── Terminal renderer ───────────────────────────────────

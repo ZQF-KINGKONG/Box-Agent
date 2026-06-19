@@ -66,8 +66,18 @@ box-agent/
 | `/stats`               | 显示会话统计信息（步数、工具调用、使用的 Token） |
 | `/sandbox_status`      | 显示沙箱会话状态                                 |
 | `/log`                 | 显示日志目录或读取指定日志文件                   |
-| `/goal`                | 查看或管理持久会话目标                           |
+| `/goal`                | 查看或管理当前工作区的持久目标                   |
 | `/memory review`       | 审阅可升级为核心记忆的候选条目                   |
+
+CLI 管理命令也可以脚本化使用：
+
+```bash
+box-agent --goal "完成发布检查" --task "运行验证"
+box-agent --goal "完成发布检查" --task "运行验证" --no-goal-autopilot
+box-agent goal status --json
+box-agent goal progress "已更新 ACP 文档"
+box-agent goal complete --evidence "uv run pytest tests/ -q passed"
+```
 
 ### 2.2 已集成的 MCP 工具
 
@@ -203,6 +213,8 @@ agent = Agent(
     max_steps=100
 )
 ```
+
+CLI `--task` 模式和 ACP 会话会对持久 goal 启用有边界的自动续跑。如果一轮自然结束但 goal 仍是 `active`，Box-Agent 会注入内部 continuation，直到模型调用 `goal_write complete`、调用 `goal_write block`、用户取消，达到 `goal_autopilot_max_turns` / `goal_autopilot_max_seconds` 配置预算，或连续 `goal_autopilot_no_progress_turns` 个自动续跑轮次没有记录到 goal 进展。
 
 ### 3.2 添加 MCP 工具
 

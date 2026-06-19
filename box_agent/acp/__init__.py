@@ -60,7 +60,13 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
-from box_agent.agent import Agent
+from box_agent.agent import (
+    Agent,
+    goal_autopilot_prompt,
+    goal_autopilot_progress_signature,
+    goal_payload,
+    should_continue_goal_autopilot,
+)
 from box_agent.tools.setup import (
     add_workspace_tools,
     await_mcp_tools,
@@ -209,15 +215,7 @@ def _normalize_artifact_mode(meta: Any) -> str:
 
 
 def _goal_payload(agent: Agent) -> dict[str, Any] | None:
-    goal = agent.goal
-    if goal is None:
-        return None
-    return {
-        "objective": goal.objective,
-        "status": goal.status,
-        "createdAt": goal.created_at,
-        "updatedAt": goal.updated_at,
-    }
+    return goal_payload(agent.goal)
 
 
 def _goal_request_from_meta(meta: Any) -> dict[str, Any] | None:
@@ -916,6 +914,14 @@ class BoxACPAgent:
         prompt_start = perf_counter()
         state.turn_active = True
         meter_token = start_token_meter()
+        auto_continuations = 0
+        auto_budget_exhausted = False
+        auto_no_progress_turns = 0
+        auto_no_progress_exhausted = False
+        auto_enabled = (
+            self._config.agent.goal_autopilot_enabled
+            and self._config.agent.goal_autopilot_max_turns > 0
+        )
         try:
             stop_reason = await self._run_turn(
                 state,
@@ -923,6 +929,47 @@ class BoxACPAgent:
                 force_plan_start=force_plan_start,
                 completion_gate=completion_gate,
             )
+            while auto_enabled and should_continue_goal_autopilot(state.agent, stop_reason):
+                elapsed = perf_counter() - prompt_start
+                if (
+                    auto_continuations >= self._config.agent.goal_autopilot_max_turns
+                    or elapsed >= self._config.agent.goal_autopilot_max_seconds
+                ):
+                    auto_budget_exhausted = True
+                    break
+                if state.cancelled or state.agent.goal is None:
+                    break
+                auto_continuations += 1
+                continuation = goal_autopilot_prompt(
+                    state.agent.goal,
+                    auto_continuations,
+                    self._config.agent.goal_autopilot_max_turns,
+                )
+                log.info(
+                    "goal_autopilot/continue",
+                    session_id=session_id,
+                    continuation=auto_continuations,
+                    max_continuations=self._config.agent.goal_autopilot_max_turns,
+                )
+                state.agent.add_user_message(continuation)
+                before_signature = goal_autopilot_progress_signature(state.agent.goal)
+                stop_reason = await self._run_turn(
+                    state,
+                    session_id,
+                    completion_gate=completion_gate,
+                )
+                after_signature = goal_autopilot_progress_signature(state.agent.goal)
+                if should_continue_goal_autopilot(state.agent, stop_reason):
+                    if after_signature == before_signature:
+                        auto_no_progress_turns += 1
+                    else:
+                        auto_no_progress_turns = 0
+                    if (
+                        self._config.agent.goal_autopilot_no_progress_turns > 0
+                        and auto_no_progress_turns >= self._config.agent.goal_autopilot_no_progress_turns
+                    ):
+                        auto_no_progress_exhausted = True
+                        break
         finally:
             state.turn_active = False
             turn_meter = get_token_meter()
@@ -936,6 +983,10 @@ class BoxACPAgent:
             stop_reason=stop_reason,
             duration_ms=duration_ms,
             total_tokens=turn_total_tokens,
+            goal_autopilot_continuations=auto_continuations,
+            goal_autopilot_budget_exhausted=auto_budget_exhausted,
+            goal_autopilot_no_progress_exhausted=auto_no_progress_exhausted,
+            goal_autopilot_no_progress_turns=auto_no_progress_turns,
         )
         # Map box-agent stop reasons to ACP-valid StopReason values.
         # ACP only accepts: "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"
@@ -947,13 +998,29 @@ class BoxACPAgent:
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
+        if (
+            (auto_budget_exhausted or auto_no_progress_exhausted)
+            and state.agent.goal is not None
+            and state.agent.goal.status == "active"
+        ):
+            acp_stop_reason = "max_turn_requests"
+        response_meta: dict[str, Any] = {"usage": {"totalTokens": turn_total_tokens}}
+        if state.agent.goal is not None or auto_continuations > 0:
+            response_meta["goalAutopilot"] = {
+                "enabled": auto_enabled,
+                "continuations": auto_continuations,
+                "budgetExhausted": auto_budget_exhausted,
+                "noProgressExhausted": auto_no_progress_exhausted,
+                "noProgressTurns": auto_no_progress_turns,
+                "lastStopReason": stop_reason,
+            }
         # Per-turn token total (multi-step loop + summarization + in-turn
         # memory extraction) for host-side telemetry. Best-effort: fire-and-
         # forget memory extractions that finish after this point are not
         # reflected. See box_agent.llm.token_meter.
         return PromptResponse(
             stopReason=acp_stop_reason,
-            field_meta={"usage": {"totalTokens": turn_total_tokens}},
+            field_meta=response_meta,
         )
 
     async def cancel(self, params: CancelNotification) -> None:
@@ -968,6 +1035,10 @@ class BoxACPAgent:
             action = "get"
         if action == "create":
             action = "set"
+        evidence = params.get("evidence")
+        progress = params.get("progress")
+        blocked_reason = params.get("blocked_reason") or params.get("blockedReason")
+        completed_by = params.get("completed_by") or params.get("completedBy")
 
         if action == "get":
             return {"ok": True, "goal": _goal_payload(agent)}
@@ -977,7 +1048,13 @@ class BoxACPAgent:
             if not isinstance(objective, str) or not objective.strip():
                 return {"error": "empty_objective"}
             try:
-                agent.set_goal(objective)
+                agent.set_goal(
+                    objective,
+                    evidence=evidence,
+                    progress=progress,
+                    blocked_reason=blocked_reason,
+                    completed_by=completed_by,
+                )
             except ValueError:
                 return {"error": "empty_objective"}
 
@@ -986,7 +1063,12 @@ class BoxACPAgent:
             if status == "paused":
                 agent.pause_goal()
             elif status == "complete":
-                agent.complete_goal()
+                agent.complete_goal(evidence=evidence, progress=progress, completed_by=completed_by)
+            elif status == "blocked":
+                reason = blocked_reason if isinstance(blocked_reason, str) else ""
+                if not reason.strip():
+                    return {"error": "empty_blocked_reason"}
+                agent.block_goal(reason, evidence=evidence, progress=progress)
             elif status not in ("", "active"):
                 return {"error": f"invalid_status: {status}"}
             return {"ok": True, "goal": _goal_payload(agent)}
@@ -1002,7 +1084,24 @@ class BoxACPAgent:
             return {"ok": True, "goal": _goal_payload(agent)}
 
         if action == "complete":
-            if agent.complete_goal() is None:
+            if agent.complete_goal(evidence=evidence, progress=progress, completed_by=completed_by) is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "progress":
+            if agent.update_goal_progress(progress, evidence=evidence) is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "block":
+            reason = blocked_reason if isinstance(blocked_reason, str) else ""
+            if not reason.strip():
+                return {"error": "empty_blocked_reason"}
+            try:
+                goal = agent.block_goal(reason, evidence=evidence, progress=progress)
+            except ValueError:
+                return {"error": "empty_blocked_reason"}
+            if goal is None:
                 return {"error": "goal_not_found"}
             return {"ok": True, "goal": _goal_payload(agent)}
 

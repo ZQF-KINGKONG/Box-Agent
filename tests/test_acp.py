@@ -354,12 +354,106 @@ class GoalCompleteLLM:
                     ToolCall(
                         id="goal1",
                         type="function",
-                        function=FunctionCall(name="goal_write", arguments={"action": "complete"}),
+                        function=FunctionCall(
+                            name="goal_write",
+                            arguments={
+                                "action": "complete",
+                                "evidence": ["ACP goal completion test passed"],
+                                "completed_by": "model",
+                            },
+                        ),
                     )
                 ],
             )
         else:
             yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalAutopilotCompleteLLM:
+    def __init__(self):
+        self.calls = 0
+        self.messages: list[list[tuple[str, str]]] = []
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        self.messages.append([(msg.role, msg.content) for msg in messages])
+        if self.calls == 1:
+            yield StreamEvent(type="text", delta="not done yet")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="goal-auto-complete",
+                        type="function",
+                        function=FunctionCall(
+                            name="goal_write",
+                            arguments={
+                                "action": "complete",
+                                "evidence": ["autopilot continuation verified completion"],
+                                "completed_by": "model",
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="goal done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalAutopilotNeverCompleteLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        yield StreamEvent(type="text", delta=f"still active {self.calls}")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalAutopilotBlockLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(type="text", delta="need more work")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="goal-auto-block",
+                        type="function",
+                        function=FunctionCall(
+                            name="goal_write",
+                            arguments={
+                                "action": "block",
+                                "blocked_reason": "Waiting for third-party credentials",
+                                "progress": ["Detected provider authentication gap"],
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="blocked")
             yield StreamEvent(type="finish", finish_reason="stop")
 
     async def generate(self, messages, tools=None):
@@ -694,7 +788,11 @@ async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path):
 async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
-        agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        agent=AgentConfig(
+            max_steps=3,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_enabled=False,
+        ),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     llm = CaptureMessagesLLM()
@@ -766,6 +864,9 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
                 "goal": {
                     "objective": "Restore this officev3 goal",
                     "status": "paused",
+                    "progress": ["Host persisted progress"],
+                    "evidence": ["Host persisted evidence"],
+                    "blockedReason": "Host paused for review",
                 },
             },
         )
@@ -775,7 +876,12 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
     assert state.agent.goal is not None
     assert state.agent.goal.objective == "Restore this officev3 goal"
     assert state.agent.goal.status == "paused"
+    assert state.agent.goal.progress == ["Host persisted progress"]
+    assert state.agent.goal.evidence == ["Host persisted evidence"]
+    assert state.agent.goal.blocked_reason == "Host paused for review"
     assert session.field_meta["goal"]["status"] == "paused"
+    assert session.field_meta["goal"]["progress"] == ["Host persisted progress"]
+    assert session.field_meta["goal"]["blockedReason"] == "Host paused for review"
 
 
 @pytest.mark.asyncio
@@ -803,6 +909,8 @@ async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
     state = agent._sessions[session.sessionId]
     assert state.agent.goal is not None
     assert state.agent.goal.status == "complete"
+    assert state.agent.goal.evidence == ["ACP goal completion test passed"]
+    assert state.agent.goal.completed_by == "model"
     goal_outputs = [
         update.update.rawOutput
         for update in conn.updates
@@ -813,6 +921,155 @@ async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
     assert goal_outputs
     assert goal_outputs[-1]["action"] == "complete"
     assert goal_outputs[-1]["goal"]["status"] == "complete"
+    assert goal_outputs[-1]["goal"]["evidence"] == ["ACP goal completion test passed"]
+    assert goal_outputs[-1]["goal"]["completedBy"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_continues_active_goal_until_complete(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=3,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=2,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    llm = GoalAutopilotCompleteLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Keep working until model completes", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "end_turn"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 1
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
+    assert llm.calls == 3
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "complete"
+    assert state.agent.goal.evidence == ["autopilot continuation verified completion"]
+    continuation_user = [content for role, content in llm.messages[1] if role == "user"][-1]
+    assert "Goal autopilot continuation 1/2" in continuation_user
+    assert "## Active Goal" in continuation_user
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_stops_when_budget_exhausted(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=1,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = GoalAutopilotNeverCompleteLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Remain active after budget", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "max_turn_requests"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 1
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is True
+    assert response.field_meta["goalAutopilot"]["noProgressExhausted"] is False
+    assert llm.calls == 2
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_stops_after_repeated_no_progress(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=3,
+            goal_autopilot_no_progress_turns=2,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = GoalAutopilotNeverCompleteLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Remain active with no progress", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "max_turn_requests"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 2
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
+    assert response.field_meta["goalAutopilot"]["noProgressExhausted"] is True
+    assert response.field_meta["goalAutopilot"]["noProgressTurns"] == 2
+    assert llm.calls == 3
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_stops_when_goal_blocks(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=3,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=3,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = GoalAutopilotBlockLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Validate provider integration", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "end_turn"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 1
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
+    assert llm.calls == 3
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "blocked"
+    assert state.agent.goal.blocked_reason == "Waiting for third-party credentials"
+    assert state.agent.goal.progress == ["Detected provider authentication gap"]
 
 
 @pytest.mark.asyncio

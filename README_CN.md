@@ -180,12 +180,17 @@ api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic" # "anthropic" 或 "openai"
 max_steps: 200
+goal_autopilot_enabled: true
+goal_autopilot_max_turns: 3
+goal_autopilot_max_seconds: 14400
+goal_autopilot_no_progress_turns: 2
 ```
 
 ```bash
 box-agent config                    # 查看当前配置摘要
 box-agent config --get model        # 打印单个配置值
 box-agent config --set max_steps 300
+box-agent config --set goal_autopilot_max_turns 5
 box-agent config --json             # 机器可读配置摘要
 box-agent config --edit             # 用编辑器打开配置
 box-agent doctor                    # 检查环境与 API 连通性
@@ -206,6 +211,8 @@ box-agent --task "分析 data.csv" --json          # 追加执行摘要 JSON
 box-agent --task "本地文件任务" --no-verify-api  # 跳过启动时 API 探测
 box-agent --task "生成一份 PPT" --force-plan-start  # 工作前先发布计划
 box-agent --task "生成一份 PPT" --no-completion-gate
+box-agent --goal "补齐 CLI 能力" --task "跑完测试"
+box-agent --goal "补齐 CLI 能力" --task "跑完测试" --no-goal-autopilot
 box-agent --deep-think --task "审查这个仓库"      # 支持时启用 thinking 模式
 
 # 子命令
@@ -213,11 +220,17 @@ box-agent setup             # 配置向导
 box-agent config            # 查看/编辑配置
 box-agent doctor            # 健康检查
 box-agent log               # 打开日志目录
+box-agent goal status       # 查看当前工作区持久目标
+box-agent goal complete --evidence "测试已通过"
 box-agent install-browser   # 安装 Playwright MCP 所需 Chromium（约 200MB）
 box-agent install-node      # 安装技能脚本使用的托管 Node.js 运行时（macOS）
 ```
 
 会话内命令：`/help`、`/clear`、`/clear_all`、`/history`、`/stats`、`/sandbox_status`、`/log`、`/goal`、`/memory review`、`/exit`
+
+使用 `/goal <目标>` 或 `--goal "<目标>"` 可以给当前工作区设置持久目标。CLI 会把目标保存到 `~/.box-agent/goals/`，后续 turn 会自动带上；可用 `/goal pause`、`/goal resume`、`/goal block <原因>`、`/goal complete <证据>`、`/goal clear` 管理，也可以用 `box-agent goal ...` 做脚本化管理。
+
+在非交互 `--task` 模式和 ACP 会话里，active goal 会启用有边界的自动续跑：如果一轮自然结束但 goal 仍是 `active`，Box-Agent 会在同一个 session 内自动继续，直到模型把 goal 标记为 `complete`、标记为 `blocked`、用户取消，达到 `goal_autopilot_max_turns` / `goal_autopilot_max_seconds`，或连续 `goal_autopilot_no_progress_turns` 个自动续跑轮次没有记录到 goal 进展。单次 CLI 运行可用 `--no-goal-autopilot` 关闭，也可以在配置中设置 `goal_autopilot_enabled: false`。
 
 ## ACP 与编辑器集成
 

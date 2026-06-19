@@ -180,12 +180,17 @@ api_base: "https://api.anthropic.com"
 model: "claude-sonnet-4-20250514"
 provider: "anthropic" # "anthropic" or "openai"
 max_steps: 200
+goal_autopilot_enabled: true
+goal_autopilot_max_turns: 3
+goal_autopilot_max_seconds: 14400
+goal_autopilot_no_progress_turns: 2
 ```
 
 ```bash
 box-agent config                    # show current config summary
 box-agent config --get model        # print one config value
 box-agent config --set max_steps 300
+box-agent config --set goal_autopilot_max_turns 5
 box-agent config --json             # machine-readable config summary
 box-agent config --edit             # open in editor
 box-agent doctor                    # check environment & API connectivity
@@ -206,6 +211,8 @@ box-agent --task "analyze data.csv" --json          # append execution summary J
 box-agent --task "local file task" --no-verify-api  # skip startup API probe
 box-agent --task "create a PPT" --force-plan-start  # publish a plan before work
 box-agent --task "create a PPT" --no-completion-gate
+box-agent --goal "Ship CLI parity" --task "finish tests"
+box-agent --goal "Ship CLI parity" --task "finish tests" --no-goal-autopilot
 box-agent --deep-think --task "review this repo"    # enable thinking mode when supported
 
 # Subcommands
@@ -213,6 +220,8 @@ box-agent setup              # config wizard
 box-agent config             # show/edit config
 box-agent doctor             # health check
 box-agent log                # open log directory
+box-agent goal status        # show persistent workspace goal
+box-agent goal complete --evidence "tests passed"
 box-agent install-browser   # install Chromium for Playwright MCP (~200MB)
 box-agent install-node      # install managed Node.js runtime for skills (macOS)
 ```
@@ -231,7 +240,9 @@ Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (s
 
 In-session commands: `/help`, `/clear`, `/clear_all`, `/history`, `/stats`, `/sandbox_status`, `/log`, `/goal`, `/memory review`, `/exit`
 
-Use `/goal <objective>` to keep a durable objective attached to the session. Later turns include that goal until you run `/goal pause`, `/goal resume`, `/goal complete`, or `/goal clear`.
+Use `/goal <objective>` or `--goal "<objective>"` to keep a durable workspace objective attached to later turns. The CLI persists it under `~/.box-agent/goals/`; later turns include that goal until you run `/goal pause`, `/goal resume`, `/goal block <reason>`, `/goal complete <evidence>`, or `/goal clear`. Scripted runs can manage it with `box-agent goal ...`.
+
+In non-interactive `--task` mode and ACP sessions, active goals also use bounded autopilot: when a turn ends naturally but the goal is still `active`, Box-Agent automatically continues in the same session until the model marks the goal `complete`, marks it `blocked`, the user cancels, `goal_autopilot_max_turns` / `goal_autopilot_max_seconds` is reached, or `goal_autopilot_no_progress_turns` consecutive automatic continuations make no recorded goal progress. Use `--no-goal-autopilot` for one CLI run, or set `goal_autopilot_enabled: false` in config.
 
 ## ACP & Editor Integration
 

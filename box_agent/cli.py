@@ -12,6 +12,7 @@ Examples:
 
 import argparse
 import asyncio
+import hashlib
 import json
 import platform
 import shutil
@@ -20,6 +21,7 @@ import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 from prompt_toolkit import PromptSession
@@ -31,7 +33,15 @@ from prompt_toolkit.styles import Style
 import yaml
 
 from box_agent import LLMClient, __version__
-from box_agent.agent import Agent
+from box_agent.agent import (
+    Agent,
+    GoalState,
+    goal_autopilot_prompt,
+    goal_autopilot_progress_signature,
+    goal_payload,
+    goal_state_from_payload,
+    should_continue_goal_autopilot,
+)
 from box_agent.config import Config
 from box_agent.loop_guards import build_auto_completion_gate
 from box_agent.schema import LLMProvider
@@ -203,6 +213,10 @@ AGENT_KEYS = {
     "max_steps",
     "workspace_dir",
     "max_parallel_tools",
+    "goal_autopilot_enabled",
+    "goal_autopilot_max_turns",
+    "goal_autopilot_max_seconds",
+    "goal_autopilot_no_progress_turns",
     "system_prompt_path",
     "analysis_prompt_path",
     "code_prompt_path",
@@ -356,6 +370,10 @@ def _config_summary(config: Config, config_path: Path, show_secrets: bool = Fals
             "max_steps": config.agent.max_steps,
             "workspace_dir": config.agent.workspace_dir,
             "max_parallel_tools": config.agent.max_parallel_tools,
+            "goal_autopilot_enabled": config.agent.goal_autopilot_enabled,
+            "goal_autopilot_max_turns": config.agent.goal_autopilot_max_turns,
+            "goal_autopilot_max_seconds": config.agent.goal_autopilot_max_seconds,
+            "goal_autopilot_no_progress_turns": config.agent.goal_autopilot_no_progress_turns,
             "enable_memory": config.agent.enable_memory,
             "memory_dir": config.agent.memory_dir,
             "enable_memory_extraction": config.agent.enable_memory_extraction,
@@ -408,6 +426,7 @@ def _print_config_summary(summary: dict[str, Any]) -> None:
     print(f"  workspace_dir     : {agent['workspace_dir']}")
     print(f"  max_steps         : {agent['max_steps']}")
     print(f"  max_parallel_tools: {agent['max_parallel_tools']}")
+    print(f"  goal_autopilot    : {agent['goal_autopilot_enabled']} ({agent['goal_autopilot_max_turns']} turns, {agent['goal_autopilot_max_seconds']}s, no-progress {agent['goal_autopilot_no_progress_turns']})")
     print(f"  enable_memory     : {agent['enable_memory']}")
 
     tools = summary["tools"]
@@ -566,7 +585,7 @@ def print_help():
   {Colors.BRIGHT_GREEN}/log{Colors.RESET}       - Show log directory and recent files
   {Colors.BRIGHT_GREEN}/log <file>{Colors.RESET} - Read a specific log file
   {Colors.BRIGHT_GREEN}/goal <objective>{Colors.RESET} - Set a durable session goal
-  {Colors.BRIGHT_GREEN}/goal{Colors.RESET}      - Show current goal (also: pause, resume, clear, complete)
+  {Colors.BRIGHT_GREEN}/goal{Colors.RESET}      - Show current goal (also: set, pause, resume, progress, block, complete, clear)
   {Colors.BRIGHT_GREEN}/memory review{Colors.RESET} - 审阅可升级到核心记忆的候选条目
   {Colors.BRIGHT_GREEN}/exit{Colors.RESET}      - Exit program (also: exit, quit, q)
 
@@ -678,6 +697,7 @@ def print_goal_status(agent: Agent) -> None:
         "active": Colors.BRIGHT_GREEN,
         "paused": Colors.YELLOW,
         "complete": Colors.BRIGHT_BLUE,
+        "blocked": Colors.BRIGHT_YELLOW,
     }.get(agent.goal.status, Colors.BRIGHT_WHITE)
     print(f"\n{Colors.BOLD}{Colors.BRIGHT_CYAN}Current Goal:{Colors.RESET}")
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}")
@@ -685,7 +705,60 @@ def print_goal_status(agent: Agent) -> None:
     print(f"  Objective: {agent.goal.objective}")
     print(f"  Created  : {agent.goal.created_at}")
     print(f"  Updated  : {agent.goal.updated_at}")
+    if agent.goal.completed_by:
+        print(f"  Completed: {agent.goal.completed_by}")
+    if agent.goal.blocked_reason:
+        print(f"  Blocked  : {agent.goal.blocked_reason}")
+    if agent.goal.progress:
+        print("  Progress :")
+        for item in agent.goal.progress:
+            print(f"    - {item}")
+    if agent.goal.evidence:
+        print("  Evidence :")
+        for item in agent.goal.evidence:
+            print(f"    - {item}")
     print(f"{Colors.DIM}{'─' * 40}{Colors.RESET}\n")
+
+
+def _goal_store_path(workspace_dir: Path) -> Path:
+    key = hashlib.sha256(str(workspace_dir.expanduser().absolute()).encode("utf-8")).hexdigest()[:24]
+    return Path.home() / ".box-agent" / "goals" / f"{key}.json"
+
+
+def _load_goal_state(workspace_dir: Path) -> GoalState | None:
+    path = _goal_store_path(workspace_dir)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    goal_data = data.get("goal") if isinstance(data, dict) else data
+    return goal_state_from_payload(goal_data)
+
+
+def _save_goal_state(workspace_dir: Path, goal: GoalState | None) -> None:
+    path = _goal_store_path(workspace_dir)
+    if goal is None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "workspace": str(workspace_dir.expanduser().absolute()),
+        "goal": goal_payload(goal),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _restore_cli_goal(agent: Agent, workspace_dir: Path) -> GoalState | None:
+    goal = _load_goal_state(workspace_dir)
+    if goal is None:
+        return None
+    agent.goal = goal
+    return goal
 
 
 def handle_goal_command(agent: Agent, command_line: str) -> None:
@@ -697,7 +770,23 @@ def handle_goal_command(agent: Agent, command_line: str) -> None:
         print_goal_status(agent)
         return
 
-    subcommand = arg.lower()
+    action_parts = arg.split(maxsplit=1)
+    subcommand = action_parts[0].lower()
+    remainder = action_parts[1].strip() if len(action_parts) > 1 else ""
+
+    if subcommand == "set":
+        if not remainder:
+            print(f"{Colors.RED}❌ Goal objective is required.{Colors.RESET}\n")
+            return
+        try:
+            goal = agent.set_goal(remainder)
+        except ValueError as exc:
+            print(f"{Colors.RED}❌ {exc}{Colors.RESET}\n")
+            return
+        print(f"{Colors.GREEN}✅ Goal set:{Colors.RESET} {goal.objective}")
+        print(f"{Colors.DIM}   Future turns will include this objective until paused, completed, blocked, or cleared.{Colors.RESET}\n")
+        return
+
     if subcommand == "pause":
         if agent.pause_goal() is None:
             print(f"{Colors.YELLOW}⚠️  No goal to pause.{Colors.RESET}\n")
@@ -712,6 +801,31 @@ def handle_goal_command(agent: Agent, command_line: str) -> None:
             print(f"{Colors.GREEN}✅ Goal resumed.{Colors.RESET}\n")
         return
 
+    if subcommand == "progress":
+        if not remainder:
+            print(f"{Colors.RED}❌ Progress text is required.{Colors.RESET}\n")
+            return
+        if agent.update_goal_progress([remainder]) is None:
+            print(f"{Colors.YELLOW}⚠️  No goal to update.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.GREEN}✅ Goal progress recorded.{Colors.RESET}\n")
+        return
+
+    if subcommand == "block":
+        if not remainder:
+            print(f"{Colors.RED}❌ Blocked reason is required.{Colors.RESET}\n")
+            return
+        try:
+            blocked = agent.block_goal(remainder)
+        except ValueError as exc:
+            print(f"{Colors.RED}❌ {exc}{Colors.RESET}\n")
+            return
+        if blocked is None:
+            print(f"{Colors.YELLOW}⚠️  No goal to block.{Colors.RESET}\n")
+        else:
+            print(f"{Colors.YELLOW}⚠️  Goal blocked:{Colors.RESET} {remainder}\n")
+        return
+
     if subcommand == "clear":
         if agent.clear_goal() is None:
             print(f"{Colors.YELLOW}⚠️  No goal to clear.{Colors.RESET}\n")
@@ -720,7 +834,8 @@ def handle_goal_command(agent: Agent, command_line: str) -> None:
         return
 
     if subcommand == "complete":
-        if agent.complete_goal() is None:
+        evidence = [remainder] if remainder else ["Completed via CLI /goal complete."]
+        if agent.complete_goal(evidence=evidence, completed_by="cli") is None:
             print(f"{Colors.YELLOW}⚠️  No goal to complete.{Colors.RESET}\n")
         else:
             print(f"{Colors.GREEN}✅ Goal marked complete. Use /goal clear to remove it.{Colors.RESET}\n")
@@ -733,6 +848,124 @@ def handle_goal_command(agent: Agent, command_line: str) -> None:
         return
     print(f"{Colors.GREEN}✅ Goal set:{Colors.RESET} {goal.objective}")
     print(f"{Colors.DIM}   Future turns will include this objective until paused, completed, or cleared.{Colors.RESET}\n")
+
+
+def cmd_goal(
+    workspace_dir: Path,
+    action: str = "status",
+    text: list[str] | None = None,
+    evidence: list[str] | None = None,
+    progress: list[str] | None = None,
+    json_output: bool = False,
+) -> int:
+    """Scriptable CLI goal management without starting the agent runtime."""
+    action = (action or "status").strip().lower()
+    text_value = " ".join(text or []).strip()
+    evidence_items = [item.strip() for item in (evidence or []) if item.strip()]
+    progress_items = [item.strip() for item in (progress or []) if item.strip()]
+    goal = _load_goal_state(workspace_dir)
+    now = datetime.now().isoformat()
+
+    def emit(ok: bool = True, error: str | None = None) -> int:
+        if json_output:
+            payload = {"ok": ok, "goal": goal_payload(goal)}
+            if error:
+                payload["error"] = error
+            _json_print(payload)
+        else:
+            if error:
+                print(f"{Colors.RED}❌ {error}{Colors.RESET}")
+            elif goal is None:
+                print(f"{Colors.DIM}No goal for workspace: {workspace_dir}{Colors.RESET}")
+            else:
+                temp_agent = Agent.__new__(Agent)
+                temp_agent.goal = goal
+                print_goal_status(temp_agent)
+        return 0 if ok else 1
+
+    if action in ("status", "get"):
+        return emit()
+
+    if action == "set":
+        if not text_value:
+            return emit(False, "Goal objective is required.")
+        goal = GoalState(
+            objective=text_value,
+            status="active",
+            created_at=now,
+            updated_at=now,
+            evidence=evidence_items,
+            progress=progress_items,
+        )
+        _save_goal_state(workspace_dir, goal)
+        return emit()
+
+    if action == "clear":
+        goal = None
+        _save_goal_state(workspace_dir, None)
+        return emit()
+
+    if goal is None:
+        return emit(False, "No goal is set for this workspace.")
+
+    if action == "pause":
+        goal.status = "paused"
+        goal.updated_at = now
+    elif action == "resume":
+        goal.status = "active"
+        goal.blocked_reason = None
+        goal.updated_at = now
+    elif action == "complete":
+        goal.status = "complete"
+        goal.blocked_reason = None
+        if text_value:
+            evidence_items.append(text_value)
+        if not evidence_items:
+            evidence_items.append("Completed via `box-agent goal complete`.")
+        for item in evidence_items:
+            if item not in goal.evidence:
+                goal.evidence.append(item)
+        for item in progress_items:
+            if item not in goal.progress:
+                goal.progress.append(item)
+        goal.completed_by = "cli"
+        goal.updated_at = now
+    elif action == "progress":
+        if text_value:
+            progress_items.append(text_value)
+        if not progress_items:
+            return emit(False, "Progress text is required.")
+        for item in progress_items:
+            if item not in goal.progress:
+                goal.progress.append(item)
+        for item in evidence_items:
+            if item not in goal.evidence:
+                goal.evidence.append(item)
+        goal.updated_at = now
+    elif action == "block":
+        reason = text_value
+        if not reason:
+            return emit(False, "Blocked reason is required.")
+        goal.status = "blocked"
+        goal.blocked_reason = reason
+        for item in evidence_items:
+            if item not in goal.evidence:
+                goal.evidence.append(item)
+        for item in progress_items:
+            if item not in goal.progress:
+                goal.progress.append(item)
+        goal.updated_at = now
+    else:
+        return emit(False, f"Unknown goal action: {action}")
+
+    _save_goal_state(workspace_dir, goal)
+    return emit()
+
+
+def _workspace_from_args(args: argparse.Namespace) -> Path:
+    if getattr(args, "workspace", None):
+        return Path(args.workspace).expanduser().absolute()
+    return Path.cwd()
 
 
 def parse_args() -> argparse.Namespace:
@@ -749,6 +982,9 @@ Examples:
   box-agent                              # Use current directory as workspace
   box-agent --workspace /path/to/dir     # Use specific workspace directory
   box-agent --task "create a report" --json
+  box-agent --goal "Ship CLI parity" --task "finish the tests"
+  box-agent goal status
+  box-agent goal complete --evidence "uv run pytest tests/ -q passed"
   box-agent --task "create a PPT" --force-plan-start
   box-agent setup                        # Run first-time setup wizard
   box-agent config                       # Show current configuration
@@ -776,6 +1012,12 @@ Examples:
         help="Execute a task non-interactively and exit",
     )
     parser.add_argument(
+        "--goal",
+        type=str,
+        default=None,
+        help="Set or replace the persistent workspace goal before starting interactive/--task mode",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="Emit JSON where supported (doctor/config; --task appends a summary)",
@@ -801,6 +1043,11 @@ Examples:
         help="Disable automatic deliverable-artifact completion checks in --task mode",
     )
     parser.add_argument(
+        "--no-goal-autopilot",
+        action="store_true",
+        help="Disable automatic continuation for active durable goals in --task mode",
+    )
+    parser.add_argument(
         "--version",
         "-v",
         action="version",
@@ -822,6 +1069,45 @@ Examples:
         nargs="?",
         default=None,
         help="Log filename to read (optional, shows directory if omitted)",
+    )
+
+    # goal subcommand
+    goal_parser = subparsers.add_parser("goal", help="Show or manage the persistent workspace goal")
+    goal_parser.add_argument(
+        "action",
+        nargs="?",
+        default="status",
+        help="Goal action: status, set, pause, resume, complete, clear, progress, block",
+    )
+    goal_parser.add_argument(
+        "text",
+        nargs="*",
+        default=[],
+        help="Objective, evidence, progress text, or blocked reason depending on the action",
+    )
+    goal_parser.add_argument(
+        "--evidence",
+        action="append",
+        default=[],
+        help="Evidence entry to append (repeatable)",
+    )
+    goal_parser.add_argument(
+        "--progress",
+        action="append",
+        default=[],
+        help="Progress entry to append (repeatable)",
+    )
+    goal_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable goal status",
+    )
+    goal_parser.add_argument(
+        "--workspace",
+        "-w",
+        type=str,
+        default=None,
+        help="Workspace directory for this goal command",
     )
 
     # setup subcommand
@@ -1403,24 +1689,28 @@ async def _quiet_cleanup():
 async def run_agent(
     workspace_dir: Path,
     task: str | None = None,
+    initial_goal: str | None = None,
     sandbox_mode: bool = True,
     verify_api: bool = True,
     json_summary: bool = False,
     deep_think: bool = False,
     force_plan_start: bool = False,
     completion_gate_enabled: bool = True,
+    goal_autopilot_enabled: bool = True,
 ) -> int:
     """Run Agent in interactive or non-interactive mode.
 
     Args:
         workspace_dir: Workspace directory path
         task: If provided, execute this task and exit (non-interactive mode)
+        initial_goal: Optional goal objective to set before the first turn
         sandbox_mode: If True (default), enable Jupyter sandbox for Python code execution
         verify_api: If True, probe API connectivity before starting the session
         json_summary: If True in non-interactive mode, append a JSON execution summary
         deep_think: If True, enable thinking mode for the run
         force_plan_start: If True, require the next turn to publish a plan first
         completion_gate_enabled: If True, guard deliverable tasks from ending before artifact creation
+        goal_autopilot_enabled: If True, continue active goals in --task mode within configured budgets
     """
     session_start = datetime.now()
 
@@ -1741,6 +2031,11 @@ async def run_agent(
         memory_promotion_cooldown_days=config.agent.memory_promotion_cooldown_days,
     )
 
+    restored_goal = _restore_cli_goal(agent, workspace_dir)
+    if initial_goal and initial_goal.strip():
+        restored_goal = agent.set_goal(initial_goal)
+        _save_goal_state(workspace_dir, agent.goal)
+
     # Wire CLI permission negotiator (parity with ACP in-band negotiation)
     if grant_store is not None and not non_interactive:
         from box_agent.cli_permissions import CLIPermissionNegotiator
@@ -1789,6 +2084,8 @@ async def run_agent(
     if not task:
         print_banner()
         print_session_info(agent, workspace_dir, config.llm.model)
+        if restored_goal is not None:
+            print(f"{Colors.DIM}Loaded workspace goal: {restored_goal.status} — {restored_goal.objective}{Colors.RESET}\n")
 
     # 8.5 Non-interactive mode: execute task and exit
     if task:
@@ -1808,16 +2105,73 @@ async def run_agent(
             print(f"{Colors.DIM}Completion gate enabled for deliverable artifacts: {patterns}{Colors.RESET}")
         ok = True
         error: str | None = None
+        auto_continuations = 0
+        auto_budget_exhausted = False
+        auto_no_progress_turns = 0
+        auto_no_progress_exhausted = False
+        auto_enabled = (
+            goal_autopilot_enabled
+            and config.agent.goal_autopilot_enabled
+            and config.agent.goal_autopilot_max_turns > 0
+        )
+        auto_started = perf_counter()
         try:
             await agent.run(
                 force_plan_start=force_plan_start,
                 completion_gate=completion_gate,
             )
+            while auto_enabled and should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                elapsed = perf_counter() - auto_started
+                if (
+                    auto_continuations >= config.agent.goal_autopilot_max_turns
+                    or elapsed >= config.agent.goal_autopilot_max_seconds
+                ):
+                    auto_budget_exhausted = True
+                    break
+                if agent.goal is None:
+                    break
+                auto_continuations += 1
+                print(
+                    f"\n{Colors.DIM}Goal autopilot continuing "
+                    f"{auto_continuations}/{config.agent.goal_autopilot_max_turns}...{Colors.RESET}\n"
+                )
+                agent.add_user_message(
+                    goal_autopilot_prompt(
+                        agent.goal,
+                        auto_continuations,
+                        config.agent.goal_autopilot_max_turns,
+                    )
+                )
+                before_signature = goal_autopilot_progress_signature(agent.goal)
+                await agent.run(completion_gate=completion_gate)
+                after_signature = goal_autopilot_progress_signature(agent.goal)
+                if should_continue_goal_autopilot(agent, agent.last_stop_reason):
+                    if after_signature == before_signature:
+                        auto_no_progress_turns += 1
+                    else:
+                        auto_no_progress_turns = 0
+                    if (
+                        config.agent.goal_autopilot_no_progress_turns > 0
+                        and auto_no_progress_turns >= config.agent.goal_autopilot_no_progress_turns
+                    ):
+                        auto_no_progress_exhausted = True
+                        break
         except Exception as e:
             ok = False
             error = str(e)
             print(f"\n{Colors.RED}❌ Error: {e}{Colors.RESET}")
         finally:
+            if auto_budget_exhausted and agent.goal is not None and agent.goal.status == "active":
+                print(
+                    f"\n{Colors.YELLOW}⚠️  Goal autopilot stopped after "
+                    f"{auto_continuations} continuation(s); goal remains active.{Colors.RESET}"
+                )
+            if auto_no_progress_exhausted and agent.goal is not None and agent.goal.status == "active":
+                print(
+                    f"\n{Colors.YELLOW}⚠️  Goal autopilot stopped after "
+                    f"{auto_no_progress_turns} continuation(s) without recorded goal progress.{Colors.RESET}"
+                )
+            _save_goal_state(workspace_dir, agent.goal)
             print_stats(agent, session_start)
             if json_summary:
                 _json_print({
@@ -1825,6 +2179,15 @@ async def run_agent(
                     "error": error,
                     "workspace": str(workspace_dir),
                     "task": task,
+                    "goal": goal_payload(agent.goal),
+                    "goalAutopilot": {
+                        "enabled": auto_enabled,
+                        "continuations": auto_continuations,
+                        "budgetExhausted": auto_budget_exhausted,
+                        "noProgressExhausted": auto_no_progress_exhausted,
+                        "noProgressTurns": auto_no_progress_turns,
+                        "lastStopReason": agent.last_stop_reason,
+                    },
                     "stats": _session_stats(agent, session_start),
                 })
 
@@ -2005,6 +2368,7 @@ async def run_agent(
 
                 elif command == "/goal" or command.startswith("/goal "):
                     handle_goal_command(agent, user_input)
+                    _save_goal_state(workspace_dir, agent.goal)
                     continue
 
                 elif command == "/memory" or command.startswith("/memory "):
@@ -2136,6 +2500,7 @@ async def run_agent(
                 agent.cancel_event = None
                 esc_listener_stop.set()
                 esc_thread.join(timeout=0.2)
+                _save_goal_state(workspace_dir, agent.goal)
 
             # Visual separation
             print(f"\n{Colors.DIM}{'─' * 60}{Colors.RESET}\n")
@@ -2198,6 +2563,18 @@ def main() -> int:
         cmd_install_node(version=args.version)
         return 0
 
+    workspace_dir = _workspace_from_args(args)
+    if args.command == "goal":
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        return cmd_goal(
+            workspace_dir,
+            action=args.action,
+            text=args.text,
+            evidence=args.evidence,
+            progress=args.progress,
+            json_output=args.json,
+        )
+
     # Ensure user config exists; run setup wizard on first launch
     config_path = Config._ensure_user_config()
     try:
@@ -2213,14 +2590,6 @@ def main() -> int:
         if not run_setup_wizard(config_path):
             return 1
 
-    # Determine workspace directory
-    # Priority: CLI --workspace > current working directory
-    if args.workspace:
-        workspace_dir = Path(args.workspace).expanduser().absolute()
-    else:
-        # Use current working directory
-        workspace_dir = Path.cwd()
-
     # Ensure workspace directory exists
     workspace_dir.mkdir(parents=True, exist_ok=True)
     # Ensure the canonical artifact directory exists before any tool can write to it.
@@ -2233,12 +2602,14 @@ def main() -> int:
             run_agent(
                 workspace_dir,
                 task=args.task,
+                initial_goal=args.goal,
                 sandbox_mode=not args.no_sandbox,
                 verify_api=not args.no_verify_api,
                 json_summary=args.json,
                 deep_think=args.deep_think,
                 force_plan_start=args.force_plan_start,
                 completion_gate_enabled=not args.no_completion_gate,
+                goal_autopilot_enabled=not args.no_goal_autopilot,
             )
         )
     except KeyboardInterrupt:

@@ -163,6 +163,44 @@ Host behavior:
 - Do not classify `todo_write` as sub-agent work just because `rawInput.task` exists.
 - A `todo_read` result also includes `todo_snapshot`; it may omit `action` and `item`.
 
+## Goal snapshots
+
+Goal state can be initialized or updated by the host, and can also be updated by the model through the `goal_write` tool. Hosts should render goal state from `rawOutput.type === "goal_snapshot"` when it appears on a tool-call update.
+
+Example:
+
+```json
+{
+  "type": "goal_snapshot",
+  "action": "complete",
+  "goal": {
+    "objective": "Finish CLI parity and documentation",
+    "status": "complete",
+    "createdAt": "2026-06-19T10:00:00",
+    "updatedAt": "2026-06-19T10:15:00",
+    "evidence": ["uv run pytest tests/ -q passed"],
+    "progress": ["Added CLI goal persistence"],
+    "blockedReason": null,
+    "completedBy": "model"
+  }
+}
+```
+
+Host-to-agent control:
+
+- On `session/new` or `session/prompt`, pass `_meta.goal` as either a string objective or an object. Object shape supports `action`, `objective`, `status`, `evidence`, `progress`, `blockedReason`, and `completedBy`.
+- At runtime, call `extMethod("goal", { sessionId, action, ... })`. Supported actions are `get`, `set`, `pause`, `resume`, `complete`, `clear`, `progress`, and `block`.
+- `action: "complete"` may include `evidence` and `completedBy`; model-driven completion through `goal_write` requires non-empty `evidence`.
+- `action: "block"` requires `blockedReason`.
+
+Host behavior:
+
+- Treat `goal.status` as one of `active`, `paused`, `blocked`, or `complete`; unknown future values should render as neutral text.
+- Render `evidence` separately from `progress`. Evidence is what justifies completion; progress is a running work log.
+- Store the full `goal` object if the host wants goal state to survive ACP process restarts. Box-Agent restores host-provided goal metadata but does not own host persistence.
+- No new host event is required for goal autopilot. When a prompt ends naturally while the goal is still `active`, Box-Agent may continue internally in the same ACP prompt until the goal becomes `complete`, becomes `blocked`, the user cancels, the configured autopilot budget is exhausted, or repeated automatic continuations make no recorded goal progress.
+- `PromptResponse.field_meta.goalAutopilot` summarizes this behavior with `enabled`, `continuations`, `budgetExhausted`, `noProgressExhausted`, `noProgressTurns`, and `lastStopReason`. If `budgetExhausted` or `noProgressExhausted` is true and the goal remains active, the ACP stop reason is `max_turn_requests`.
+
 ## Minimal TypeScript handling
 
 ```ts
@@ -189,6 +227,11 @@ function handleToolUpdate(update: ToolCallUpdate) {
     return;
   }
 
+  if (raw && typeof raw === 'object' && raw.type === 'goal_snapshot') {
+    replaceGoalSnapshot(raw.goal);
+    return;
+  }
+
   renderGenericToolUpdate(update);
 }
 ```
@@ -198,4 +241,5 @@ function handleToolUpdate(update: ToolCallUpdate) {
 - Older runtimes may emit `sub_agent_progress` without `sub_agent_id`; hosts can fall back to `parent_tool_call_id + task_preview` with lower confidence.
 - Older runtimes may not emit `plan_snapshot`; hosts should keep rendering ordinary assistant text and generic tool details as fallback.
 - Older runtimes may return todo results as plain text only; hosts should keep the generic tool renderer as fallback.
+- Older runtimes may emit `goal_snapshot.goal` with only `objective`, `status`, `createdAt`, and `updatedAt`; treat missing `evidence`, `progress`, `blockedReason`, and `completedBy` as empty/unknown.
 - `rawOutput.type` is the stable discriminator. Avoid title/text heuristics such as `title.includes("sub_agent")` or `rawInput.task`.

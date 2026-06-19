@@ -89,6 +89,23 @@ def test_cmd_config_json_masks_secret_values(
     assert payload["llm"]["api_key"] == "sk-s****oken"
 
 
+def test_config_parses_goal_autopilot_settings(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    _write_config(config_path)
+    with config_path.open("a", encoding="utf-8") as f:
+        f.write("goal_autopilot_enabled: false\n")
+        f.write("goal_autopilot_max_turns: 5\n")
+        f.write("goal_autopilot_max_seconds: 120\n")
+        f.write("goal_autopilot_no_progress_turns: 4\n")
+
+    config = cli.Config.from_yaml(config_path)
+
+    assert config.agent.goal_autopilot_enabled is False
+    assert config.agent.goal_autopilot_max_turns == 5
+    assert config.agent.goal_autopilot_max_seconds == 120
+    assert config.agent.goal_autopilot_no_progress_turns == 4
+
+
 def test_cmd_doctor_json_returns_structured_status(monkeypatch, capsys) -> None:
     async def fake_api_status(_config):
         return cli._doctor_check("ok", "api ok")
@@ -142,17 +159,21 @@ def test_main_returns_run_agent_exit_code(
         assert kwargs["deep_think"] is True
         assert kwargs["force_plan_start"] is True
         assert kwargs["completion_gate_enabled"] is False
+        assert kwargs["goal_autopilot_enabled"] is False
+        assert kwargs["initial_goal"] == "ship goal"
         return 7
 
     monkeypatch.setattr(cli, "parse_args", lambda: argparse.Namespace(
         command=None,
         workspace=str(tmp_path),
         task="do work",
+        goal="ship goal",
         json=True,
         no_verify_api=True,
         deep_think=True,
         force_plan_start=True,
         no_completion_gate=True,
+        no_goal_autopilot=True,
         no_sandbox=False,
     ))
     monkeypatch.setattr(cli.Config, "_ensure_user_config", lambda: config_path)
@@ -164,3 +185,30 @@ def test_main_returns_run_agent_exit_code(
     monkeypatch.setattr(cli, "run_agent", fake_run_agent)
 
     assert cli.main() == 7
+
+
+def test_cmd_goal_persists_workspace_goal(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    assert cli.cmd_goal(workspace, action="set", text=["Ship", "goal"], json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["goal"]["objective"] == "Ship goal"
+    assert first["goal"]["status"] == "active"
+
+    assert cli.cmd_goal(
+        workspace,
+        action="complete",
+        evidence=["uv run pytest tests/ -q passed"],
+        json_output=True,
+    ) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert second["goal"]["status"] == "complete"
+    assert second["goal"]["evidence"] == ["uv run pytest tests/ -q passed"]
+    assert second["goal"]["completedBy"] == "cli"
+
+    stored = cli._load_goal_state(workspace)
+    assert stored is not None
+    assert stored.status == "complete"
+    assert stored.evidence == ["uv run pytest tests/ -q passed"]

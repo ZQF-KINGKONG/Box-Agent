@@ -79,6 +79,11 @@ box-agent doctor --json
 box-agent --task "summarize README.md" --json
 box-agent --task "create a PPT" --force-plan-start
 box-agent --task "create a PPT" --no-completion-gate
+box-agent --goal "Finish release checklist" --task "run verification"
+box-agent --goal "Finish release checklist" --task "run verification" --no-goal-autopilot
+box-agent goal status --json
+box-agent goal progress "updated ACP docs"
+box-agent goal complete --evidence "uv run pytest tests/ -q passed"
 box-agent --deep-think --task "review this repository"
 ```
 
@@ -216,6 +221,8 @@ agent = Agent(
     max_steps=100
 )
 ```
+
+Durable goals use bounded autopilot in CLI `--task` mode and ACP sessions. If a turn ends while the goal is still `active`, Box-Agent injects an internal continuation until the model calls `goal_write complete`, calls `goal_write block`, the user cancels, the `goal_autopilot_max_turns` / `goal_autopilot_max_seconds` config budget is reached, or `goal_autopilot_no_progress_turns` consecutive automatic continuations make no recorded goal progress.
 
 ### 3.2 Adding MCP Tools
 

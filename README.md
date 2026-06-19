@@ -97,12 +97,12 @@ model: "your-model"
 ### 2-Layer Context Compression
 
 - **Layer 1 — Micro-compact**: Every step, old tool results (3+ turns back) are replaced with short placeholders. Zero cost, no LLM call.
-- **Layer 2 — Auto-summary**: When tokens exceed the threshold (default 80k), an LLM call summarizes the conversation. Original data is preserved in logs.
+- **Layer 2 — Auto-summary**: When tokens exceed the derived threshold (about 104k tokens for user-configured endpoints by default), an LLM call summarizes the conversation. Original data is preserved in logs.
 
 ### More
 
 - **MCP Tools**: Connect to any [MCP server](https://github.com/modelcontextprotocol/servers) — web search, knowledge graphs, databases
-- **Claude Skills**: 11 built-in skills for documents (DOCX, PDF, PPTX, XLSX), canvas design, web app testing, and more
+- **Claude Skills**: 30 built-in skills for documents (DOCX, PDF, PPTX, XLSX), canvas design, Obsidian, web app testing, and more
 - **ACP Protocol**: Embed Box Agent in Electron apps, Zed Editor, or any ACP-compatible host via JSON-RPC over stdio
 - **Standalone Runtime**: PyInstaller binary bundles Python + all dependencies. No external Python needed — download and run
 - **Cross-session Memory**: Persistent memory lets the agent retain key information across conversations
@@ -167,7 +167,6 @@ box-agent
 git clone https://github.com/Raccoon-Office/Box-Agent.git
 cd Box-Agent
 uv sync
-git submodule update --init --recursive   # optional: load skills
 uv run python -m box_agent.cli
 ```
 
@@ -195,7 +194,7 @@ box-agent doctor           # check environment & API connectivity
 # Interactive mode
 box-agent
 box-agent --workspace /path/to/project
-box-agent --sandbox              # enable Jupyter sandbox
+box-agent --no-sandbox           # disable Jupyter sandbox
 
 # Non-interactive (CI/CD, scripts)
 box-agent --task "analyze data.csv and create a report"
@@ -206,6 +205,7 @@ box-agent config    # show/edit config
 box-agent doctor    # health check
 box-agent log       # open log directory
 box-agent install-browser   # install Chromium for Playwright MCP (~200MB)
+box-agent install-node      # install managed Node.js runtime for skills (macOS)
 ```
 
 ### Browser automation (optional)
@@ -220,7 +220,7 @@ Requires Node.js ≥ 18 on `PATH`. Chromium lands in `~/.box-agent/browsers/` (s
 
 **ACP embedders**: no env-var plumbing required — `box-agent-acp` defaults `PLAYWRIGHT_BROWSERS_PATH` to the same `~/.box-agent/browsers/` path. To point at a different cache, export `PLAYWRIGHT_BROWSERS_PATH=<your path>` before spawning `box-agent-acp` (our setdefault won't override it).
 
-In-session commands: `/help`, `/clear`, `/history`, `/stats`, `/log`, `/goal`, `/exit`
+In-session commands: `/help`, `/clear`, `/clear_all`, `/history`, `/stats`, `/sandbox_status`, `/log`, `/goal`, `/memory review`, `/exit`
 
 Use `/goal <objective>` to keep a durable objective attached to the session. Later turns include that goal until you run `/goal pause`, `/goal resume`, `/goal complete`, or `/goal clear`.
 
@@ -244,10 +244,10 @@ Box Agent supports the [Agent Communication Protocol](https://github.com/nichoch
 
 ```bash
 # Download pre-built binary
-gh release download v0.6.7 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
+gh release download v0.8.70 --repo Raccoon-Office/Box-Agent --pattern "box-agent-runtime-*.tar.gz"
 
 # Or build from source (current platform)
-uv run python scripts/build_runtime.py
+uv run box-agent-build-runtime
 
 # Build macOS Intel/x64 runtime from Apple Silicon
 # Requires a separate x86_64 venv because PyInstaller cannot bundle arm64 wheels into an x64 binary.
@@ -255,7 +255,7 @@ uv run python scripts/build_runtime.py
 #   arch -x86_64 /bin/bash -c 'curl -LsSf https://astral.sh/uv/install.sh | INSTALLER_NO_MODIFY_PATH=1 UV_INSTALL_DIR="$HOME/.local/bin-x64" sh'
 #   UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv sync
 # Build:
-arch -x86_64 .venv-x64/bin/python scripts/build_runtime.py --target darwin-x64
+UV_PROJECT_ENVIRONMENT=.venv-x64 BOX_AGENT_RUNTIME_TARGET=darwin-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime
 ```
 
 The runtime communicates via JSON-RPC over stdio. stdout = protocol only, stderr = diagnostics.
@@ -266,9 +266,9 @@ under `box-agent-runtime/runtimes/node/`; npm cache/prefix state remains in
 ## Testing
 
 ```bash
-pytest tests/ -v          # all tests
-pytest tests/test_core.py -v   # core + context compression
-pytest --cov              # with coverage
+uv run pytest tests/ -v          # all tests
+uv run pytest tests/test_core.py -v   # core + context compression
+uv run pytest --cov              # with coverage
 ```
 
 ## Troubleshooting

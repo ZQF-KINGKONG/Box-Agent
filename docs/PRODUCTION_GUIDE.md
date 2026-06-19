@@ -4,7 +4,7 @@
 
 ## Table of Contents
 
-- [1. Demo Features](#1-demo-features)
+- [1. Runtime Capabilities](#1-runtime-capabilities)
 - [2. Upgrade Directions](#2-upgrade-directions)
 - [3. Production Deployment](#3-production-deployment)
   - [3.1 Standalone Runtime (Electron / Desktop Apps)](#31-standalone-runtime-electron--desktop-apps)
@@ -15,18 +15,18 @@
 
 ---
 
-## 1. Demo Features
+## 1. Runtime Capabilities
 
-This project is a **teaching-level demo** that demonstrates the core concepts and execution flow of an Agent. To reach production level, many complex issues still need to be addressed.
+Box-Agent now ships as both a Python package and a standalone ACP runtime for desktop hosts. This guide focuses on deployment constraints and operational hardening.
 
-### What We've Implemented (Demo Level)
+### Implemented Capabilities
 
-| Feature                | Demo Implementation                                                                                                   |
+| Feature                | Current Implementation                                                                                                |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
 | **Context Management** | ✅ Cross-session memory via MemoryManager with auto session summaries; two-layer context compression |
 | **Tool Calling**       | ✅ Basic Read/Write/Edit/Bash                                                                                          |
-| **Error Handling**     | ✅ Basic exception catching                                                                                            |
-| **Logging**            | ✅ Simple print output                                                                                                 |
+| **Error Handling**     | ✅ Humanized provider errors, retry support, and ACP error propagation                                                 |
+| **Logging**            | ✅ Structured ACP diagnostics on stderr and optional log files                                                         |
 
 
 ## 2. Upgrade Directions
@@ -61,11 +61,11 @@ For embedding Box Agent in Electron or other desktop applications, use the stand
 
 ```bash
 # From GitHub Releases
-gh release download v0.4.2 --repo Raccoon-Office/Box-Agent \
+gh release download v0.8.70 --repo Raccoon-Office/Box-Agent \
   --pattern "box-agent-runtime-*.tar.gz"
 
 # Or direct URL
-# https://github.com/Raccoon-Office/Box-Agent/releases/download/v0.4.2/box-agent-runtime-v0.4.2-darwin-arm64.tar.gz
+# https://github.com/Raccoon-Office/Box-Agent/releases/download/v0.8.70/box-agent-runtime-v0.8.70-darwin-arm64.tar.gz
 ```
 
 #### Directory Structure
@@ -133,25 +133,25 @@ Supported platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`, `
 Build the current machine architecture:
 
 ```bash
-uv run box-agent-build-runtime --version 0.8.51
+uv run box-agent-build-runtime --version 0.8.70
 ```
 
 Build macOS Intel/x64 from an Apple Silicon Mac:
 
 ```bash
-arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --arch x64
+UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime --version 0.8.70 --arch x64
 ```
 
 The long form is also supported:
 
 ```bash
-arch -x86_64 uv run box-agent-build-runtime --version 0.8.51 --target darwin-x64
+UV_PROJECT_ENVIRONMENT=.venv-x64 arch -x86_64 ~/.local/bin-x64/uv run box-agent-build-runtime --version 0.8.70 --target darwin-x64
 ```
 
 Optional environment defaults:
 
 ```bash
-BOX_AGENT_RUNTIME_VERSION=0.8.51 uv run box-agent-build-runtime
+BOX_AGENT_RUNTIME_VERSION=0.8.70 uv run box-agent-build-runtime
 BOX_AGENT_RUNTIME_OUTPUT=dist/runtime uv run box-agent-build-runtime
 BOX_AGENT_RUNTIME_TARGET=darwin-x64 arch -x86_64 uv run box-agent-build-runtime
 ```
@@ -159,7 +159,7 @@ BOX_AGENT_RUNTIME_TARGET=darwin-x64 arch -x86_64 uv run box-agent-build-runtime
 The older direct script entry remains available for compatibility:
 
 ```bash
-uv run python scripts/build_runtime.py --version 0.8.51 --target darwin-arm64
+uv run python scripts/build_runtime.py --version 0.8.70 --target darwin-arm64
 ```
 
 macOS runtime artifacts additionally bundle a pinned Node.js runtime under

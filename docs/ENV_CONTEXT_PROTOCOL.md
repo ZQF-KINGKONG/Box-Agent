@@ -1,6 +1,6 @@
 # Env Context 协议对接文档
 
-> 适用版本：Box-Agent ≥ 0.8.26（待发版）
+> 适用版本：Box-Agent ≥ 0.8.26
 > 仅 ACP 通道生效；`session/new` 一次性注入，整会话有效。
 
 ## 1. 背景

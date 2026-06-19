@@ -4,21 +4,25 @@ This example demonstrates how to use the Tool base class and its schema methods.
 """
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
-import yaml
-
 from box_agent import LLMClient, LLMProvider
+from box_agent.config import Config
 from box_agent.schema import Message
 from box_agent.tools.base import Tool, ToolResult
 
 
-def load_config():
-    """Load config from config.yaml."""
-    config_path = Path("box_agent/config/config.yaml")
-    with open(config_path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+def load_config() -> Config:
+    """Load the same config file used by the CLI."""
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
+        raise FileNotFoundError("config.yaml not found. Run: box-agent setup")
+    return Config.from_yaml(config_path)
+
+
+def provider_from_config(config: Config) -> LLMProvider:
+    """Return the configured provider enum."""
+    return LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
 
 
 class WeatherTool(Tool):
@@ -164,9 +168,10 @@ async def demo_tool_schemas():
 
     # Create client
     client = LLMClient(
-        api_key=config["api_key"],
-        provider=LLMProvider.ANTHROPIC,
-        model="claude-sonnet-4-20250514",
+        api_key=config.llm.api_key,
+        provider=provider_from_config(config),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "claude-sonnet-4-20250514",
     )
 
     # Test with a query that should trigger weather tool
@@ -213,9 +218,10 @@ async def demo_multiple_tools():
     translate_tool = TranslateTool()
 
     client = LLMClient(
-        api_key=config["api_key"],
-        provider=LLMProvider.ANTHROPIC,
-        model="claude-sonnet-4-20250514",
+        api_key=config.llm.api_key,
+        provider=provider_from_config(config),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "claude-sonnet-4-20250514",
     )
 
     messages = [Message(role="user", content="Calculate 15 * 23 for me")]

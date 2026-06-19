@@ -1,6 +1,6 @@
 # Memory Match Protocol
 
-> 适用版本：Box-Agent ≥ 0.8.38（待发版）
+> 适用版本：Box-Agent ≥ 0.8.38
 
 本协议用于让 ACP 宿主展示“本轮任务中搜索/自动匹配到的 context memory”。
 

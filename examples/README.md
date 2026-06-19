@@ -48,7 +48,7 @@ python examples/02_simple_agent.py
 - Task completion criteria
 
 **Prerequisites**:
-- API key configured in `box_agent/config/config.yaml`
+- API key configured with `box-agent setup` (default: `~/.box-agent/config/config.yaml`)
 
 ---
 
@@ -84,11 +84,12 @@ python examples/04_full_agent.py
 ### 1. Configure API Key
 
 ```bash
-# Copy configuration template
-cp box_agent/config/config-example.yaml box_agent/config/config.yaml
+# Recommended: run the same setup wizard used by the CLI
+box-agent setup
 
-# Edit config file and fill in your API Key
-vim box_agent/config/config.yaml
+# Optional development override:
+# cp box_agent/config/config-example.yaml box_agent/config/config.yaml
+# vim box_agent/config/config.yaml
 ```
 
 ### 2. Run Your First Example
@@ -106,8 +107,9 @@ python examples/02_simple_agent.py
 Recommended to learn in numerical order:
 1. **01_basic_tools.py** - Understand tools
 2. **02_simple_agent.py** - Understand Agent
-3. **03_session_notes.py** - Understand memory management
-4. **04_full_agent.py** - Understand complete system
+3. **04_full_agent.py** - Understand complete system
+4. **05_provider_selection.py** - Understand provider selection
+5. **06_tool_schema_demo.py** - Understand tool schemas
 
 ---
 
@@ -150,7 +152,7 @@ These examples are all refined from test cases in the `tests/` directory:
 ```
 ❌ API key not configured in config.yaml
 ```
-**Solution**: Ensure you've configured a valid API Key in `box_agent/config/config.yaml`
+**Solution**: Run `box-agent setup`, or provide a development override at `box_agent/config/config.yaml`.
 
 ### config.yaml Not Found
 ```
@@ -158,7 +160,7 @@ These examples are all refined from test cases in the `tests/` directory:
 ```
 **Solution**:
 ```bash
-cp box_agent/config/config-example.yaml box_agent/config/config.yaml
+box-agent setup
 ```
 
 ### MCP Tools Loading Failed

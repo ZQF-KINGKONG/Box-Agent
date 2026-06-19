@@ -1,6 +1,6 @@
 # Memory Promotion Protocol
 
-> 适用版本：Box-Agent ≥ 0.8.32（待发版）
+> 适用版本：Box-Agent ≥ 0.8.32
 > 关联协议：[MEMORY_INTEGRATION.md](./MEMORY_INTEGRATION.md)、[MEMORY_MATCH_PROTOCOL.md](./MEMORY_MATCH_PROTOCOL.md)
 
 本协议用于让 ACP 宿主在「记忆页面」上展示**「可以加入核心记忆 (MEMORY.md) 的候选条目」**，由用户逐条决定是否升级为长期记忆。

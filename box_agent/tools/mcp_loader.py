@@ -324,6 +324,11 @@ class MCPServerConnection:
             await _close_exit_stack()
             return False
 
+        except asyncio.CancelledError as e:
+            _warn(f"✗ Connection to MCP server '{self.name}' was cancelled during initialization: {e}")
+            await _close_exit_stack()
+            return False
+
         except Exception as e:
             _warn(f"✗ Failed to connect to MCP server '{self.name}': {e}")
             await _close_exit_stack()

@@ -104,6 +104,7 @@ from box_agent.acp.action_hints import (
     build_action_hints_prompt,
     is_memory_scarce,
     is_playwright_unavailable,
+    is_playwright_unavailable_from_env_context,
     normalize_action_hint_blocks,
 )
 from box_agent.acp.env_context import EnvContext, build_env_context_prompt
@@ -766,7 +767,7 @@ class BoxACPAgent:
             + "\n- Do not claim you can only access the workspace unless a tool call actually returns a permission denial."
         )
 
-    def _build_action_hints_prompt(self) -> str:
+    def _build_action_hints_prompt(self, env_context: EnvContext | None = None) -> str:
         """Detect onboarding / browser-tools scenarios and build the hint contract."""
         memory_scarce = is_memory_scarce(self._memory.read_core() if self._memory else None)
 
@@ -777,7 +778,7 @@ class BoxACPAgent:
         playwright_unavailable = is_playwright_unavailable(
             mcp_path,
             mcp_globally_enabled=self._config.tools.enable_mcp,
-        )
+        ) or is_playwright_unavailable_from_env_context(env_context)
 
         return build_action_hints_prompt(
             memory_scarce=memory_scarce,
@@ -829,7 +830,7 @@ class BoxACPAgent:
         )
         base_prompt = f"{base_prompt.rstrip()}\n\n{build_skill_runtime_prompt(runtime_context)}"
 
-        hints_prompt = self._build_action_hints_prompt()
+        hints_prompt = self._build_action_hints_prompt(env_context)
         if hints_prompt:
             base_prompt = f"{base_prompt.rstrip()}\n\n{hints_prompt}"
 

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from box_agent.acp.action_hints import (
     ActionHintStreamNormalizer,
     build_action_hints_prompt,
     is_memory_scarce,
     is_playwright_unavailable,
+    is_playwright_unavailable_from_env_context,
     normalize_action_hint_blocks,
 )
 
@@ -142,6 +144,21 @@ def test_playwright_detected_via_args_when_named_differently(tmp_path: Path) -> 
         encoding="utf-8",
     )
     assert is_playwright_unavailable(p) is False
+
+
+def test_playwright_unavailable_from_env_context_when_available_false() -> None:
+    ctx = SimpleNamespace(browser_tools=SimpleNamespace(available=False))
+    assert is_playwright_unavailable_from_env_context(ctx) is True
+
+
+def test_playwright_available_from_env_context_when_available_true() -> None:
+    ctx = SimpleNamespace(browser_tools=SimpleNamespace(available=True))
+    assert is_playwright_unavailable_from_env_context(ctx) is False
+
+
+def test_playwright_env_context_absent_does_not_force_unavailable() -> None:
+    assert is_playwright_unavailable_from_env_context(None) is False
+    assert is_playwright_unavailable_from_env_context(SimpleNamespace()) is False
 
 
 # ── build_action_hints_prompt ───────────────────────────────────

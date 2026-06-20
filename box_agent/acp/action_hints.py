@@ -91,6 +91,12 @@ def is_playwright_unavailable(
     return True
 
 
+def is_playwright_unavailable_from_env_context(env_context: object | None) -> bool:
+    """Return True when host env_context says Playwright is not actually usable."""
+    browser_tools = getattr(env_context, "browser_tools", None)
+    return getattr(browser_tools, "available", None) is False
+
+
 def build_action_hints_prompt(
     *,
     memory_scarce: bool,
@@ -111,7 +117,8 @@ def build_action_hints_prompt(
     if playwright_unavailable:
         rules.append(
             "- 用户提出需要浏览器操作的需求（打开网页、抓取页面、截图、自动化点击、Playwright 等），"
-            '但当前会话没有可用的浏览器工具时 → 使用 `"tab": "browser-tools"`，引导用户去启用浏览器工具。'
+            '但当前会话没有可用的 Playwright 基础浏览器工具时 → 使用 `"tab": "browser-tools"`，'
+            "优先引导用户启用 Playwright；真实浏览器连接器只作为当前页/登录态页面读取的增强项。"
         )
 
     if not rules:

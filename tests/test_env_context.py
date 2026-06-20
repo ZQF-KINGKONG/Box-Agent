@@ -21,7 +21,13 @@ def test_from_meta_parses_known_fields() -> None:
     raw = {
         "cli": {"lark-cli": "/usr/local/bin/lark-cli", "wecom-cli": None},
         "platform": "darwin",
-        "browser_tools": {"installed": True, "enabled": False},
+        "browser_tools": {"installed": True, "enabled": False, "available": False},
+        "browser_connector": {
+            "enabled": True,
+            "connected": False,
+            "paused": False,
+            "available": False,
+        },
         "memory_configured": True,
     }
     ctx = EnvContext.from_meta(raw)
@@ -31,6 +37,12 @@ def test_from_meta_parses_known_fields() -> None:
     assert ctx.browser_tools is not None
     assert ctx.browser_tools.installed is True
     assert ctx.browser_tools.enabled is False
+    assert ctx.browser_tools.available is False
+    assert ctx.browser_connector is not None
+    assert ctx.browser_connector.enabled is True
+    assert ctx.browser_connector.connected is False
+    assert ctx.browser_connector.paused is False
+    assert ctx.browser_connector.available is False
     assert ctx.memory_configured is True
     assert ctx.extras == {}
 
@@ -197,13 +209,62 @@ def test_prompt_renders_platform_and_browser_state() -> None:
     ctx = EnvContext.from_meta(
         {
             "platform": "darwin",
-            "browser_tools": {"installed": True, "enabled": False},
+            "browser_tools": {"installed": True, "enabled": False, "available": False},
+            "browser_connector": {"enabled": True, "connected": False, "available": False},
         }
     )
     out = build_env_context_prompt(ctx)
     assert "`darwin`" in out
     assert "installed=true" in out
     assert "enabled=false" in out
+    assert "available=false" in out
+    assert "真实浏览器连接器状态" in out
+    assert "connected=false" in out
+
+
+def test_browser_policy_uses_playwright_when_connector_missing() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "browser_tools": {"installed": True, "enabled": True, "available": True},
+            "browser_connector": {"enabled": True, "connected": False, "available": False},
+        }
+    )
+
+    out = build_env_context_prompt(ctx)
+
+    assert "当前只有 Playwright 可用或连接器未连接" in out
+    assert "必须使用 Playwright" in out
+    assert "不要因为连接器更适合而要求用户先安装或连接插件" in out
+    assert "extension_not_connected" in out
+
+
+def test_browser_policy_prefers_playwright_when_both_missing() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "browser_tools": {"installed": False, "enabled": False, "available": False},
+            "browser_connector": {"enabled": False, "connected": False, "available": False},
+        }
+    )
+
+    out = build_env_context_prompt(ctx)
+
+    assert "当前两类浏览器能力都不可用" in out
+    assert "优先引导用户启用 Playwright" in out
+
+
+def test_browser_policy_distinguishes_both_available() -> None:
+    ctx = EnvContext.from_meta(
+        {
+            "browser_tools": {"installed": True, "enabled": True, "available": True},
+            "browser_connector": {"enabled": True, "connected": True, "available": True},
+        }
+    )
+
+    out = build_env_context_prompt(ctx)
+
+    assert "两者都可用" in out
+    assert "普通公开网页" in out
+    assert "当前页" in out
 
 
 def test_prompt_renders_image_service_available() -> None:

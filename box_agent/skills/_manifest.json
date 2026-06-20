@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "box_agent_version": "0.8.70",
-  "generated_at": "2026-06-16T09:56:33Z",
+  "box_agent_version": "0.8.71",
+  "generated_at": "2026-06-20T17:59:17Z",
   "skills": [
     {
       "name": "artifacts-builder",
@@ -48,6 +48,10 @@
       "path": "memory-guide/SKILL.md"
     },
     {
+      "name": "obsidian",
+      "path": "obsidian/SKILL.md"
+    },
+    {
       "name": "research-synthesis",
       "path": "research-synthesis/SKILL.md"
     },
@@ -58,10 +62,6 @@
     {
       "name": "scheduled-task",
       "path": "scheduled-task/SKILL.md"
-    },
-    {
-      "name": "obsidian",
-      "path": "obsidian/SKILL.md"
     },
     {
       "name": "skill-architect",

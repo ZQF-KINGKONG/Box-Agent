@@ -17,6 +17,7 @@
       - [Example](#example)
     - [3.2 Adding MCP Tools](#32-adding-mcp-tools)
     - [3.3 Built-in Skills](#33-built-in-skills)
+      - [Recommended Skills for officev3](#recommended-skills-for-officev3)
     - [3.4 Adding a New Skill](#34-adding-a-new-skill)
     - [3.5 Customizing System Prompt](#35-customizing-system-prompt)
       - [What You Can Customize](#what-you-can-customize)
@@ -266,6 +267,35 @@ Before release, regenerate and commit the manifest if built-in skills change:
 ```bash
 uv run python scripts/generate_skills_manifest.py
 ```
+
+#### Recommended Skills for officev3
+
+Some submitted skills should ship inside the Box-Agent runtime so officev3 can
+show them as installable recommendation cards, but they should not load as
+always-on builtin skills. Add those skills through both repositories:
+
+1. Put the skill directory under `box_agent/skills/<skill-slug>/`. Keep
+   `SKILL.md` frontmatter complete, including `name`, `description`, and
+   `author` when the card should show attribution.
+2. Add the top-level directory name to `EXCLUDED_SKILL_DIRS` in
+   `scripts/generate_skills_manifest.py`. This leaves the skill on disk for
+   packaging, while keeping it out of the builtin `_manifest.json` whitelist.
+3. Regenerate the manifest:
+
+   ```bash
+   uv run python scripts/generate_skills_manifest.py
+   ```
+
+   Verify the script logs `info: excluding '<skill-slug>/SKILL.md'` and that
+   `box_agent/skills/_manifest.json` does not list the skill.
+4. In the officev3 repository, add the recommendation card to
+   `electron/main/skillManager.ts` in `DEFAULT_RECOMMENDED`. Use `sourcePath`
+   matching the skill directory under `box_agent/skills/`, set
+   `installable: true`, and use category `featured` for community
+   recommendations.
+5. Rebuild or sync the Box-Agent runtime used by officev3. The recommendation
+   card can only install successfully when the runtime contains the physical
+   skill directory; the manifest exclusion only controls builtin loading.
 
 **More information:**
 

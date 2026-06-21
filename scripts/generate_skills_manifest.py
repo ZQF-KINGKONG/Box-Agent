@@ -44,6 +44,7 @@ EXCLUDED_SKILL_DIRS: frozenset[str] = frozenset(
         "self-media-ad-workflow",
         "worldcup-prediction",
         "world-cup-briefing",
+        "skill-navigation-assistant-sl",
     }
 )
 

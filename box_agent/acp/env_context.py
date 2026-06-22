@@ -35,7 +35,16 @@ from pydantic import BaseModel, ConfigDict, Field
 logger = logging.getLogger(__name__)
 
 _KNOWN_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"cli", "platform", "browser_tools", "image_service", "memory_configured", "runtimes", "obsidian"}
+    {
+        "cli",
+        "platform",
+        "browser_tools",
+        "browser_connector",
+        "image_service",
+        "memory_configured",
+        "runtimes",
+        "obsidian",
+    }
 )
 
 _MAX_PATH_LEN = 512
@@ -213,6 +222,23 @@ class BrowserToolsState(BaseModel):
 
     installed: bool | None = None
     enabled: bool | None = None
+    available: bool | None = None
+
+
+class BrowserConnectorState(BaseModel):
+    """Whether the real-browser connector extension is usable.
+
+    The connector is a read-only enhancement for the user's real browser
+    context. It is separate from Playwright automation: an enabled gateway is
+    not enough if the extension is not connected or is paused.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    enabled: bool | None = None
+    connected: bool | None = None
+    paused: bool | None = None
+    available: bool | None = None
 
 
 class ImageServiceState(BaseModel):
@@ -272,6 +298,7 @@ class EnvContext(BaseModel):
     cli: dict[str, str | None] = Field(default_factory=dict)
     platform: str | None = None
     browser_tools: BrowserToolsState | None = None
+    browser_connector: BrowserConnectorState | None = None
     image_service: ImageServiceState | None = None
     memory_configured: bool | None = None
     runtimes: dict[str, HostRuntime] = Field(default_factory=dict)
@@ -320,6 +347,7 @@ class EnvContext(BaseModel):
             self.cli
             or self.platform
             or self.browser_tools is not None
+            or self.browser_connector is not None
             or self.image_service is not None
             or self.memory_configured is not None
             or self.obsidian is not None
@@ -352,14 +380,90 @@ def _format_cli_section(cli: dict[str, str | None]) -> list[str]:
 
 
 def _format_browser_tools(state: BrowserToolsState) -> list[str]:
-    if state.installed is None and state.enabled is None:
+    if state.installed is None and state.enabled is None and state.available is None:
         return []
     parts = []
     if state.installed is not None:
         parts.append(f"installed={str(state.installed).lower()}")
     if state.enabled is not None:
         parts.append(f"enabled={str(state.enabled).lower()}")
+    if state.available is not None:
+        parts.append(f"available={str(state.available).lower()}")
     return [f"- 浏览器工具状态：{', '.join(parts)}"]
+
+
+def _format_browser_connector(state: BrowserConnectorState) -> list[str]:
+    if (
+        state.enabled is None
+        and state.connected is None
+        and state.paused is None
+        and state.available is None
+    ):
+        return []
+    parts = []
+    if state.enabled is not None:
+        parts.append(f"enabled={str(state.enabled).lower()}")
+    if state.connected is not None:
+        parts.append(f"connected={str(state.connected).lower()}")
+    if state.paused is not None:
+        parts.append(f"paused={str(state.paused).lower()}")
+    if state.available is not None:
+        parts.append(f"available={str(state.available).lower()}")
+    return [f"- 真实浏览器连接器状态：{', '.join(parts)}"]
+
+
+def _state_available(value: bool | None, fallback: bool) -> bool:
+    return value if value is not None else fallback
+
+
+def _format_browser_capability_policy(
+    browser_tools: BrowserToolsState | None,
+    browser_connector: BrowserConnectorState | None,
+) -> list[str]:
+    if browser_tools is None and browser_connector is None:
+        return []
+
+    playwright_available = False
+    if browser_tools is not None:
+        fallback = bool(browser_tools.enabled and browser_tools.installed)
+        playwright_available = _state_available(browser_tools.available, fallback)
+
+    connector_available = False
+    if browser_connector is not None:
+        fallback = bool(
+            browser_connector.enabled
+            and browser_connector.connected
+            and browser_connector.paused is not True
+        )
+        connector_available = _state_available(browser_connector.available, fallback)
+
+    lines = [
+        "- 浏览器能力策略：Playwright 是基础网页能力，真实浏览器连接器是读取用户真实浏览器上下文的增强能力。"
+    ]
+    if playwright_available and connector_available:
+        lines.append(
+            "  - 两者都可用：普通公开网页、后台打开、点击、填写、截图、页面结构/网络检查等自动化任务优先使用 Playwright；"
+            "当前页、用户已登录页面、内网页、公众号等需要真实浏览器上下文的只读任务优先使用连接器。"
+        )
+    elif playwright_available:
+        lines.append(
+            "  - 当前只有 Playwright 可用或连接器未连接：凡是 Playwright 能完成的网页任务必须使用 Playwright；"
+            "不要因为连接器更适合而要求用户先安装或连接插件。"
+        )
+    elif connector_available:
+        lines.append(
+            "  - 当前只有真实浏览器连接器可用：可用于只读读取当前页或链接；需要点击、填写、截图、自动化时提示用户启用 Playwright。"
+        )
+    else:
+        lines.append(
+            "  - 当前两类浏览器能力都不可用：优先引导用户启用 Playwright 浏览器工具；"
+            "连接器只作为当前页、登录态页面、内网页读取的增强项。"
+        )
+    lines.append(
+        "  - 如果连接器工具返回 `extension_not_connected`，且 Playwright 可用且任务有普通公开 URL，改用 Playwright；"
+        "不要把插件未连接作为普通网页任务的终点。"
+    )
+    return lines
 
 
 def _format_image_service(state: ImageServiceState) -> list[str]:
@@ -394,6 +498,9 @@ def _format_obsidian(state: ObsidianState) -> list[str]:
             "- Obsidian 写入/打开策略：当用户要求导出、写入、保存或追加到 Obsidian 时，"
             "必须优先使用 `obsidian_create_note`、`obsidian_update_note` 或 `obsidian_daily_note`；"
             "不要用 bash 直接调用 `obsidian create/append/prepend/open/daily`。"
+            "如果 prompt 中存在 `obsidian_context`，且用户要求修改该引用笔记，"
+            "必须使用 context 里的 Vault 相对 `path` 调用 `obsidian_update_note`；"
+            "不要修改 workspace 副本或 `.data-sources` 文件。"
         )
     return lines
 
@@ -414,6 +521,9 @@ def build_env_context_prompt(ctx: EnvContext | None) -> str:
     lines.extend(_format_cli_section(ctx.cli))
     if ctx.browser_tools is not None:
         lines.extend(_format_browser_tools(ctx.browser_tools))
+    if ctx.browser_connector is not None:
+        lines.extend(_format_browser_connector(ctx.browser_connector))
+    lines.extend(_format_browser_capability_policy(ctx.browser_tools, ctx.browser_connector))
     if ctx.image_service is not None:
         lines.extend(_format_image_service(ctx.image_service))
     if ctx.obsidian is not None:

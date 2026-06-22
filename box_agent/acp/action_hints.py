@@ -16,6 +16,7 @@ this session.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 _MEMORY_MIN_CHARS = 30
@@ -32,6 +33,13 @@ _HINT_FORMAT_BLOCK = (
     "}\n"
     "```"
 )
+_ACTION_HINT_START = "```action_hint"
+_ACTION_HINT_FENCE = "```"
+_ALLOWED_ACTION_HINT_TABS = frozenset({"onboarding", "browser-tools"})
+_ACTION_HINT_BLOCK_RE = re.compile(
+    r"```action_hint[ \t]*(?:\r?\n)?(?P<payload>\{[\s\S]*?\})[ \t\r\n]*```"
+)
+_JSON_STRING_RE = r'"(?P<value>(?:\\.|[^"\\])*)"'
 
 
 def is_memory_scarce(memory_text: str | None) -> bool:
@@ -83,6 +91,12 @@ def is_playwright_unavailable(
     return True
 
 
+def is_playwright_unavailable_from_env_context(env_context: object | None) -> bool:
+    """Return True when host env_context says Playwright is not actually usable."""
+    browser_tools = getattr(env_context, "browser_tools", None)
+    return getattr(browser_tools, "available", None) is False
+
+
 def build_action_hints_prompt(
     *,
     memory_scarce: bool,
@@ -103,7 +117,8 @@ def build_action_hints_prompt(
     if playwright_unavailable:
         rules.append(
             "- 用户提出需要浏览器操作的需求（打开网页、抓取页面、截图、自动化点击、Playwright 等），"
-            '但当前会话没有可用的浏览器工具时 → 使用 `"tab": "browser-tools"`，引导用户去启用浏览器工具。'
+            '但当前会话没有可用的 Playwright 基础浏览器工具时 → 使用 `"tab": "browser-tools"`，'
+            "优先引导用户启用 Playwright；真实浏览器连接器只作为当前页/登录态页面读取的增强项。"
         )
 
     if not rules:
@@ -114,13 +129,196 @@ def build_action_hints_prompt(
         "当用户的当前问题真正契合下述场景时，在你的回复末尾追加一个 `action_hint` 围栏块。"
         "前端会解析它并渲染为可点击链接，引导用户打开对应的设置页。\n\n"
         "### 格式契约\n"
+        "只接受下面这种三反引号 `action_hint` 围栏（不要用 XML 标签）：\n"
         f"{_HINT_FORMAT_BLOCK}\n\n"
         "### 触发场景（仅以下场景启用）\n"
         + "\n".join(rules)
         + "\n\n"
         "### 约束\n"
+        "- 必须使用三个反引号包裹的 ```action_hint``` 代码围栏，"
+        "禁止使用 `<action_hint>...</action_hint>` 这类 XML/HTML 标签包裹，"
+        "否则前端无法识别。\n"
+        "- 开始围栏这一行只能写 ```action_hint，不要在同一行追加 `{...}` 或其他内容；"
+        "JSON 必须从下一行开始。\n"
         "- 一次回复最多输出一个 `action_hint` 块。\n"
-        "- 块内必须是合法 JSON，且 `tab` 字段必须取自上述列表。\n"
+        "- 块内必须是合法 JSON，且 `tab` 字段必须取自上述列表；"
+        "`display_text` 必须是一行短文案，不要包含换行符。\n"
         "- 用户语境不契合时不要输出，避免打扰。\n"
         "- 正文先正常回答用户的问题，再追加这个块；不要把它放在正文中间。"
     )
+
+
+def normalize_action_hint_blocks(text: str) -> str:
+    """Normalize known model drift back to the fenced action_hint contract.
+
+    The model sometimes writes JSON on the opening fence line, for example
+    `````action_hint {...}`````. The frontend only treats the fence as a
+    machine-readable hint when JSON starts on the next line, so ACP repairs the
+    narrow, validated shape before streaming it to the host.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        normalized_payload = _normalize_action_hint_payload(match.group("payload"))
+        if normalized_payload is None:
+            return match.group(0)
+        return f"{_ACTION_HINT_START}\n{normalized_payload}\n{_ACTION_HINT_FENCE}"
+
+    return _ACTION_HINT_BLOCK_RE.sub(replace, text)
+
+
+class ActionHintStreamNormalizer:
+    """Incrementally normalize action_hint text without delaying normal output."""
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._holding_action_hint = False
+
+    def push(self, chunk: str) -> list[str]:
+        if not chunk:
+            return []
+        self._buffer += chunk
+        return self._drain()
+
+    def finish(self) -> list[str]:
+        output = self._drain()
+        if self._buffer:
+            output.append(normalize_action_hint_blocks(self._buffer))
+            self._buffer = ""
+        self._holding_action_hint = False
+        return output
+
+    def _drain(self) -> list[str]:
+        output: list[str] = []
+        while self._buffer:
+            if not self._holding_action_hint:
+                start = self._buffer.find(_ACTION_HINT_START)
+                if start == -1:
+                    keep = _partial_action_hint_start_len(self._buffer)
+                    emit_len = len(self._buffer) - keep
+                    if emit_len > 0:
+                        output.append(self._buffer[:emit_len])
+                        self._buffer = self._buffer[emit_len:]
+                    break
+                if start > 0:
+                    output.append(self._buffer[:start])
+                    self._buffer = self._buffer[start:]
+                self._holding_action_hint = True
+
+            close = self._buffer.find(_ACTION_HINT_FENCE, len(_ACTION_HINT_START))
+            if close == -1:
+                break
+
+            block_end = close + len(_ACTION_HINT_FENCE)
+            block = self._buffer[:block_end]
+            output.append(normalize_action_hint_blocks(block))
+            self._buffer = self._buffer[block_end:]
+            self._holding_action_hint = False
+
+        return output
+
+
+def _normalize_action_hint_payload(payload: str) -> str | None:
+    data = _load_jsonish_action_hint_payload(payload.strip())
+    if not isinstance(data, dict):
+        return None
+
+    action = data.get("action")
+    params = data.get("params")
+    tab = params.get("tab") if isinstance(params, dict) else None
+    display_text = data.get("display_text")
+    if (
+        action != "open_settings"
+        or tab not in _ALLOWED_ACTION_HINT_TABS
+        or not isinstance(display_text, str)
+    ):
+        return None
+
+    display_text = display_text.replace("\r", "").replace("\n", "").strip()
+    if not display_text:
+        return None
+
+    normalized = {
+        "action": "open_settings",
+        "params": {"tab": tab},
+        "display_text": display_text,
+    }
+    return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+
+
+def _load_jsonish_action_hint_payload(payload: str) -> dict[str, object] | None:
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        repaired = _escape_control_chars_inside_json_strings(payload)
+        try:
+            data = json.loads(repaired)
+        except ValueError:
+            data = _extract_action_hint_payload(payload)
+    return data if isinstance(data, dict) else None
+
+
+def _escape_control_chars_inside_json_strings(text: str) -> str:
+    chars: list[str] = []
+    in_string = False
+    escaped = False
+    for char in text:
+        if not in_string:
+            chars.append(char)
+            if char == '"':
+                in_string = True
+            continue
+
+        if escaped:
+            chars.append(char)
+            escaped = False
+        elif char == "\\":
+            chars.append(char)
+            escaped = True
+        elif char == '"':
+            chars.append(char)
+            in_string = False
+        elif char == "\n":
+            chars.append("\\n")
+        elif char == "\r":
+            chars.append("\\r")
+        elif char == "\t":
+            chars.append("\\t")
+        else:
+            chars.append(char)
+    return "".join(chars)
+
+
+def _extract_action_hint_payload(payload: str) -> dict[str, object] | None:
+    action = _extract_jsonish_string(payload, r'"action"\s*:\s*' + _JSON_STRING_RE)
+    tab = _extract_jsonish_string(payload, r'"tab"\s*:\s*' + _JSON_STRING_RE)
+    display_text = _extract_jsonish_string(
+        payload,
+        r'"display_text"\s*:\s*' + _JSON_STRING_RE,
+    )
+    if action is None or tab is None or display_text is None:
+        return None
+    return {
+        "action": action,
+        "params": {"tab": tab},
+        "display_text": display_text,
+    }
+
+
+def _extract_jsonish_string(payload: str, pattern: str) -> str | None:
+    match = re.search(pattern, payload, flags=re.DOTALL)
+    if match is None:
+        return None
+    value = _escape_control_chars_inside_json_strings(f'"{match.group("value")}"')
+    try:
+        loaded = json.loads(value)
+    except ValueError:
+        return match.group("value")
+    return loaded if isinstance(loaded, str) else None
+
+
+def _partial_action_hint_start_len(text: str) -> int:
+    max_len = min(len(text), len(_ACTION_HINT_START) - 1)
+    for size in range(max_len, 0, -1):
+        if _ACTION_HINT_START.startswith(text[-size:]):
+            return size
+    return 0

@@ -5,11 +5,22 @@ LLM providers (Anthropic or OpenAI) through the provider parameter.
 """
 
 import asyncio
-from pathlib import Path
-
-import yaml
 
 from box_agent import LLMClient, LLMProvider, Message
+from box_agent.config import Config
+
+
+def load_config() -> Config:
+    """Load the same config file used by the CLI."""
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
+        raise FileNotFoundError("config.yaml not found. Run: box-agent setup")
+    return Config.from_yaml(config_path)
+
+
+def provider_from_config(config: Config) -> LLMProvider:
+    """Return the configured provider enum."""
+    return LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
 
 
 async def demo_anthropic_provider():
@@ -18,16 +29,14 @@ async def demo_anthropic_provider():
     print("DEMO: LLMClient with Anthropic Provider")
     print("=" * 60)
 
-    # Load config
-    config_path = Path("box_agent/config/config.yaml")
-    with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = load_config()
 
     # Initialize client with Anthropic provider
     client = LLMClient(
-        api_key=config["api_key"],
+        api_key=config.llm.api_key,
         provider=LLMProvider.ANTHROPIC,  # Specify Anthropic provider
-        model=config.get("model", "claude-sonnet-4-20250514"),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "claude-sonnet-4-20250514",
     )
 
     print(f"Provider: {client.provider}")
@@ -53,16 +62,14 @@ async def demo_openai_provider():
     print("DEMO: LLMClient with OpenAI Provider")
     print("=" * 60)
 
-    # Load config
-    config_path = Path("box_agent/config/config.yaml")
-    with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = load_config()
 
     # Initialize client with OpenAI provider
     client = LLMClient(
-        api_key=config["api_key"],
+        api_key=config.llm.api_key,
         provider=LLMProvider.OPENAI,  # Specify OpenAI provider
-        model=config.get("model", "claude-sonnet-4-20250514"),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "gpt-4o",
     )
 
     print(f"Provider: {client.provider}")
@@ -82,24 +89,22 @@ async def demo_openai_provider():
         print(f"❌ Error: {e}")
 
 
-async def demo_default_provider():
-    """Demo using LLMClient with default provider."""
+async def demo_configured_provider():
+    """Demo using LLMClient with the configured provider."""
     print("\n" + "=" * 60)
-    print("DEMO: LLMClient with Default Provider (Anthropic)")
+    print("DEMO: LLMClient with Configured Provider")
     print("=" * 60)
 
-    # Load config
-    config_path = Path("box_agent/config/config.yaml")
-    with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = load_config()
 
-    # Initialize client without specifying provider (defaults to Anthropic)
     client = LLMClient(
-        api_key=config["api_key"],
-        model=config.get("model", "claude-sonnet-4-20250514"),
+        api_key=config.llm.api_key,
+        provider=provider_from_config(config),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "claude-sonnet-4-20250514",
     )
 
-    print(f"Provider (default): {client.provider}")
+    print(f"Provider (configured): {client.provider}")
     print(f"API Base: {client.api_base}")
 
     # Simple question
@@ -109,7 +114,7 @@ async def demo_default_provider():
     try:
         response = await client.generate(messages)
         print(f"💬 Model: {response.content}")
-        print("✅ Default provider demo completed")
+        print("✅ Configured provider demo completed")
     except Exception as e:
         print(f"❌ Error: {e}")
 
@@ -120,22 +125,21 @@ async def demo_provider_comparison():
     print("DEMO: Provider Comparison")
     print("=" * 60)
 
-    # Load config
-    config_path = Path("box_agent/config/config.yaml")
-    with open(config_path, encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    config = load_config()
 
     # Create clients for both providers
     anthropic_client = LLMClient(
-        api_key=config["api_key"],
+        api_key=config.llm.api_key,
         provider=LLMProvider.ANTHROPIC,
-        model=config.get("model", "claude-sonnet-4-20250514"),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "claude-sonnet-4-20250514",
     )
 
     openai_client = LLMClient(
-        api_key=config["api_key"],
+        api_key=config.llm.api_key,
         provider=LLMProvider.OPENAI,
-        model=config.get("model", "claude-sonnet-4-20250514"),
+        api_base=config.llm.api_base,
+        model=config.llm.model or "gpt-4o",
     )
 
     # Same question for both
@@ -163,8 +167,8 @@ async def main():
     print("Make sure you have configured API key in config.yaml.")
 
     try:
-        # Demo default provider
-        await demo_default_provider()
+        # Demo configured provider
+        await demo_configured_provider()
 
         # Demo Anthropic provider
         await demo_anthropic_provider()

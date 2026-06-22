@@ -17,7 +17,7 @@ from box_agent.config import (
     ToolsConfig,
 )
 from box_agent.memory import MemoryManager
-from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, ToolCall
+from box_agent.schema import FunctionCall, LLMResponse, StreamEvent, TokenUsage, ToolCall
 from box_agent.tools.base import Tool, ToolResult
 from box_agent.tools.setup import SANDBOX_INFO_PROMPT, build_sandbox_info_prompt
 
@@ -201,6 +201,132 @@ class DoneLLM:
         return LLMResponse(content="done", finish_reason="stop")
 
 
+class SkillUsageLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="skill-1",
+                        type="function",
+                        function=FunctionCall(
+                            name="get_skill",
+                            arguments={"skill_name": "theme-factory"},
+                        ),
+                    )
+                ],
+            )
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="skill-2",
+                        type="function",
+                        function=FunctionCall(
+                            name="get_skill",
+                            arguments={"skill_name": "html-templates"},
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class SkillTool(Tool):
+    @property
+    def name(self):
+        return "get_skill"
+
+    @property
+    def description(self):
+        return "Load a skill"
+
+    @property
+    def parameters(self):
+        return {
+            "type": "object",
+            "properties": {"skill_name": {"type": "string"}},
+            "required": ["skill_name"],
+        }
+
+    async def execute(self, skill_name: str):
+        return ToolResult(success=True, content=f"loaded {skill_name}")
+
+
+class CapabilityUsageLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="echo-1",
+                        type="function",
+                        function=FunctionCall(name="echo", arguments={"text": "ping"}),
+                    ),
+                    ToolCall(
+                        id="mcp-1",
+                        type="function",
+                        function=FunctionCall(name="browser_open", arguments={"url": "https://example.com"}),
+                    ),
+                ],
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            )
+        else:
+            yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(
+                type="finish",
+                finish_reason="stop",
+                usage=TokenUsage(prompt_tokens=2, completion_tokens=1, total_tokens=3),
+            )
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class FakeMCPTool(Tool):
+    @property
+    def name(self):
+        return "browser_open"
+
+    @property
+    def server_name(self):
+        return "browser"
+
+    @property
+    def tool_name(self):
+        return "open"
+
+    @property
+    def description(self):
+        return "Open a browser URL"
+
+    @property
+    def parameters(self):
+        return {"type": "object", "properties": {"url": {"type": "string"}}}
+
+    async def execute(self, url: str):
+        return ToolResult(success=True, content=f"opened {url}")
+
+
 class CaptureMessagesLLM:
     def __init__(self):
         self.calls: list[list[tuple[str, str]]] = []
@@ -228,12 +354,106 @@ class GoalCompleteLLM:
                     ToolCall(
                         id="goal1",
                         type="function",
-                        function=FunctionCall(name="goal_write", arguments={"action": "complete"}),
+                        function=FunctionCall(
+                            name="goal_write",
+                            arguments={
+                                "action": "complete",
+                                "evidence": ["ACP goal completion test passed"],
+                                "completed_by": "model",
+                            },
+                        ),
                     )
                 ],
             )
         else:
             yield StreamEvent(type="text", delta="done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalAutopilotCompleteLLM:
+    def __init__(self):
+        self.calls = 0
+        self.messages: list[list[tuple[str, str]]] = []
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        self.messages.append([(msg.role, msg.content) for msg in messages])
+        if self.calls == 1:
+            yield StreamEvent(type="text", delta="not done yet")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="goal-auto-complete",
+                        type="function",
+                        function=FunctionCall(
+                            name="goal_write",
+                            arguments={
+                                "action": "complete",
+                                "evidence": ["autopilot continuation verified completion"],
+                                "completed_by": "model",
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="goal done")
+            yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalAutopilotNeverCompleteLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        yield StreamEvent(type="text", delta=f"still active {self.calls}")
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="done", finish_reason="stop")
+
+
+class GoalAutopilotBlockLLM:
+    def __init__(self):
+        self.calls = 0
+
+    async def generate_stream(self, messages, tools=None, **_):
+        self.calls += 1
+        if self.calls == 1:
+            yield StreamEvent(type="text", delta="need more work")
+            yield StreamEvent(type="finish", finish_reason="stop")
+        elif self.calls == 2:
+            yield StreamEvent(
+                type="finish",
+                finish_reason="tool_use",
+                tool_calls=[
+                    ToolCall(
+                        id="goal-auto-block",
+                        type="function",
+                        function=FunctionCall(
+                            name="goal_write",
+                            arguments={
+                                "action": "block",
+                                "blocked_reason": "Waiting for third-party credentials",
+                                "progress": ["Detected provider authentication gap"],
+                            },
+                        ),
+                    )
+                ],
+            )
+        else:
+            yield StreamEvent(type="text", delta="blocked")
             yield StreamEvent(type="finish", finish_reason="stop")
 
     async def generate(self, messages, tools=None):
@@ -301,6 +521,21 @@ class UsageLLM:
 class LongAnswerLLM:
     async def generate_stream(self, messages, tools=None, **_):
         for chunk in ["李白是唐代诗人，" * 20, "他的诗歌想象瑰丽，" * 20, "后世称他为诗仙。"]:
+            yield StreamEvent(type="text", delta=chunk)
+        yield StreamEvent(type="finish", finish_reason="stop")
+
+    async def generate(self, messages, tools=None):
+        return LLMResponse(content="", finish_reason="stop")
+
+
+class MalformedActionHintLLM:
+    async def generate_stream(self, messages, tools=None, **_):
+        for chunk in [
+            "好的。",
+            "```action",
+            '_hint { "action": "open_settings", "params": {"tab": "onboarding"}, ',
+            '"display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。\n" } ```',
+        ]:
             yield StreamEvent(type="text", delta=chunk)
         yield StreamEvent(type="finish", finish_reason="stop")
 
@@ -472,10 +707,107 @@ async def test_acp_turn_executes_tool(acp_agent):
 
 
 @pytest.mark.asyncio
-async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
+async def test_acp_emits_skills_usage_raw_output(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=4, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, SkillUsageLLM(), [SkillTool()], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "make infographic"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    skill_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "skills_usage"
+    ]
+    assert skill_outputs == [
+        {
+            "type": "skills_usage",
+            "skills": ["theme-factory"],
+            "current": "theme-factory",
+        },
+        {
+            "type": "skills_usage",
+            "skills": ["theme-factory", "html-templates"],
+            "current": "html-templates",
+        },
+    ]
+    turn_usage_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "turn_usage"
+    ]
+    assert any(item["skills"] == ["theme-factory"] for item in turn_usage_outputs)
+    assert turn_usage_outputs[-1]["skills"] == ["theme-factory", "html-templates"]
+
+
+@pytest.mark.asyncio
+async def test_acp_emits_turn_usage_for_tools_mcp_and_tokens(tmp_path):
     config = Config(
         llm=LLMConfig(api_key="test-key"),
         agent=AgentConfig(max_steps=3, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(enable_todo=False, enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(
+        conn,
+        config,
+        CapabilityUsageLLM(),
+        [EchoTool(), FakeMCPTool()],
+        "system",
+    )
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "open and echo"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    turn_usage_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "turn_usage"
+    ]
+    assert any(item["tools"] == [{"name": "echo", "count": 1}] for item in turn_usage_outputs)
+    assert any(
+        item["mcp"]
+        == [{"server": "browser", "tool": "open", "name": "browser.open", "count": 1}]
+        for item in turn_usage_outputs
+    )
+    assert turn_usage_outputs[-1]["tokenUsage"] == {
+        "promptTokens": 12,
+        "completionTokens": 6,
+        "totalTokens": 18,
+        "calls": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_ext_method_injects_active_goal_into_prompt(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=3,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_enabled=False,
+        ),
         tools=ToolsConfig(enable_sub_agent=False),
     )
     llm = CaptureMessagesLLM()
@@ -547,6 +879,9 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
                 "goal": {
                     "objective": "Restore this officev3 goal",
                     "status": "paused",
+                    "progress": ["Host persisted progress"],
+                    "evidence": ["Host persisted evidence"],
+                    "blockedReason": "Host paused for review",
                 },
             },
         )
@@ -556,7 +891,12 @@ async def test_acp_new_session_goal_meta_restores_goal_state(tmp_path):
     assert state.agent.goal is not None
     assert state.agent.goal.objective == "Restore this officev3 goal"
     assert state.agent.goal.status == "paused"
+    assert state.agent.goal.progress == ["Host persisted progress"]
+    assert state.agent.goal.evidence == ["Host persisted evidence"]
+    assert state.agent.goal.blocked_reason == "Host paused for review"
     assert session.field_meta["goal"]["status"] == "paused"
+    assert session.field_meta["goal"]["progress"] == ["Host persisted progress"]
+    assert session.field_meta["goal"]["blockedReason"] == "Host paused for review"
 
 
 @pytest.mark.asyncio
@@ -584,6 +924,8 @@ async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
     state = agent._sessions[session.sessionId]
     assert state.agent.goal is not None
     assert state.agent.goal.status == "complete"
+    assert state.agent.goal.evidence == ["ACP goal completion test passed"]
+    assert state.agent.goal.completed_by == "model"
     goal_outputs = [
         update.update.rawOutput
         for update in conn.updates
@@ -594,6 +936,155 @@ async def test_acp_goal_write_tool_completes_goal_and_emits_snapshot(tmp_path):
     assert goal_outputs
     assert goal_outputs[-1]["action"] == "complete"
     assert goal_outputs[-1]["goal"]["status"] == "complete"
+    assert goal_outputs[-1]["goal"]["evidence"] == ["ACP goal completion test passed"]
+    assert goal_outputs[-1]["goal"]["completedBy"] == "model"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_continues_active_goal_until_complete(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=3,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=2,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    conn = DummyConn()
+    llm = GoalAutopilotCompleteLLM()
+    agent = BoxACPAgent(conn, config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Keep working until model completes", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "end_turn"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 1
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
+    assert llm.calls == 3
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "complete"
+    assert state.agent.goal.evidence == ["autopilot continuation verified completion"]
+    continuation_user = [content for role, content in llm.messages[1] if role == "user"][-1]
+    assert "Goal autopilot continuation 1/2" in continuation_user
+    assert "## Active Goal" in continuation_user
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_stops_when_budget_exhausted(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=1,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = GoalAutopilotNeverCompleteLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Remain active after budget", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "max_turn_requests"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 1
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is True
+    assert response.field_meta["goalAutopilot"]["noProgressExhausted"] is False
+    assert llm.calls == 2
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_stops_after_repeated_no_progress(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=2,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=3,
+            goal_autopilot_no_progress_turns=2,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = GoalAutopilotNeverCompleteLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Remain active with no progress", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "max_turn_requests"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 2
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
+    assert response.field_meta["goalAutopilot"]["noProgressExhausted"] is True
+    assert response.field_meta["goalAutopilot"]["noProgressTurns"] == 2
+    assert llm.calls == 3
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_acp_goal_autopilot_stops_when_goal_blocks(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(
+            max_steps=3,
+            workspace_dir=str(tmp_path),
+            goal_autopilot_max_turns=3,
+        ),
+        tools=ToolsConfig(enable_sub_agent=False),
+    )
+    llm = GoalAutopilotBlockLLM()
+    agent = BoxACPAgent(DummyConn(), config, llm, [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(
+            cwd=None,
+            field_meta={
+                "session_mode": "general",
+                "goal": {"objective": "Validate provider integration", "status": "active"},
+            },
+        )
+    )
+    response = await agent.prompt(SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "start"}]))
+
+    assert response.stopReason == "end_turn"
+    assert response.field_meta["goalAutopilot"]["continuations"] == 1
+    assert response.field_meta["goalAutopilot"]["budgetExhausted"] is False
+    assert llm.calls == 3
+    state = agent._sessions[session.sessionId]
+    assert state.agent.goal is not None
+    assert state.agent.goal.status == "blocked"
+    assert state.agent.goal.blocked_reason == "Waiting for third-party credentials"
+    assert state.agent.goal.progress == ["Detected provider authentication gap"]
 
 
 @pytest.mark.asyncio
@@ -669,6 +1160,63 @@ async def test_acp_streams_long_plain_answer_chunks(tmp_path):
     streamed_text = "".join(chunk.update.content.text for chunk in message_chunks)
     assert "李白是唐代诗人" in streamed_text
     assert "后世称他为诗仙" in streamed_text
+
+
+@pytest.mark.asyncio
+async def test_acp_normalizes_malformed_action_hint_chunks(tmp_path):
+    config = Config(
+        llm=LLMConfig(api_key="test-key"),
+        agent=AgentConfig(max_steps=2, workspace_dir=str(tmp_path)),
+        tools=ToolsConfig(),
+    )
+    conn = DummyConn()
+    agent = BoxACPAgent(conn, config, MalformedActionHintLLM(), [], "system")
+
+    session = await agent.newSession(
+        SimpleNamespace(cwd=None, field_meta={"session_mode": "general"})
+    )
+    response = await agent.prompt(
+        SimpleNamespace(sessionId=session.sessionId, prompt=[{"text": "你好"}])
+    )
+
+    assert response.stopReason == "end_turn"
+    message_chunks = [
+        update
+        for update in conn.updates
+        if getattr(update.update, "sessionUpdate", None) == "agent_message_chunk"
+    ]
+    streamed_text = "".join(chunk.update.content.text for chunk in message_chunks)
+    assert "```action_hint {" not in streamed_text
+    assert streamed_text.startswith("好的。```action_hint\n")
+    payload = streamed_text.split("```action_hint\n", 1)[1].removesuffix("\n```")
+    expected_hint = {
+        "action": "open_settings",
+        "params": {"tab": "onboarding"},
+        "display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。",
+    }
+    assert json.loads(payload) == expected_hint
+
+    llm_outputs = [
+        update.update.rawOutput
+        for update in conn.updates
+        if getattr(update.update, "rawOutput", None)
+        and isinstance(update.update.rawOutput, dict)
+        and update.update.rawOutput.get("type") == "llm_output"
+    ]
+    assert "```action_hint {" not in llm_outputs[-1]["content"]
+    assert json.loads(
+        llm_outputs[-1]["content"].split("```action_hint\n", 1)[1].removesuffix("\n```")
+    ) == expected_hint
+
+    assistant_messages = [
+        msg.content
+        for msg in agent._sessions[session.sessionId].agent.messages
+        if msg.role == "assistant"
+    ]
+    assert "```action_hint {" not in assistant_messages[-1]
+    assert json.loads(
+        assistant_messages[-1].split("```action_hint\n", 1)[1].removesuffix("\n```")
+    ) == expected_hint
 
 
 @pytest.mark.asyncio

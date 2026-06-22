@@ -8,17 +8,18 @@
   - [2. 基础使用](#2-基础使用)
     - [2.1 交互式命令](#21-交互式命令)
     - [2.2 已集成的 MCP 工具](#22-已集成的-mcp-工具)
-      - [Memory - 知识图谱记忆系统](#memory---知识图谱记忆系统)
-      - [Web Search - 网页搜索与浏览](#web-search---网页搜索与浏览)
+      - [Tavily - 网页搜索与内容抽取](#tavily---网页搜索与内容抽取)
+      - [Memory - MCP 知识图谱服务器](#memory---mcp-知识图谱服务器)
+      - [Playwright - 浏览器自动化](#playwright---浏览器自动化)
   - [3. 扩展能力](#3-扩展能力)
     - [3.1 添加自定义工具](#31-添加自定义工具)
       - [步骤](#步骤)
       - [示例](#示例)
     - [3.2 添加 MCP 工具](#32-添加-mcp-工具)
-    - [3.3 自定义存储](#33-自定义存储)
-    - [3.4 初始化 Claude Skills（推荐）](#34-初始化-claude-skills推荐)
-    - [3.5 添加新的Skill](#35-添加新的skill)
-    - [3.6 自定义系统提示词](#36-自定义系统提示词)
+    - [3.3 内置 Skills](#33-内置-skills)
+      - [officev3 推荐 Skills](#officev3-推荐-skills)
+    - [3.4 添加新的 Skill](#34-添加新的-skill)
+    - [3.5 自定义系统提示词](#35-自定义系统提示词)
       - [可定制内容包括：](#可定制内容包括)
   - [4. 故障排查](#4-故障排查)
     - [4.1 常见问题](#41-常见问题)
@@ -38,11 +39,12 @@
 box-agent/
 ├── box_agent/              # 核心源代码
 │   ├── agent.py             # 主 Agent 循环
-│   ├── llm.py               # LLM 客户端
+│   ├── llm/                 # Provider 客户端和 LLM 包装器
+│   ├── acp/                 # ACP 服务与宿主对接
 │   ├── cli.py               # 命令行接口
 │   ├── config.py            # 配置加载
 │   ├── tools/               # 工具实现（文件、Bash、MCP、技能等）
-│   └── skills/              # Claude 技能集（子模块）
+│   └── skills/              # 内置 Skills 与 manifest
 ├── tests/                   # 测试代码
 ├── docs/                    # 文档
 ├── workspace/               # 工作目录
@@ -60,50 +62,64 @@ box-agent/
 | `/exit`, `/quit`, `/q` | 退出 Agent 并显示会话统计信息                    |
 | `/help`                | 显示帮助信息和可用命令                           |
 | `/clear`               | 清除消息历史并开始新会话                         |
+| `/clear_all`           | 清除消息历史并关闭沙箱 kernel                    |
 | `/history`             | 显示当前会话的消息数量                           |
 | `/stats`               | 显示会话统计信息（步数、工具调用、使用的 Token） |
+| `/sandbox_status`      | 显示沙箱会话状态                                 |
+| `/log`                 | 显示日志目录或读取指定日志文件                   |
+| `/goal`                | 查看或管理当前工作区的持久目标                   |
+| `/memory review`       | 审阅可升级为核心记忆的候选条目                   |
+
+CLI 管理命令也可以脚本化使用：
+
+```bash
+box-agent --goal "完成发布检查" --task "运行验证"
+box-agent --goal "完成发布检查" --task "运行验证" --no-goal-autopilot
+box-agent goal status --json
+box-agent goal progress "已更新 ACP 文档"
+box-agent goal complete --evidence "uv run pytest tests/ -q passed"
+```
 
 ### 2.2 已集成的 MCP 工具
 
-本项目预先集成了以下 MCP (模型上下文协议) 工具，用以扩展 Agent 的能力：
+项目在 `box_agent/config/mcp-example.json` 中提供默认禁用的 MCP 示例配置。
+运行 `box-agent install-browser` 会安装 Chromium，并在用户配置中启用 Playwright 入口。
+其它 MCP server 需要在 `~/.box-agent/config/mcp.json` 中显式启用。
 
-#### Memory - 知识图谱记忆系统
+#### Tavily - 网页搜索与内容抽取
 
-**功能**：基于图数据库，为 Agent 提供长期记忆的存储与检索能力。
+**功能**：通过 Tavily MCP 提供网页搜索和内容抽取。
 
-**状态**：默认启用
+**状态**：默认禁用；需要在 MCP URL 中配置 Tavily API key。
 
-**配置**：无需 API Key，开箱即用
+#### Memory - MCP 知识图谱服务器
 
-**能力**：
+**功能**：可选的 Model Context Protocol memory server。
 
-- 跨会话存储并检索信息
-- 根据对话内容构建知识图谱
-- 对已存储的记忆进行语义搜索
+**状态**：默认禁用。Box-Agent 内置记忆工具与这个 MCP server 是两套能力，由 `enable_memory` 控制。
 
----
+#### Playwright - 浏览器自动化
 
-#### Web Search - 网页搜索与浏览
+**功能**：通过 `@playwright/mcp` 提供浏览器自动化。
 
-**功能**：提供三大强大工具：
-
-- `search` - 网页搜索
-- `parallel_search` - 并行执行多个搜索任务
-- `browse` - 智能网页浏览与内容提取
-
-**状态**：默认禁用，需要配置 API Key 后方可启用。
+**状态**：默认禁用。运行 `box-agent install-browser` 会安装 Chromium，并把用户 MCP 配置中的 `mcpServers.playwright.disabled` 改为 `false`。
 
 **配置示例**：
 
 ```json
 {
   "mcpServers": {
-    "web_search": {
-      "disabled": false,
-      "env": {
-        "JINA_API_KEY": "your-jina-api-key",
-        "SERPER_API_KEY": "your-serper-api-key"
-      }
+    "tavily": {
+      "description": "Tavily - Web search and content extraction",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_API_KEY",
+      "type": "streamable_http",
+      "disabled": false
+    },
+    "playwright": {
+      "description": "Playwright - Browser automation (Chromium)",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "disabled": false
     }
   }
 }
@@ -199,6 +215,8 @@ agent = Agent(
 )
 ```
 
+CLI `--task` 模式和 ACP 会话会对持久 goal 启用有边界的自动续跑。如果一轮自然结束但 goal 仍是 `active`，Box-Agent 会注入内部 continuation，直到模型调用 `goal_write complete`、调用 `goal_write block`、用户取消，达到 `goal_autopilot_max_turns` / `goal_autopilot_max_seconds` 配置预算，或连续 `goal_autopilot_no_progress_turns` 个自动续跑轮次没有记录到 goal 进展。
+
 ### 3.2 添加 MCP 工具
 
 编辑 `mcp.json` 文件，即可添加新的 MCP 服务器：
@@ -224,37 +242,53 @@ agent = Agent(
 }
 ```
 
-### 3.3 初始化 Claude Skills（推荐）
+### 3.3 内置 Skills
 
-本项目通过 Git Submodule 的方式集成了 Claude 官方技能库。首次克隆项目后，请执行以下命令来初始化技能库：
+内置 skills 已提交在 `box_agent/skills/` 下，并通过 `box_agent/skills/_manifest.json` 加载。
+正常开发不需要执行 git submodule 初始化。
 
-```bash
-# 初始化并拉取技能库子模块
-git submodule update --init --recursive
-```
-
-Skills 库提供了超过20种专业能力，能让 Agent 如同行业专家般处理复杂任务：
+当前 manifest 列出 30 个内置 skills，包括：
 
 - 📄 **文档处理**：轻松创建和编辑 PDF、DOCX、XLSX、PPTX 等格式的文档。
 - 🎨 **设计创作**：生成富有创意的艺术作品、海报和 GIF 动画。
 - 🧪 **开发与测试**：支持 Web 自动化测试 (Playwright) 和 MCP 服务器开发。
 - 🏢 **企业应用**：高效处理内部沟通、品牌指南应用和主题定制等任务。
 
-✨ **这是本项目的核心亮点之一。**
+如果内置 skills 发生变化，发布前需要重新生成并提交 manifest：
+
+```bash
+uv run python scripts/generate_skills_manifest.py
+```
+
+#### officev3 推荐 Skills
+
+有些投稿技能需要随 Box-Agent runtime 一起发布，让 officev3 显示成可一键安装的推荐卡片，但又不应该作为始终加载的内置技能启用。这类技能需要同时改 Box-Agent 和 officev3：
+
+1. 将技能目录放到 `box_agent/skills/<skill-slug>/`。`SKILL.md` frontmatter 需要包含完整的 `name`、`description`，推荐卡片需要署名时还要填写 `author`。
+2. 在 `scripts/generate_skills_manifest.py` 的 `EXCLUDED_SKILL_DIRS` 中加入这个顶层目录名。这样技能会继续随包存在于磁盘上，但不会进入内置 `_manifest.json` 白名单。
+3. 重新生成 manifest：
+
+   ```bash
+   uv run python scripts/generate_skills_manifest.py
+   ```
+
+   确认脚本输出 `info: excluding '<skill-slug>/SKILL.md'`，并确认 `box_agent/skills/_manifest.json` 中没有这个技能。
+4. 在 officev3 仓库的 `electron/main/skillManager.ts` 中，把推荐卡片加入 `DEFAULT_RECOMMENDED`。`sourcePath` 要和 `box_agent/skills/` 下的技能目录匹配，`installable` 设为 `true`，社区投稿推荐位使用 `featured` 分类。
+5. 重新构建或同步 officev3 使用的 Box-Agent runtime。推荐卡片只有在 runtime 里实际包含这个技能目录时才能安装成功；从 `_manifest.json` 排除只负责避免它被当作内置技能自动加载。
 
 **更多信息：**
 
 - [Claude Skills 官方文档](https://docs.claude.com/zh-CN/docs/agents-and-tools/agent-skills)
 - [Anthropic 博客：为真实世界装备智能体](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)
 
-### 3.5 添加新的Skill
+### 3.4 添加新的 Skill
 
 您可以按照以下步骤创建自定义 Skill：
 
 ```bash
-# 在 skills/ 目录下为您的新技能创建一个目录
-mkdir skills/my-custom-skill
-cd skills/my-custom-skill
+# 在用户 skills 目录下创建新技能
+mkdir -p ~/.box-agent/skills/my-custom-skill
+cd ~/.box-agent/skills/my-custom-skill
 
 # 创建技能描述文件 SKILL.md
 cat > SKILL.md << 'EOF'
@@ -288,7 +322,7 @@ EOF
 
 完成以上步骤后，Agent 将在下次启动时自动加载并识别这项新技能。
 
-### 3.6 自定义系统提示词
+### 3.5 自定义系统提示词
 
 系统提示词文件 (`system_prompt.md`) 定义了 Agent 的核心行为、能力边界和工作指南。您可以根据具体应用场景，对其进行深度定制。
 

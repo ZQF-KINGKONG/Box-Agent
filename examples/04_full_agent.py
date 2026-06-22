@@ -12,11 +12,16 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from box_agent import LLMClient
+from box_agent import LLMClient, LLMProvider
 from box_agent.agent import Agent
 from box_agent.config import Config
 from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
 from box_agent.tools.mcp_loader import load_mcp_tools_async
+
+
+def provider_from_config(config: Config) -> LLMProvider:
+    """Return the configured provider enum."""
+    return LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
 
 
 async def demo_full_agent():
@@ -26,10 +31,10 @@ async def demo_full_agent():
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("box_agent/config/config.yaml")
-    if not config_path.exists():
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
         print("❌ config.yaml not found. Please run:")
-        print("   cp box_agent/config/config-example.yaml box_agent/config/config.yaml")
+        print("   box-agent setup")
         return
 
     config = Config.from_yaml(config_path)
@@ -53,6 +58,7 @@ async def demo_full_agent():
         # Initialize LLM
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=provider_from_config(config),
             api_base=config.llm.api_base,
             model=config.llm.model,
         )
@@ -68,7 +74,8 @@ async def demo_full_agent():
 
         # Load MCP tools (if configured)
         try:
-            mcp_tools = await load_mcp_tools_async(config_path="box_agent/config/mcp.json")
+            mcp_config_path = Config.find_config_file(config.tools.mcp_config_path)
+            mcp_tools = await load_mcp_tools_async(config_path=str(mcp_config_path)) if mcp_config_path else []
             if mcp_tools:
                 tools.extend(mcp_tools)
                 print(f"✓ Loaded {len(mcp_tools)} MCP tools")
@@ -156,9 +163,10 @@ async def demo_interactive_mode():
     print("(In production, use `box-agent` for full interactive mode)")
 
     # Load config
-    config_path = Path("box_agent/config/config.yaml")
-    if not config_path.exists():
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
         print("❌ config.yaml not found")
+        print("   Run: box-agent setup")
         return
 
     config = Config.from_yaml(config_path)
@@ -172,6 +180,7 @@ async def demo_interactive_mode():
         system_prompt = "You are a helpful assistant with access to tools."
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=provider_from_config(config),
             api_base=config.llm.api_base,
             model=config.llm.model,
         )

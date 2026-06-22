@@ -120,6 +120,12 @@ class AgentConfig(BaseModel):
     # against a prompt like "spawn as many sub-agents as possible" exhausting
     # LLM rate limits / processes / memory.
     max_parallel_tools: int = 8
+    # Continue an active durable goal after a natural end_turn, bounded so a
+    # third-party outage or bad plan cannot loop forever.
+    goal_autopilot_enabled: bool = True
+    goal_autopilot_max_turns: int = 3
+    goal_autopilot_max_seconds: float = 14400.0
+    goal_autopilot_no_progress_turns: int = 2
     system_prompt_path: str = "system_prompt.md"
     analysis_prompt_path: str = "analysis_prompt.md"
     code_prompt_path: str = "code_prompt.md"
@@ -391,6 +397,10 @@ class Config(BaseModel):
             max_steps=data.get("max_steps", 200),
             workspace_dir=data.get("workspace_dir", "./workspace"),
             max_parallel_tools=data.get("max_parallel_tools", 8),
+            goal_autopilot_enabled=data.get("goal_autopilot_enabled", True),
+            goal_autopilot_max_turns=data.get("goal_autopilot_max_turns", 3),
+            goal_autopilot_max_seconds=data.get("goal_autopilot_max_seconds", 14400.0),
+            goal_autopilot_no_progress_turns=data.get("goal_autopilot_no_progress_turns", 2),
             system_prompt_path=data.get("system_prompt_path", "system_prompt.md"),
             analysis_prompt_path=data.get("analysis_prompt_path", "analysis_prompt.md"),
             code_prompt_path=data.get("code_prompt_path", "code_prompt.md"),

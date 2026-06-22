@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from box_agent.acp.action_hints import (
+    ActionHintStreamNormalizer,
     build_action_hints_prompt,
     is_memory_scarce,
     is_playwright_unavailable,
+    is_playwright_unavailable_from_env_context,
+    normalize_action_hint_blocks,
 )
 
 
@@ -142,6 +146,21 @@ def test_playwright_detected_via_args_when_named_differently(tmp_path: Path) -> 
     assert is_playwright_unavailable(p) is False
 
 
+def test_playwright_unavailable_from_env_context_when_available_false() -> None:
+    ctx = SimpleNamespace(browser_tools=SimpleNamespace(available=False))
+    assert is_playwright_unavailable_from_env_context(ctx) is True
+
+
+def test_playwright_available_from_env_context_when_available_true() -> None:
+    ctx = SimpleNamespace(browser_tools=SimpleNamespace(available=True))
+    assert is_playwright_unavailable_from_env_context(ctx) is False
+
+
+def test_playwright_env_context_absent_does_not_force_unavailable() -> None:
+    assert is_playwright_unavailable_from_env_context(None) is False
+    assert is_playwright_unavailable_from_env_context(SimpleNamespace()) is False
+
+
 # ── build_action_hints_prompt ───────────────────────────────────
 
 
@@ -167,3 +186,69 @@ def test_prompt_includes_both_scenarios() -> None:
     assert "browser-tools" in out
     assert "action_hint" in out
     assert "open_settings" in out
+
+
+def test_prompt_forbids_xml_action_hint_tags() -> None:
+    """Prompt must hard-forbid the <action_hint> XML wrapper the model
+    occasionally emits, which the frontend cannot reliably parse."""
+    out = build_action_hints_prompt(memory_scarce=True, playwright_unavailable=False)
+    assert "<action_hint>" in out  # mentioned only as a prohibited form
+    assert "禁止" in out
+    # The positive example must use the triple-backtick fence.
+    assert "```action_hint" in out
+
+
+def test_prompt_forbids_json_on_action_hint_fence_line() -> None:
+    out = build_action_hints_prompt(memory_scarce=True, playwright_unavailable=False)
+
+    assert "不要在同一行追加" in out
+    assert "JSON 必须从下一行开始" in out
+    assert "display_text" in out
+    assert "不要包含换行符" in out
+
+
+def test_normalize_action_hint_repairs_json_on_fence_line() -> None:
+    malformed = (
+        "```action_hint { "
+        '"action": "open_settings", '
+        '"params": {"tab": "onboarding"}, '
+        '"display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。\n" '
+        "} ```"
+    )
+
+    out = normalize_action_hint_blocks(malformed)
+
+    assert out.startswith("```action_hint\n")
+    assert "```action_hint {" not in out
+    payload = out.removeprefix("```action_hint\n").removesuffix("\n```")
+    data = json.loads(payload)
+    assert data == {
+        "action": "open_settings",
+        "params": {"tab": "onboarding"},
+        "display_text": "去个人记忆页完善偏好，我会更懂你的工作方式。",
+    }
+
+
+def test_action_hint_stream_normalizer_handles_split_fence_start() -> None:
+    normalizer = ActionHintStreamNormalizer()
+
+    chunks = []
+    chunks.extend(normalizer.push("好的。```action"))
+    chunks.extend(
+        normalizer.push(
+            '_hint { "action": "open_settings", '
+            '"params": {"tab": "browser-tools"}, '
+            '"display_text": "去启用浏览器工具" } ```'
+        )
+    )
+    chunks.extend(normalizer.finish())
+    out = "".join(chunks)
+
+    assert out.startswith("好的。```action_hint\n")
+    assert "```action_hint {" not in out
+    payload = out.split("```action_hint\n", 1)[1].removesuffix("\n```")
+    assert json.loads(payload) == {
+        "action": "open_settings",
+        "params": {"tab": "browser-tools"},
+        "display_text": "去启用浏览器工具",
+    }

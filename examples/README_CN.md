@@ -48,7 +48,7 @@ python examples/02_simple_agent.py
 - 任务完成的判断标准
 
 **前置要求**:
-- 已配置 `box_agent/config/config.yaml` 中的 API key
+- 已通过 `box-agent setup` 配置 API key（默认位置：`~/.box-agent/config/config.yaml`）
 
 ---
 
@@ -84,11 +84,12 @@ python examples/04_full_agent.py
 ### 1. 配置 API Key
 
 ```bash
-# 复制配置模板
-cp box_agent/config/config-example.yaml box_agent/config/config.yaml
+# 推荐：使用 CLI 同一套配置向导
+box-agent setup
 
-# 编辑配置文件，填入你的 API Key
-vim box_agent/config/config.yaml
+# 可选开发覆盖：
+# cp box_agent/config/config-example.yaml box_agent/config/config.yaml
+# vim box_agent/config/config.yaml
 ```
 
 ### 2. 运行第一个示例
@@ -106,8 +107,9 @@ python examples/02_simple_agent.py
 建议按照编号顺序学习：
 1. **01_basic_tools.py** - 理解工具
 2. **02_simple_agent.py** - 理解 Agent
-3. **03_session_notes.py** - 理解记忆管理
-4. **04_full_agent.py** - 理解完整系统
+3. **04_full_agent.py** - 理解完整系统
+4. **05_provider_selection.py** - 理解 provider 选择
+5. **06_tool_schema_demo.py** - 理解工具 schema
 
 ---
 
@@ -150,7 +152,7 @@ python examples/02_simple_agent.py
 ```
 ❌ API key not configured in config.yaml
 ```
-**解决**: 确保在 `box_agent/config/config.yaml` 中配置了有效的 API Key
+**解决**: 运行 `box-agent setup`，或提供开发覆盖文件 `box_agent/config/config.yaml`。
 
 ### 找不到 config.yaml
 ```
@@ -158,7 +160,7 @@ python examples/02_simple_agent.py
 ```
 **解决**:
 ```bash
-cp box_agent/config/config-example.yaml box_agent/config/config.yaml
+box-agent setup
 ```
 
 ### MCP 工具加载失败

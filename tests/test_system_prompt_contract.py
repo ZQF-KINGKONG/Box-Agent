@@ -20,6 +20,18 @@ def test_system_prompt_requires_authoritative_sources_for_current_facts():
     assert "不要用“公开资料不多”替代答案" in prompt
 
 
+def test_system_prompt_separates_source_content_from_search_clues():
+    prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
+
+    assert "只有成功读取该 URL/文件/原始材料正文" in prompt
+    assert "才可声称“已读到原文/完整内容”" in prompt
+    assert "`web_search` 搜索结果、标题、摘要、转载页或相近内容只能作为线索" in prompt
+    assert "不能替代原文" in prompt
+    assert "明确说明失败原因和证据缺口" in prompt
+    assert "禁止把它包装成对原文的总结、核对或引用" in prompt
+    assert "只有对应工具成功返回目标内容时，才可这样表述" in prompt
+
+
 def test_system_prompt_sub_agent_trigger_covers_separable_evidence_units():
     prompt = Path("box_agent/config/system_prompt.md").read_text(encoding="utf-8")
 

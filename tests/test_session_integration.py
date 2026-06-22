@@ -130,15 +130,72 @@ async def test_goal_write_tool_marks_active_goal_complete(mock_llm_client, temp_
     )
 
     agent.set_goal("Finish without asking the user for a slash command")
-    result = await agent.tools["goal_write"].execute(action="complete")
+    result = await agent.tools["goal_write"].execute(
+        action="complete",
+        evidence=["uv run pytest tests/test_session_integration.py -q passed"],
+        completed_by="model",
+    )
 
     assert result.success is True
     assert agent.goal is not None
     assert agent.goal.status == "complete"
+    assert agent.goal.evidence == ["uv run pytest tests/test_session_integration.py -q passed"]
+    assert agent.goal.completed_by == "model"
     assert result.raw_output is not None
     assert result.raw_output["type"] == "goal_snapshot"
     assert result.raw_output["action"] == "complete"
     assert result.raw_output["goal"]["status"] == "complete"
+    assert result.raw_output["goal"]["evidence"] == [
+        "uv run pytest tests/test_session_integration.py -q passed"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_goal_write_complete_requires_evidence(mock_llm_client, temp_workspace):
+    """Model-driven goal completion must include concrete evidence."""
+    agent = Agent(
+        llm_client=mock_llm_client,
+        system_prompt="System",
+        tools=[],
+        workspace_dir=temp_workspace,
+    )
+
+    agent.set_goal("Finish only with evidence")
+    result = await agent.tools["goal_write"].execute(action="complete")
+
+    assert result.success is False
+    assert "evidence" in (result.error or "")
+    assert agent.goal is not None
+    assert agent.goal.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_goal_write_records_progress_and_blocked_reason(mock_llm_client, temp_workspace):
+    agent = Agent(
+        llm_client=mock_llm_client,
+        system_prompt="System",
+        tools=[],
+        workspace_dir=temp_workspace,
+    )
+
+    agent.set_goal("Coordinate external provider validation")
+    progress = await agent.tools["goal_write"].execute(
+        action="progress",
+        progress=["Added CLI persistence"],
+        evidence=["tests/test_cli_config.py updated"],
+    )
+    blocked = await agent.tools["goal_write"].execute(
+        action="block",
+        blocked_reason="Waiting for provider test credentials",
+    )
+
+    assert progress.success is True
+    assert blocked.success is True
+    assert agent.goal is not None
+    assert agent.goal.status == "blocked"
+    assert agent.goal.progress == ["Added CLI persistence"]
+    assert agent.goal.evidence == ["tests/test_cli_config.py updated"]
+    assert agent.goal.blocked_reason == "Waiting for provider test credentials"
 
 
 def test_paused_goal_is_not_injected_into_user_turn(mock_llm_client, temp_workspace):

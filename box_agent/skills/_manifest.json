@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
-  "box_agent_version": "0.8.70",
-  "generated_at": "2026-06-16T09:56:33Z",
+  "box_agent_version": "0.8.71",
+  "generated_at": "2026-06-21T02:03:16Z",
   "skills": [
     {
       "name": "artifacts-builder",
@@ -46,6 +46,10 @@
     {
       "name": "memory-guide",
       "path": "memory-guide/SKILL.md"
+    },
+    {
+      "name": "obsidian",
+      "path": "obsidian/SKILL.md"
     },
     {
       "name": "research-synthesis",

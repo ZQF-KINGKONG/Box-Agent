@@ -60,7 +60,13 @@ from acp.schema import AgentCapabilities, Implementation, McpCapabilities
 
 from box_agent import __version__
 from box_agent.acp.stdio_compat import stdio_streams_largebuf
-from box_agent.agent import Agent
+from box_agent.agent import (
+    Agent,
+    goal_autopilot_prompt,
+    goal_autopilot_progress_signature,
+    goal_payload,
+    should_continue_goal_autopilot,
+)
 from box_agent.tools.setup import (
     add_workspace_tools,
     await_mcp_tools,
@@ -70,7 +76,7 @@ from box_agent.tools.setup import (
     register_mcp_tools,
 )
 from box_agent.config import Config
-from box_agent.core import OUTPUT_SUBDIR, run_agent_loop
+from box_agent.core import run_agent_loop
 from box_agent.events import (
     ArtifactEvent,
     ContentEvent,
@@ -92,11 +98,14 @@ from box_agent.events import (
 )
 from box_agent.llm import LLMClient
 from box_agent.llm.token_meter import get_token_meter, reset_token_meter, start_token_meter
-from box_agent.loop_guards import CompletionGate, artifact_signatures_for_globs
+from box_agent.loop_guards import CompletionGate, build_auto_completion_gate
 from box_agent.acp.action_hints import (
+    ActionHintStreamNormalizer,
     build_action_hints_prompt,
     is_memory_scarce,
     is_playwright_unavailable,
+    is_playwright_unavailable_from_env_context,
+    normalize_action_hint_blocks,
 )
 from box_agent.acp.env_context import EnvContext, build_env_context_prompt
 from box_agent.acp.project_context import build_project_startup_context_prompt
@@ -174,6 +183,58 @@ def _inject_item_id(item: Any) -> str | None:
     return item_id if isinstance(item_id, str) else None
 
 
+class _ActionHintNormalizingLLM:
+    """Normalize action_hint protocol drift before core/history see content."""
+
+    def __init__(self, wrapped: Any):
+        self._wrapped = wrapped
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wrapped, name)
+
+    async def generate_stream(self, *args: Any, **kwargs: Any):
+        normalizer = ActionHintStreamNormalizer()
+        text_template = None
+        async for event in self._wrapped.generate_stream(*args, **kwargs):
+            if getattr(event, "type", None) != "text":
+                for text in normalizer.finish():
+                    if text:
+                        yield _text_stream_event_like(event, text)
+                yield event
+                continue
+
+            text_template = event
+            for text in normalizer.push(event.delta or ""):
+                if text:
+                    yield event.model_copy(update={"delta": text})
+
+        if text_template is not None:
+            for text in normalizer.finish():
+                if text:
+                    yield text_template.model_copy(update={"delta": text})
+
+    async def generate(self, *args: Any, **kwargs: Any):
+        response = await self._wrapped.generate(*args, **kwargs)
+        content = normalize_action_hint_blocks(response.content)
+        if content == response.content:
+            return response
+        return response.model_copy(update={"content": content})
+
+
+def _text_stream_event_like(event: Any, text: str) -> Any:
+    return event.model_copy(
+        update={
+            "type": "text",
+            "delta": text,
+            "finish_reason": None,
+            "usage": None,
+            "tool_calls": None,
+            "provider_request_id": None,
+            "truncated_tool_calls": None,
+        }
+    )
+
+
 def _injected_marker(text: str, injection_id: str | None = None) -> str:
     if injection_id:
         return f"[Injected:{injection_id}] {text}"
@@ -209,15 +270,7 @@ def _normalize_artifact_mode(meta: Any) -> str:
 
 
 def _goal_payload(agent: Agent) -> dict[str, Any] | None:
-    goal = agent.goal
-    if goal is None:
-        return None
-    return {
-        "objective": goal.objective,
-        "status": goal.status,
-        "createdAt": goal.created_at,
-        "updatedAt": goal.updated_at,
-    }
+    return goal_payload(agent.goal)
 
 
 def _goal_request_from_meta(meta: Any) -> dict[str, Any] | None:
@@ -254,74 +307,6 @@ def _tool_result_raw_output(
         "text": result_text,
         "policy_decision": policy_decision,
     }
-
-
-_DELIVERABLE_INTENT_KEYWORDS: tuple[str, ...] = (
-    "做一份",
-    "做一个",
-    "制作",
-    "生成",
-    "创建",
-    "新建",
-    "导出",
-    "输出",
-    "保存",
-    "另出",
-    "write",
-    "create",
-    "generate",
-    "make",
-    "build",
-    "export",
-    "save",
-)
-
-_COMPLETION_GATE_PATTERNS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (
-        ("ppt", "pptx", "powerpoint", "演示文稿", "幻灯片", "slide deck", "slides"),
-        (f"{OUTPUT_SUBDIR}/**/*.pptx", f"{OUTPUT_SUBDIR}/**/*.ppt"),
-    ),
-    (
-        ("docx", "word", "简历", "文档"),
-        (f"{OUTPUT_SUBDIR}/**/*.docx",),
-    ),
-    (
-        ("xlsx", "excel", "spreadsheet", "表格"),
-        (f"{OUTPUT_SUBDIR}/**/*.xlsx", f"{OUTPUT_SUBDIR}/**/*.xls"),
-    ),
-    (
-        ("html", "网页", "报告", "md格式", "markdown"),
-        (
-            f"{OUTPUT_SUBDIR}/**/*.html",
-            f"{OUTPUT_SUBDIR}/**/*.htm",
-            f"{OUTPUT_SUBDIR}/**/*.md",
-            f"{OUTPUT_SUBDIR}/**/*.pdf",
-        ),
-    ),
-)
-
-
-def _build_auto_completion_gate(user_text: str, workspace_dir: str | Path) -> CompletionGate | None:
-    text = user_text.strip().lower()
-    if not text or not any(keyword in text for keyword in _DELIVERABLE_INTENT_KEYWORDS):
-        return None
-
-    patterns: list[str] = []
-    for keywords, artifact_patterns in _COMPLETION_GATE_PATTERNS:
-        if any(keyword in text for keyword in keywords):
-            patterns.extend(artifact_patterns)
-
-    if not patterns:
-        return None
-
-    deduped_patterns = tuple(dict.fromkeys(patterns))
-    workspace = str(workspace_dir)
-    return CompletionGate(
-        required_changed_artifact_globs=deduped_patterns,
-        baseline_artifact_signatures=artifact_signatures_for_globs(deduped_patterns, workspace),
-        max_continuations=3,
-        deadline_seconds=900.0,
-    )
 
 
 @dataclass
@@ -782,7 +767,7 @@ class BoxACPAgent:
             + "\n- Do not claim you can only access the workspace unless a tool call actually returns a permission denial."
         )
 
-    def _build_action_hints_prompt(self) -> str:
+    def _build_action_hints_prompt(self, env_context: EnvContext | None = None) -> str:
         """Detect onboarding / browser-tools scenarios and build the hint contract."""
         memory_scarce = is_memory_scarce(self._memory.read_core() if self._memory else None)
 
@@ -793,7 +778,7 @@ class BoxACPAgent:
         playwright_unavailable = is_playwright_unavailable(
             mcp_path,
             mcp_globally_enabled=self._config.tools.enable_mcp,
-        )
+        ) or is_playwright_unavailable_from_env_context(env_context)
 
         return build_action_hints_prompt(
             memory_scarce=memory_scarce,
@@ -845,7 +830,7 @@ class BoxACPAgent:
         )
         base_prompt = f"{base_prompt.rstrip()}\n\n{build_skill_runtime_prompt(runtime_context)}"
 
-        hints_prompt = self._build_action_hints_prompt()
+        hints_prompt = self._build_action_hints_prompt(env_context)
         if hints_prompt:
             base_prompt = f"{base_prompt.rstrip()}\n\n{hints_prompt}"
 
@@ -972,7 +957,7 @@ class BoxACPAgent:
         completion_gate = (
             None
             if state.artifact_mode == "project"
-            else _build_auto_completion_gate(user_text, state.agent.workspace_dir)
+            else build_auto_completion_gate(user_text, state.agent.workspace_dir)
         )
         if completion_gate is not None:
             log.info(
@@ -984,6 +969,14 @@ class BoxACPAgent:
         prompt_start = perf_counter()
         state.turn_active = True
         meter_token = start_token_meter()
+        auto_continuations = 0
+        auto_budget_exhausted = False
+        auto_no_progress_turns = 0
+        auto_no_progress_exhausted = False
+        auto_enabled = (
+            self._config.agent.goal_autopilot_enabled
+            and self._config.agent.goal_autopilot_max_turns > 0
+        )
         try:
             stop_reason = await self._run_turn(
                 state,
@@ -991,6 +984,47 @@ class BoxACPAgent:
                 force_plan_start=force_plan_start,
                 completion_gate=completion_gate,
             )
+            while auto_enabled and should_continue_goal_autopilot(state.agent, stop_reason):
+                elapsed = perf_counter() - prompt_start
+                if (
+                    auto_continuations >= self._config.agent.goal_autopilot_max_turns
+                    or elapsed >= self._config.agent.goal_autopilot_max_seconds
+                ):
+                    auto_budget_exhausted = True
+                    break
+                if state.cancelled or state.agent.goal is None:
+                    break
+                auto_continuations += 1
+                continuation = goal_autopilot_prompt(
+                    state.agent.goal,
+                    auto_continuations,
+                    self._config.agent.goal_autopilot_max_turns,
+                )
+                log.info(
+                    "goal_autopilot/continue",
+                    session_id=session_id,
+                    continuation=auto_continuations,
+                    max_continuations=self._config.agent.goal_autopilot_max_turns,
+                )
+                state.agent.add_user_message(continuation)
+                before_signature = goal_autopilot_progress_signature(state.agent.goal)
+                stop_reason = await self._run_turn(
+                    state,
+                    session_id,
+                    completion_gate=completion_gate,
+                )
+                after_signature = goal_autopilot_progress_signature(state.agent.goal)
+                if should_continue_goal_autopilot(state.agent, stop_reason):
+                    if after_signature == before_signature:
+                        auto_no_progress_turns += 1
+                    else:
+                        auto_no_progress_turns = 0
+                    if (
+                        self._config.agent.goal_autopilot_no_progress_turns > 0
+                        and auto_no_progress_turns >= self._config.agent.goal_autopilot_no_progress_turns
+                    ):
+                        auto_no_progress_exhausted = True
+                        break
         finally:
             state.turn_active = False
             turn_meter = get_token_meter()
@@ -1004,6 +1038,10 @@ class BoxACPAgent:
             stop_reason=stop_reason,
             duration_ms=duration_ms,
             total_tokens=turn_total_tokens,
+            goal_autopilot_continuations=auto_continuations,
+            goal_autopilot_budget_exhausted=auto_budget_exhausted,
+            goal_autopilot_no_progress_exhausted=auto_no_progress_exhausted,
+            goal_autopilot_no_progress_turns=auto_no_progress_turns,
         )
         # Map box-agent stop reasons to ACP-valid StopReason values.
         # ACP only accepts: "end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"
@@ -1015,13 +1053,29 @@ class BoxACPAgent:
             "error": "end_turn",
         }
         acp_stop_reason = _ACP_STOP_REASON_MAP.get(stop_reason, "end_turn")
+        if (
+            (auto_budget_exhausted or auto_no_progress_exhausted)
+            and state.agent.goal is not None
+            and state.agent.goal.status == "active"
+        ):
+            acp_stop_reason = "max_turn_requests"
+        response_meta: dict[str, Any] = {"usage": {"totalTokens": turn_total_tokens}}
+        if state.agent.goal is not None or auto_continuations > 0:
+            response_meta["goalAutopilot"] = {
+                "enabled": auto_enabled,
+                "continuations": auto_continuations,
+                "budgetExhausted": auto_budget_exhausted,
+                "noProgressExhausted": auto_no_progress_exhausted,
+                "noProgressTurns": auto_no_progress_turns,
+                "lastStopReason": stop_reason,
+            }
         # Per-turn token total (multi-step loop + summarization + in-turn
         # memory extraction) for host-side telemetry. Best-effort: fire-and-
         # forget memory extractions that finish after this point are not
         # reflected. See box_agent.llm.token_meter.
         return PromptResponse(
             stopReason=acp_stop_reason,
-            field_meta={"usage": {"totalTokens": turn_total_tokens}},
+            field_meta=response_meta,
         )
 
     async def cancel(self, params: CancelNotification) -> None:
@@ -1036,6 +1090,10 @@ class BoxACPAgent:
             action = "get"
         if action == "create":
             action = "set"
+        evidence = params.get("evidence")
+        progress = params.get("progress")
+        blocked_reason = params.get("blocked_reason") or params.get("blockedReason")
+        completed_by = params.get("completed_by") or params.get("completedBy")
 
         if action == "get":
             return {"ok": True, "goal": _goal_payload(agent)}
@@ -1045,7 +1103,13 @@ class BoxACPAgent:
             if not isinstance(objective, str) or not objective.strip():
                 return {"error": "empty_objective"}
             try:
-                agent.set_goal(objective)
+                agent.set_goal(
+                    objective,
+                    evidence=evidence,
+                    progress=progress,
+                    blocked_reason=blocked_reason,
+                    completed_by=completed_by,
+                )
             except ValueError:
                 return {"error": "empty_objective"}
 
@@ -1054,7 +1118,12 @@ class BoxACPAgent:
             if status == "paused":
                 agent.pause_goal()
             elif status == "complete":
-                agent.complete_goal()
+                agent.complete_goal(evidence=evidence, progress=progress, completed_by=completed_by)
+            elif status == "blocked":
+                reason = blocked_reason if isinstance(blocked_reason, str) else ""
+                if not reason.strip():
+                    return {"error": "empty_blocked_reason"}
+                agent.block_goal(reason, evidence=evidence, progress=progress)
             elif status not in ("", "active"):
                 return {"error": f"invalid_status: {status}"}
             return {"ok": True, "goal": _goal_payload(agent)}
@@ -1070,7 +1139,24 @@ class BoxACPAgent:
             return {"ok": True, "goal": _goal_payload(agent)}
 
         if action == "complete":
-            if agent.complete_goal() is None:
+            if agent.complete_goal(evidence=evidence, progress=progress, completed_by=completed_by) is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "progress":
+            if agent.update_goal_progress(progress, evidence=evidence) is None:
+                return {"error": "goal_not_found"}
+            return {"ok": True, "goal": _goal_payload(agent)}
+
+        if action == "block":
+            reason = blocked_reason if isinstance(blocked_reason, str) else ""
+            if not reason.strip():
+                return {"error": "empty_blocked_reason"}
+            try:
+                goal = agent.block_goal(reason, evidence=evidence, progress=progress)
+            except ValueError:
+                return {"error": "empty_blocked_reason"}
+            if goal is None:
                 return {"error": "goal_not_found"}
             return {"ok": True, "goal": _goal_payload(agent)}
 
@@ -1502,8 +1588,171 @@ class BoxACPAgent:
                 except Exception as exc:
                     log.exception("expert_team/progress_send_error", exc, session_id=session_id)
 
+        skill_name_by_tool_call_id: dict[str, str] = {}
+        used_skill_names: list[str] = []
+        used_tool_counts: dict[str, int] = {}
+        used_mcp_tool_counts: dict[tuple[str, str], int] = {}
+        turn_token_usage = {
+            "promptTokens": 0,
+            "completionTokens": 0,
+            "totalTokens": 0,
+            "calls": 0,
+        }
+        usage_tool_call_id = f"turn-usage-{uuid4().hex[:8]}"
+
+        def _get_skill_name_from_args(args: Any) -> str | None:
+            if not isinstance(args, dict):
+                return None
+            value = args.get("skill_name") or args.get("skillName") or args.get("name")
+            if not isinstance(value, str):
+                return None
+            value = value.strip()
+            return value or None
+
+        def _record_skill_usage(skill_name: str | None) -> dict[str, Any] | None:
+            if not skill_name:
+                return None
+            if skill_name not in used_skill_names:
+                used_skill_names.append(skill_name)
+            return {
+                "type": "skills_usage",
+                "skills": list(used_skill_names),
+                "current": skill_name,
+            }
+
+        def _as_int(mapping: dict[str, Any], *keys: str) -> int:
+            for key in keys:
+                value = mapping.get(key)
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, float):
+                    return int(value)
+            return 0
+
+        def _record_token_usage(usage: Any) -> bool:
+            if not isinstance(usage, dict):
+                return False
+            prompt_tokens = _as_int(usage, "prompt_tokens", "promptTokens")
+            completion_tokens = _as_int(usage, "completion_tokens", "completionTokens")
+            total_tokens = _as_int(usage, "total_tokens", "totalTokens")
+            if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+                total_tokens = prompt_tokens + completion_tokens
+            if prompt_tokens <= 0 and completion_tokens <= 0 and total_tokens <= 0:
+                return False
+            turn_token_usage["promptTokens"] += prompt_tokens
+            turn_token_usage["completionTokens"] += completion_tokens
+            turn_token_usage["totalTokens"] += total_tokens
+            turn_token_usage["calls"] += 1
+            return True
+
+        def _mcp_tool_info(tool_name: str) -> tuple[str, str] | None:
+            tool = agent.tools.get(tool_name)
+            server_name = ""
+            mcp_tool_name = tool_name
+            if tool is not None:
+                raw_server = getattr(tool, "server_name", None) or getattr(tool, "_server_name", None)
+                raw_tool_name = getattr(tool, "tool_name", None) or getattr(tool, "_mcp_tool_name", None)
+                if isinstance(raw_server, str):
+                    server_name = raw_server.strip()
+                if isinstance(raw_tool_name, str) and raw_tool_name.strip():
+                    mcp_tool_name = raw_tool_name.strip()
+
+            if not server_name and tool_name.startswith("mcp__"):
+                parts = tool_name.split("__", 2)
+                if len(parts) == 3 and parts[1] and parts[2]:
+                    server_name = parts[1]
+                    mcp_tool_name = parts[2]
+
+            if not server_name:
+                return None
+            return server_name, mcp_tool_name
+
+        def _record_tool_usage(tool_name: str, *, user_visible: bool) -> dict[str, Any] | None:
+            if not user_visible or not tool_name or tool_name == "get_skill":
+                return None
+            mcp_info = _mcp_tool_info(tool_name)
+            if mcp_info is not None:
+                used_mcp_tool_counts[mcp_info] = used_mcp_tool_counts.get(mcp_info, 0) + 1
+                server_name, mcp_tool_name = mcp_info
+                return {
+                    "type": "mcp",
+                    "name": f"{server_name}.{mcp_tool_name}",
+                    "server": server_name,
+                    "tool": mcp_tool_name,
+                }
+
+            used_tool_counts[tool_name] = used_tool_counts.get(tool_name, 0) + 1
+            return {
+                "type": "tool",
+                "name": tool_name,
+            }
+
+        def _turn_usage_payload(current: dict[str, Any] | None = None) -> dict[str, Any]:
+            meter = get_token_meter()
+            token_usage = (
+                {
+                    "promptTokens": meter.prompt_tokens,
+                    "completionTokens": meter.completion_tokens,
+                    "totalTokens": meter.total_tokens,
+                    "calls": meter.calls,
+                }
+                if meter is not None and meter.total_tokens > 0
+                else dict(turn_token_usage)
+            )
+            payload: dict[str, Any] = {
+                "type": "turn_usage",
+                "version": 1,
+                "skills": list(used_skill_names),
+                "tools": [
+                    {"name": name, "count": count}
+                    for name, count in used_tool_counts.items()
+                ],
+                "mcp": [
+                    {
+                        "server": server_name,
+                        "tool": tool_name,
+                        "name": f"{server_name}.{tool_name}",
+                        "count": count,
+                    }
+                    for (server_name, tool_name), count in used_mcp_tool_counts.items()
+                ],
+                "tokenUsage": token_usage,
+            }
+            if current:
+                payload["current"] = current
+            return payload
+
+        async def _send_turn_usage(current: dict[str, Any] | None = None) -> None:
+            payload = _turn_usage_payload(current)
+            log.debug(
+                "turn/usage",
+                session_id=session_id,
+                payload=payload,
+            )
+            await self._send(
+                session_id,
+                update_tool_call(usage_tool_call_id, raw_output=payload),
+            )
+
+        async def _send_skill_usage(
+            tool_call_id: str,
+            payload: dict[str, Any],
+        ) -> None:
+            log.debug(
+                "skills/usage",
+                session_id=session_id,
+                tool_call_id=tool_call_id,
+                payload=payload,
+            )
+            await self._send(
+                session_id,
+                update_tool_call(tool_call_id, raw_output=payload),
+            )
+
+        llm = _ActionHintNormalizingLLM(agent.llm)
+
         async for event in run_agent_loop(
-            llm=agent.llm,
+            llm=llm,
             messages=agent.messages,
             tools=agent.tools,
             max_steps=agent.max_steps,
@@ -1618,6 +1867,8 @@ class BoxACPAgent:
                             session_id,
                             update_tool_call(f"llm-output-{s}", raw_output=payload),
                         )
+                        if _record_token_usage(usage):
+                            await _send_turn_usage()
 
                     case ToolCallStartEvent(tool_call_id=tid, tool_name=name, arguments=args, user_visible=user_visible):
                         log.info(
@@ -1628,6 +1879,13 @@ class BoxACPAgent:
                             arguments=args,
                             user_visible=user_visible,
                         )
+                        if name == "get_skill":
+                            skill_name = _get_skill_name_from_args(args)
+                            if skill_name:
+                                skill_name_by_tool_call_id[tid] = skill_name
+                        tool_usage_current = _record_tool_usage(name, user_visible=user_visible)
+                        if tool_usage_current:
+                            await _send_turn_usage(tool_usage_current)
                         if not user_visible:
                             continue
                         if name == "sub_agent" and isinstance(args, dict):
@@ -1657,7 +1915,17 @@ class BoxACPAgent:
                             log.info("tool/end", session_id=session_id, tool_call_id=tid, tool_name=tname, result=text, user_visible=user_visible)
                         else:
                             log.warn("tool/fail", session_id=session_id, tool_call_id=tid, tool_name=tname, error=err, user_visible=user_visible)
+                        skill_usage_payload = (
+                            _record_skill_usage(skill_name_by_tool_call_id.get(tid))
+                            if tname == "get_skill" and ok
+                            else None
+                        )
                         if not user_visible:
+                            if skill_usage_payload:
+                                await _send_skill_usage(tid, skill_usage_payload)
+                                await _send_turn_usage(
+                                    {"type": "skill", "name": skill_usage_payload["current"]}
+                                )
                             continue
                         status = "completed" if ok else "failed"
                         prefix = "[OK]" if ok else "[ERROR]"
@@ -1667,6 +1935,11 @@ class BoxACPAgent:
                             session_id,
                             update_tool_call(tid, status=status, content=[tool_content(text_block(result_text))], raw_output=output),
                         )
+                        if skill_usage_payload:
+                            await _send_skill_usage(tid, skill_usage_payload)
+                            await _send_turn_usage(
+                                {"type": "skill", "name": skill_usage_payload["current"]}
+                            )
 
                     case ArtifactEvent() as art:
                         log.info(
@@ -1722,9 +1995,42 @@ class BoxACPAgent:
 
                     case DoneEvent(stop_reason=reason):
                         log.debug("done", session_id=session_id, stop_reason=reason.value)
+                        await _send_turn_usage()
                         return reason.value
 
                     case SubAgentEvent(parent_tool_call_id=tid, task_preview=preview, event=inner, sub_agent_id=sub_agent_id, title=sub_title):
+                        if (
+                            isinstance(inner, ToolCallStartEvent)
+                            and inner.tool_name == "get_skill"
+                        ):
+                            skill_name = _get_skill_name_from_args(inner.arguments)
+                            if skill_name:
+                                skill_name_by_tool_call_id[inner.tool_call_id] = skill_name
+                        if isinstance(inner, ToolCallStartEvent):
+                            tool_usage_current = _record_tool_usage(
+                                inner.tool_name,
+                                user_visible=inner.user_visible,
+                            )
+                            if tool_usage_current:
+                                await _send_turn_usage(tool_usage_current)
+
+                        if (
+                            isinstance(inner, ToolCallResultEvent)
+                            and inner.tool_name == "get_skill"
+                            and inner.success
+                        ):
+                            skill_usage_payload = _record_skill_usage(
+                                skill_name_by_tool_call_id.get(inner.tool_call_id)
+                            )
+                            if skill_usage_payload:
+                                await _send_skill_usage(tid, skill_usage_payload)
+                                await _send_turn_usage(
+                                    {"type": "skill", "name": skill_usage_payload["current"]}
+                                )
+
+                        if isinstance(inner, LLMOutputEvent) and _record_token_usage(inner.usage):
+                            await _send_turn_usage()
+
                         if getattr(inner, "user_visible", True) is False:
                             continue
                         if isinstance(inner, WebSearchEvent):

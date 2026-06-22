@@ -8,17 +8,18 @@
   - [2. Basic Usage](#2-basic-usage)
     - [2.1 Interactive Commands](#21-interactive-commands)
     - [2.2 Integrated MCP Tools](#22-integrated-mcp-tools)
-      - [Memory - Knowledge Graph Memory System](#memory---knowledge-graph-memory-system)
-      - [Web Search - Web Search and Browse](#web-search---web-search-and-browse)
+      - [Tavily - Web Search and Extraction](#tavily---web-search-and-extraction)
+      - [Memory - MCP Knowledge Graph Server](#memory---mcp-knowledge-graph-server)
+      - [Playwright - Browser Automation](#playwright---browser-automation)
   - [3. Extended Abilities](#3-extended-abilities)
     - [3.1 Adding Custom Tools](#31-adding-custom-tools)
       - [Steps](#steps)
       - [Example](#example)
     - [3.2 Adding MCP Tools](#32-adding-mcp-tools)
-    - [3.3 Customizing Note Storage](#33-customizing-note-storage)
-    - [3.4 Initialize Claude Skills (Recommended)](#34-initialize-claude-skills-recommended)
-    - [3.5 Adding a New Skill](#35-adding-a-new-skill)
-    - [3.6 Customizing System Prompt](#36-customizing-system-prompt)
+    - [3.3 Built-in Skills](#33-built-in-skills)
+      - [Recommended Skills for officev3](#recommended-skills-for-officev3)
+    - [3.4 Adding a New Skill](#34-adding-a-new-skill)
+    - [3.5 Customizing System Prompt](#35-customizing-system-prompt)
       - [What You Can Customize](#what-you-can-customize)
   - [4. Troubleshooting](#4-troubleshooting)
     - [4.1 Common Issues](#41-common-issues)
@@ -38,11 +39,12 @@
 box-agent/
 ├── box_agent/              # Core source code
 │   ├── agent.py             # Main agent loop
-│   ├── llm.py               # LLM client
+│   ├── llm/                 # Provider clients and LLM wrapper
+│   ├── acp/                 # ACP server and host integration
 │   ├── cli.py               # Command-line interface
 │   ├── config.py            # Configuration loading
 │   ├── tools/               # Tool implementations (file, bash, MCP, skills, etc.)
-│   └── skills/              # Claude Skills (submodule)
+│   └── skills/              # Built-in Skills and manifest
 ├── tests/                   # Test code
 ├── docs/                    # Documentation
 ├── workspace/               # Working directory
@@ -60,50 +62,72 @@ When running the agent in interactive mode (`box-agent`), the following commands
 | `/exit`, `/quit`, `/q` | Exit the agent and display session statistics               |
 | `/help`                | Display help information and available commands             |
 | `/clear`               | Clear message history and start a new session               |
+| `/clear_all`           | Clear message history and shut down the sandbox kernel      |
 | `/history`             | Show the current session message count                      |
 | `/stats`               | Display session statistics (steps, tool calls, tokens used) |
+| `/sandbox_status`      | Show sandbox session status                                 |
+| `/log`                 | Show log directory or read a specific log file              |
+| `/goal`                | Show or manage the durable session goal                     |
+| `/memory review`       | Review memory promotion candidates                          |
+
+CLI management commands are also scriptable:
+
+```bash
+box-agent config --get model
+box-agent config --set max_steps 300
+box-agent config --json
+box-agent doctor --json
+box-agent --task "summarize README.md" --json
+box-agent --task "create a PPT" --force-plan-start
+box-agent --task "create a PPT" --no-completion-gate
+box-agent --goal "Finish release checklist" --task "run verification"
+box-agent --goal "Finish release checklist" --task "run verification" --no-goal-autopilot
+box-agent goal status --json
+box-agent goal progress "updated ACP docs"
+box-agent goal complete --evidence "uv run pytest tests/ -q passed"
+box-agent --deep-think --task "review this repository"
+```
 
 ### 2.2 Integrated MCP Tools
 
-This project comes with pre-configured MCP (Model Context Protocol) tools that extend the agent's capabilities:
+This project ships a disabled-by-default MCP example configuration at `box_agent/config/mcp-example.json`.
+Run `box-agent install-browser` to install Chromium and enable the Playwright entry in the user config.
+Other MCP servers must be enabled explicitly in `~/.box-agent/config/mcp.json`.
 
-#### Memory - Knowledge Graph Memory System
+#### Tavily - Web Search and Extraction
 
-**Function**: Provides long-term memory storage and retrieval based on graph database
+**Function**: Web search and content extraction via Tavily MCP.
 
-**Status**: Enabled by default (`disabled: false`)
+**Status**: Disabled by default; requires a Tavily API key in the MCP URL.
 
-**Configuration**: No API Key required, works out of the box
+#### Memory - MCP Knowledge Graph Server
 
-**Capabilities**:
+**Function**: Optional Model Context Protocol memory server.
 
-- Store and retrieve information across sessions
-- Build knowledge graphs from conversations
-- Semantic search through stored memories
+**Status**: Disabled by default. Box-Agent's built-in memory tools are separate from this MCP server and are controlled by `enable_memory`.
 
----
+#### Playwright - Browser Automation
 
-#### Web Search - Web Search and Browse
+**Function**: Browser automation through `@playwright/mcp`.
 
-**Function**: Provides three powerful tools:
-
-- `search` - Web search capability
-- `parallel_search` - Execute multiple searches simultaneously
-- `browse` - Intelligent web browsing and content extraction
-
-**Status**: Disabled by default, needs configuration to enable
+**Status**: Disabled by default. Run `box-agent install-browser` to install Chromium and flip `mcpServers.playwright.disabled` to `false` in the user MCP config.
 
 **Configuration Example**
 
 ```json
 {
   "mcpServers": {
-    "web_search": {
-      "disabled": false,
-      "env": {
-        "JINA_API_KEY": "your-jina-api-key",
-        "SERPER_API_KEY": "your-serper-api-key"
-      }
+    "tavily": {
+      "description": "Tavily - Web search and content extraction",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=YOUR_API_KEY",
+      "type": "streamable_http",
+      "disabled": false
+    },
+    "playwright": {
+      "description": "Playwright - Browser automation (Chromium)",
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "disabled": false
     }
   }
 }
@@ -199,6 +223,8 @@ agent = Agent(
 )
 ```
 
+Durable goals use bounded autopilot in CLI `--task` mode and ACP sessions. If a turn ends while the goal is still `active`, Box-Agent injects an internal continuation until the model calls `goal_write complete`, calls `goal_write block`, the user cancels, the `goal_autopilot_max_turns` / `goal_autopilot_max_seconds` config budget is reached, or `goal_autopilot_no_progress_turns` consecutive automatic continuations make no recorded goal progress.
+
 ### 3.2 Adding MCP Tools
 
 Edit `mcp.json` to add a new MCP Server:
@@ -224,37 +250,66 @@ Edit `mcp.json` to add a new MCP Server:
 }
 ```
 
-### 3.3 Initialize Claude Skills (Recommended)
+### 3.3 Built-in Skills
 
-This project integrates Claude's official skills repository via git submodule. Initialize it after first clone:
+Built-in skills are committed under `box_agent/skills/` and loaded through `box_agent/skills/_manifest.json`.
+No git submodule setup is required for normal development.
 
-```bash
-# Initialize submodule
-git submodule update --init --recursive
-```
-
-Skills provide 20+ professional capabilities, making the Agent work like a professional:
+The current manifest lists 30 built-in skills, including:
 
 - 📄 **Document Processing**: Create and edit PDF, DOCX, XLSX, PPTX
 - 🎨 **Design Creation**: Generate artwork, posters, GIF animations
 - 🧪 **Development & Testing**: Web automation testing (Playwright), MCP server development
 - 🏢 **Enterprise Applications**: Internal communication, brand guidelines, theme customization
 
-✨ **This is one of the core highlights of this project.** For details, see the "Configure Skills" section below.
+Before release, regenerate and commit the manifest if built-in skills change:
+
+```bash
+uv run python scripts/generate_skills_manifest.py
+```
+
+#### Recommended Skills for officev3
+
+Some submitted skills should ship inside the Box-Agent runtime so officev3 can
+show them as installable recommendation cards, but they should not load as
+always-on builtin skills. Add those skills through both repositories:
+
+1. Put the skill directory under `box_agent/skills/<skill-slug>/`. Keep
+   `SKILL.md` frontmatter complete, including `name`, `description`, and
+   `author` when the card should show attribution.
+2. Add the top-level directory name to `EXCLUDED_SKILL_DIRS` in
+   `scripts/generate_skills_manifest.py`. This leaves the skill on disk for
+   packaging, while keeping it out of the builtin `_manifest.json` whitelist.
+3. Regenerate the manifest:
+
+   ```bash
+   uv run python scripts/generate_skills_manifest.py
+   ```
+
+   Verify the script logs `info: excluding '<skill-slug>/SKILL.md'` and that
+   `box_agent/skills/_manifest.json` does not list the skill.
+4. In the officev3 repository, add the recommendation card to
+   `electron/main/skillManager.ts` in `DEFAULT_RECOMMENDED`. Use `sourcePath`
+   matching the skill directory under `box_agent/skills/`, set
+   `installable: true`, and use category `featured` for community
+   recommendations.
+5. Rebuild or sync the Box-Agent runtime used by officev3. The recommendation
+   card can only install successfully when the runtime contains the physical
+   skill directory; the manifest exclusion only controls builtin loading.
 
 **More information:**
 
 - [Claude Skills Official Documentation](https://docs.claude.com/zh-CN/docs/agents-and-tools/agent-skills)
 - [Anthropic Blog: Equipping agents for the real world](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)
 
-### 3.5 Adding a New Skill
+### 3.4 Adding a New Skill
 
 Create a custom Skill:
 
 ```bash
-# Create a new skill directory under skills/
-mkdir skills/my-custom-skill
-cd skills/my-custom-skill
+# Create a user skill directory
+mkdir -p ~/.box-agent/skills/my-custom-skill
+cd ~/.box-agent/skills/my-custom-skill
 
 # Create the SKILL.md file
 cat > SKILL.md << 'EOF'
@@ -287,7 +342,7 @@ A: Answer 1
 
 The new Skill will be automatically loaded and recognized by the Agent.
 
-### 3.6 Customizing System Prompt
+### 3.5 Customizing System Prompt
 
 The system prompt (`system_prompt.md`) defines the Agent's behavior, capabilities, and working guidelines. You can customize it to tailor the Agent for specific use cases.
 

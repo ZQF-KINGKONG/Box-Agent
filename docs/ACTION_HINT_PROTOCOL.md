@@ -1,6 +1,6 @@
 # Action Hint 协议对接文档
 
-> 适用版本：Box-Agent ≥ 0.8.26（当前未发版，待确认版本号）
+> 适用版本：Box-Agent ≥ 0.8.26
 > 仅 ACP 通道生效；CLI 不会输出此协议。
 
 ## 1. 背景与目标
@@ -10,7 +10,7 @@
 | 场景 | 触发条件 | 引导目标 |
 |---|---|---|
 | 用户问候 / 自我介绍 / "你是谁" | `MEMORY.md` 内容稀缺（< 30 字符或没有姓名标识） | 打开 `onboarding` tab |
-| 用户提出浏览器/抓取/Playwright 需求 | `mcp.json` 里没有 playwright，或被 `disabled`，或全局 `enable_mcp=false` | 打开 `browser-tools` tab |
+| 用户提出浏览器/抓取/Playwright 需求 | `mcp.json` 里没有 playwright，或被 `disabled`，或全局 `enable_mcp=false` | 打开 `browser-tools` tab，优先启用 Playwright 基础浏览器工具 |
 
 为此约定了一种由模型直接产出、前端解析的 **结构化 markdown 围栏块**，无需扩展 ACP 协议字段。
 
@@ -47,7 +47,7 @@
 | `tab` | 含义 | 后端注入条件 |
 |---|---|---|
 | `onboarding` | 个人记忆配置页 | `MEMORY.md` 缺失/为空，或 `strip()` 后 < 30 字符，或全文（lower 后）不包含 `name` / `姓名` / `我叫` / `我是` / `叫我` |
-| `browser-tools` | 浏览器工具配置页 | `tools.enable_mcp = false`，或 `mcp.json` 缺失/JSON 损坏，或不包含 playwright 入口，或 playwright 入口 `disabled = true` |
+| `browser-tools` | 浏览器工具配置页 | `tools.enable_mcp = false`，或 `mcp.json` 缺失/JSON 损坏，或不包含 playwright 入口，或 playwright 入口 `disabled = true`；真实浏览器连接器不替代这个基础能力 |
 
 > **重要：** 后端只在条件命中时把对应规则写进 system prompt。条件不命中时，模型连"还有这个 tab 可以用"都不知道，因此**不会**误输出。
 
@@ -137,7 +137,7 @@ function extractActionHints(text) {
 
 - 纯函数检测层：`box_agent/acp/action_hints.py`
 - 注入挂载点：`box_agent/acp/__init__.py:_build_session_prompt → _build_action_hints_prompt`
-- 单元测试：`tests/test_action_hints.py`（18 用例）
+- 单元测试：`tests/test_action_hints.py`
 
 ---
 
@@ -170,7 +170,7 @@ function extractActionHints(text) {
 
 **模型回复：**
 
-> 我目前还没有可用的浏览器工具，无法直接访问网页。你可以启用浏览器工具后再试。
+> 我目前还没有可用的 Playwright 浏览器工具，无法直接访问普通网页。你可以先启用 Playwright 后再试；真实浏览器连接器适合读取当前页、登录态页面或内网页。
 >
 > ```action_hint
 > {"action":"open_settings","params":{"tab":"browser-tools"},"display_text":"点击启用浏览器工具"}
@@ -181,6 +181,6 @@ function extractActionHints(text) {
 ## 7. 已知局限
 
 1. **依赖模型遵守 prompt：** 检测条件命中只是给模型"许可"，模型自行决定是否输出。极小概率会漏出。后续可考虑事后正则补齐，目前不做。
-2. **MCP 运行时加载失败不会触发 hint：** 当前只检测 `mcp.json` 静态配置和 `enable_mcp` 开关，不感知运行时 MCP 启动失败。如果 playwright 进程崩了但配置写着 enabled，hint 不会触发。修复成本与收益评估后**故意未做**——前端可以在 ACP 工具调用失败时另行引导。
+2. **运行时状态只接入 Playwright 可用性：** 静态检测仍读 `mcp.json` 和 `enable_mcp`；如果 ACP 宿主传入 `env_context.browser_tools.available=false`，会补充触发 browser-tools hint。没有 env_context 的 CLI 场景仍不感知 Playwright 进程启动失败。
 3. **CLI 不支持：** CLI 没有设置弹窗，不注入此 prompt 段。
 4. **白名单仅含 2 个 tab：** 新增 tab 需要后端 `action_hints.py` 加规则 + 前端白名单同步更新。

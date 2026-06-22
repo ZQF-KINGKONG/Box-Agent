@@ -10,10 +10,15 @@ import asyncio
 import tempfile
 from pathlib import Path
 
-from box_agent import LLMClient
+from box_agent import LLMClient, LLMProvider
 from box_agent.agent import Agent
 from box_agent.config import Config
 from box_agent.tools import BashTool, EditTool, ReadTool, WriteTool
+
+
+def provider_from_config(config: Config) -> LLMProvider:
+    """Return the configured provider enum."""
+    return LLMProvider.ANTHROPIC if config.llm.provider.lower() == "anthropic" else LLMProvider.OPENAI
 
 
 async def demo_file_creation():
@@ -23,10 +28,10 @@ async def demo_file_creation():
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("box_agent/config/config.yaml")
-    if not config_path.exists():
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
         print("❌ config.yaml not found. Please set up your API key first.")
-        print("   Run: cp box_agent/config/config-example.yaml box_agent/config/config.yaml")
+        print("   Run: box-agent setup")
         return
 
     config = Config.from_yaml(config_path)
@@ -50,6 +55,7 @@ async def demo_file_creation():
         # Initialize LLM client
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=provider_from_config(config),
             api_base=config.llm.api_base,
             model=config.llm.model,
         )
@@ -119,9 +125,10 @@ async def demo_bash_task():
     print("=" * 60)
 
     # Load configuration
-    config_path = Path("box_agent/config/config.yaml")
-    if not config_path.exists():
+    config_path = Config.find_config_file("config.yaml")
+    if not config_path:
         print("❌ config.yaml not found")
+        print("   Run: box-agent setup")
         return
 
     config = Config.from_yaml(config_path)
@@ -143,6 +150,7 @@ async def demo_bash_task():
         # Initialize LLM
         llm_client = LLMClient(
             api_key=config.llm.api_key,
+            provider=provider_from_config(config),
             api_base=config.llm.api_base,
             model=config.llm.model,
         )
